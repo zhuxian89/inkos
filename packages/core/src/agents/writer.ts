@@ -47,7 +47,7 @@ export class WriterAgent extends BaseAgent {
     const [
       storyBible, volumeOutline, styleGuide, currentState, ledger, hooks,
       chapterSummaries, subplotBoard, emotionalArcs, characterMatrix, styleProfileRaw,
-      parentCanon,
+      parentCanon, authorBrief,
     ] = await Promise.all([
         this.readFileOrDefault(join(bookDir, "story/story_bible.md")),
         this.readFileOrDefault(join(bookDir, "story/volume_outline.md")),
@@ -61,6 +61,7 @@ export class WriterAgent extends BaseAgent {
         this.readFileOrDefault(join(bookDir, "story/character_matrix.md")),
         this.readFileOrDefault(join(bookDir, "story/style_profile.json")),
         this.readFileOrDefault(join(bookDir, "story/parent_canon.md")),
+        this.readFileOrDefault(join(bookDir, "story/author_brief.md")),
       ]);
 
     const recentChapters = await this.loadRecentChapters(bookDir, chapterNumber);
@@ -100,6 +101,7 @@ export class WriterAgent extends BaseAgent {
       characterMatrix,
       dialogueFingerprints,
       relevantSummaries,
+      authorBrief: authorBrief !== "(文件尚未创建)" ? authorBrief : undefined,
       parentCanon: hasParentCanon ? parentCanon : undefined,
     });
 
@@ -191,6 +193,7 @@ export class WriterAgent extends BaseAgent {
     readonly characterMatrix: string;
     readonly dialogueFingerprints?: string;
     readonly relevantSummaries?: string;
+    readonly authorBrief?: string;
     readonly parentCanon?: string;
   }): string {
     const contextBlock = params.externalContext
@@ -225,6 +228,10 @@ export class WriterAgent extends BaseAgent {
       ? `\n## 相关历史章节摘要\n${params.relevantSummaries}\n`
       : "";
 
+    const authorBriefBlock = params.authorBrief
+      ? `\n## 作者创作简报\n${params.authorBrief}\n`
+      : "";
+
     const canonBlock = params.parentCanon
       ? `\n## 正传正典参照（番外写作专用）
 本书是番外作品。以下正典约束不可违反，角色不得引用超出其信息边界的信息。
@@ -238,7 +245,7 @@ ${params.currentState}
 ${ledgerBlock}
 ## 伏笔池
 ${params.hooks}
-${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${canonBlock}
+${summariesBlock}${subplotBlock}${emotionalBlock}${matrixBlock}${fingerprintBlock}${relevantBlock}${authorBriefBlock}${canonBlock}
 ## 最近章节
 ${params.recentChapters || "(这是第一章，无前文)"}
 

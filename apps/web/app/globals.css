@@ -1,0 +1,453 @@
+@import "antd/dist/reset.css";
+
+:root {
+  --bg: #f3f6fb;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --panel: #ffffff;
+  --panel-strong: #ffffff;
+  --line: rgba(15, 23, 42, 0.1);
+  --accent: #1677ff;
+  --accent-soft: rgba(22, 119, 255, 0.12);
+  --shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: "PingFang SC", "Segoe UI", "Helvetica Neue", sans-serif;
+  background: linear-gradient(180deg, #f8fbff 0%, #f2f5fa 100%);
+}
+
+a {
+  color: inherit;
+}
+
+.command-picker .ant-select-selector {
+  min-height: 48px;
+}
+
+.command-picker .ant-select-selection-item,
+.command-picker .ant-select-selection-placeholder {
+  line-height: 46px !important;
+}
+
+.command-picker-popup {
+  min-width: min(640px, calc(100vw - 48px)) !important;
+}
+
+.command-picker-popup .ant-select-item-option-content {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.5;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+.shell {
+  display: grid;
+  grid-template-columns: 320px 1fr;
+  min-height: 100vh;
+}
+
+.sidebar {
+  border-right: 1px solid var(--line);
+  background: rgba(255, 247, 236, 0.72);
+  backdrop-filter: blur(18px);
+  padding: 28px 20px;
+}
+
+.main {
+  padding: 24px;
+}
+
+.brand {
+  margin-bottom: 24px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  font-size: 11px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.title {
+  margin: 0;
+  font-size: 30px;
+  line-height: 1;
+  font-weight: 800;
+}
+
+.subtitle {
+  margin: 10px 0 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+
+.section-title {
+  margin: 0 0 12px;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.category {
+  margin-bottom: 18px;
+}
+
+.command-list {
+  display: grid;
+  gap: 8px;
+}
+
+.command-button {
+  width: 100%;
+  text-align: left;
+  border: 1px solid transparent;
+  border-radius: 16px;
+  background: transparent;
+  padding: 12px 14px;
+  color: var(--ink);
+  cursor: pointer;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease;
+}
+
+.command-button:hover,
+.command-button.active {
+  transform: translateX(4px);
+  border-color: var(--line);
+  background: var(--panel-strong);
+}
+
+.command-button span {
+  display: block;
+}
+
+.command-button .command-name {
+  font-weight: 700;
+}
+
+.command-button .command-desc {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.top-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.card,
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  background: var(--panel);
+  box-shadow: var(--shadow);
+}
+
+.card {
+  padding: 18px;
+}
+
+.metric-label {
+  margin: 0 0 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.metric-value {
+  margin: 0;
+  font-size: 34px;
+  font-weight: 800;
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(360px, 460px) minmax(0, 1fr);
+  gap: 18px;
+}
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr;
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.single-panel {
+  margin-bottom: 18px;
+}
+
+.workbench-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin-bottom: 18px;
+}
+
+.panel {
+  padding: 22px;
+}
+
+.panel-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+.panel-header h2 {
+  margin: 0;
+  font-size: 24px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.stack {
+  display: grid;
+  gap: 14px;
+}
+
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field label {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.field input,
+.field textarea,
+.field select {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(255, 253, 249, 0.95);
+  color: var(--ink);
+}
+
+.field textarea {
+  min-height: 120px;
+  resize: vertical;
+}
+
+.inline-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.actions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.primary-button,
+.secondary-button {
+  border: none;
+  border-radius: 999px;
+  padding: 12px 18px;
+  cursor: pointer;
+  transition: transform 160ms ease, opacity 160ms ease;
+}
+
+.primary-button {
+  background: linear-gradient(135deg, #b14d1d, #d66932);
+  color: #fffaf4;
+  font-weight: 800;
+}
+
+.secondary-button {
+  background: rgba(73, 58, 40, 0.08);
+  color: var(--ink);
+}
+
+.primary-button:hover,
+.secondary-button:hover {
+  transform: translateY(-1px);
+}
+
+.primary-button:disabled,
+.secondary-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
+}
+
+.output {
+  border-radius: 20px;
+  border: 1px solid var(--line);
+  background: rgba(41, 33, 25, 0.96);
+  color: #f8efe1;
+  padding: 16px;
+  min-height: 220px;
+  overflow: auto;
+  font-family: "SFMono-Regular", "Menlo", monospace;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.book-grid {
+  display: grid;
+  gap: 12px;
+  margin-top: 18px;
+}
+
+.page-links {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.chapter-list {
+  display: grid;
+  gap: 10px;
+}
+
+.chapter-item {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: rgba(255, 251, 244, 0.8);
+  padding: 12px 14px;
+}
+
+.chapter-item h4,
+.chapter-item p {
+  margin: 0;
+}
+
+.chapter-item p {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.issue-list,
+.review-list {
+  display: grid;
+  gap: 12px;
+}
+
+.issue-item,
+.review-item {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: rgba(255, 251, 244, 0.8);
+  padding: 14px 16px;
+}
+
+.issue-item p,
+.review-item p,
+.issue-item h3,
+.review-item h3 {
+  margin: 0;
+}
+
+.issue-item p,
+.review-item p {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.review-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.danger-button {
+  border: none;
+  border-radius: 999px;
+  padding: 10px 14px;
+  cursor: pointer;
+  background: rgba(145, 44, 20, 0.12);
+  color: #8f2b12;
+}
+
+.chip {
+  border-radius: 999px;
+  background: rgba(73, 58, 40, 0.08);
+  color: var(--ink);
+  padding: 5px 10px;
+  font-size: 12px;
+}
+
+.mono {
+  font-family: "SFMono-Regular", "Menlo", monospace;
+}
+
+.book-item {
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 14px 16px;
+  background: rgba(255, 251, 244, 0.8);
+}
+
+.book-item h3,
+.book-item p {
+  margin: 0;
+}
+
+.book-item p {
+  margin-top: 6px;
+  color: var(--muted);
+}
+
+.muted {
+  color: var(--muted);
+}
+
+@media (max-width: 1100px) {
+  .shell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .top-grid,
+  .workspace,
+  .hero-grid,
+  .workbench-grid {
+    grid-template-columns: 1fr;
+  }
+}

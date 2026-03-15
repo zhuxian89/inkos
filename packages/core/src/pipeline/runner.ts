@@ -247,7 +247,7 @@ export class PipelineRunner {
   }
 
   /** Revise the latest (or specified) chapter based on audit issues. */
-  async reviseDraft(bookId: string, chapterNumber?: number, mode: ReviseMode = "rewrite"): Promise<ReviseResult> {
+  async reviseDraft(bookId: string, chapterNumber?: number, mode: ReviseMode = "rewrite", instruction?: string): Promise<ReviseResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
       const book = await this.state.loadBookConfig(bookId);
@@ -277,7 +277,7 @@ export class PipelineRunner {
 
       const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
       const reviseOutput = await reviser.reviseChapter(
-        bookDir, content, targetChapter, auditResult.issues, mode, book.genre,
+        bookDir, content, targetChapter, auditResult.issues, mode, book.genre, instruction,
       );
 
       if (reviseOutput.revisedContent.length === 0) {
@@ -389,22 +389,54 @@ export class PipelineRunner {
   // Full pipeline (convenience — runs draft + audit + revise in one shot)
   // ---------------------------------------------------------------------------
 
-  async writeNextChapter(bookId: string, wordCount?: number, temperatureOverride?: number): Promise<ChapterPipelineResult> {
+  async writeNextChapter(
+    bookId: string,
+    wordCount?: number,
+    temperatureOverride?: number,
+    onProgress?: (step: string) => void,
+  ): Promise<ChapterPipelineResult> {
+    const safeProgress = (step: string) => {
+      try {
+        onProgress?.(step);
+      } catch {
+        // ignore progress handler errors
+      }
+    };
+    process.stderr.write(`[pipeline] [${bookId}] acquiring lock\n`);
+    safeProgress("acquiring-lock");
     const releaseLock = await this.state.acquireBookLock(bookId);
+    process.stderr.write(`[pipeline] [${bookId}] lock acquired\n`);
+    safeProgress("lock-acquired");
     try {
-      return await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride);
+      return await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, safeProgress);
     } finally {
       await releaseLock();
+      process.stderr.write(`[pipeline] [${bookId}] lock released\n`);
+      safeProgress("lock-released");
     }
   }
 
-  private async _writeNextChapterLocked(bookId: string, wordCount?: number, temperatureOverride?: number): Promise<ChapterPipelineResult> {
+  private async _writeNextChapterLocked(
+    bookId: string,
+    wordCount?: number,
+    temperatureOverride?: number,
+    onProgress?: (step: string) => void,
+  ): Promise<ChapterPipelineResult> {
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
     const { profile: gp } = await this.loadGenreProfile(book.genre);
+    const log = (step: string, msg: string) => {
+      process.stderr.write(`[pipeline] [ch${chapterNumber}] [${step}] ${msg}\n`);
+      try {
+        onProgress?.(`ch${chapterNumber}:${step}:${msg}`);
+      } catch {
+        // ignore progress handler errors
+      }
+    };
 
     // 1. Write chapter
+    log("write", "start");
     const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
     const output = await writer.writeChapter({
       book,
@@ -414,6 +446,7 @@ export class PipelineRunner {
       ...(wordCount ? { wordCountOverride: wordCount } : {}),
       ...(temperatureOverride ? { temperatureOverride } : {}),
     });
+    log("write", `done — ${output.wordCount} words, title="${output.title}"`);
 
     // 2a. Post-write error gate: if deterministic rules found errors, auto-fix before LLM audit
     let finalContent = output.content;
@@ -421,9 +454,7 @@ export class PipelineRunner {
     let revised = false;
 
     if (output.postWriteErrors.length > 0) {
-      process.stderr.write(
-        `[pipeline] ${output.postWriteErrors.length} post-write errors detected, triggering spot-fix before audit\n`,
-      );
+      log("spot-fix", `start — ${output.postWriteErrors.length} post-write errors`);
       const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
       const spotFixIssues = output.postWriteErrors.map((v) => ({
         severity: "critical" as const,
@@ -444,9 +475,11 @@ export class PipelineRunner {
         finalWordCount = fixResult.wordCount;
         revised = true;
       }
+      log("spot-fix", "done");
     }
 
     // 2b. LLM audit
+    log("audit", "start");
     const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
     const llmAudit = await auditor.auditChapter(
       bookDir,
@@ -462,6 +495,7 @@ export class PipelineRunner {
       issues: [...llmAudit.issues, ...aiTellsResult.issues, ...sensitiveWriteResult.issues],
       summary: llmAudit.summary,
     };
+    log("audit", `done — passed=${auditResult.passed}, issues=${auditResult.issues.length}`);
 
     // 3. If audit fails, try auto-revise once
     if (!auditResult.passed) {
@@ -469,6 +503,7 @@ export class PipelineRunner {
         (i) => i.severity === "critical",
       );
       if (criticalIssues.length > 0) {
+        log("revise", `start — ${criticalIssues.length} critical issues`);
         const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
         const reviseOutput = await reviser.reviseChapter(
           bookDir,
@@ -487,7 +522,7 @@ export class PipelineRunner {
           const postCount = postMarkers.issues.length;
 
           if (postCount > preCount) {
-            // Revision made text MORE AI-like — discard it, keep original
+            log("revise", "discarded — AI markers increased");
           } else {
             finalContent = reviseOutput.revisedContent;
             finalWordCount = reviseOutput.wordCount;
@@ -495,6 +530,7 @@ export class PipelineRunner {
           }
 
           // Re-audit the (possibly revised) content
+          log("re-audit", "start");
           const reAudit = await auditor.auditChapter(
             bookDir,
             finalContent,
@@ -510,6 +546,7 @@ export class PipelineRunner {
             issues: [...reAudit.issues, ...reAITells.issues, ...reSensitive.issues],
             summary: reAudit.summary,
           };
+          log("re-audit", `done — passed=${auditResult.passed}, issues=${auditResult.issues.length}`);
 
           // Update state files from revision
           const storyDir = join(bookDir, "story");
@@ -523,10 +560,12 @@ export class PipelineRunner {
             await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
           }
         }
+        log("revise", "done");
       }
     }
 
     // 4. Save chapter (original or revised)
+    log("save", "start");
     const chaptersDir = join(bookDir, "chapters");
     const paddedNum = String(chapterNumber).padStart(4, "0");
     const title = output.title;
@@ -564,6 +603,7 @@ export class PipelineRunner {
 
     // 5.5 Snapshot state for rollback support
     await this.state.snapshotState(bookId, chapterNumber);
+    log("save", "done");
 
     // 6. Send notification
     if (this.config.notifyChannels && this.config.notifyChannels.length > 0) {

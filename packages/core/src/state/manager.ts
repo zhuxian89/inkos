@@ -7,25 +7,66 @@ export class StateManager {
   constructor(private readonly projectRoot: string) {}
 
   async acquireBookLock(bookId: string): Promise<() => Promise<void>> {
-    const lockPath = join(this.bookDir(bookId), ".write.lock");
-    try {
-      await stat(lockPath);
-      const lockData = await readFile(lockPath, "utf-8");
-      throw new Error(
-        `Book "${bookId}" is locked by another process (${lockData}). ` +
-          `If this is stale, delete ${lockPath}`,
-      );
-    } catch (e) {
-      if (e instanceof Error && e.message.includes("is locked")) throw e;
-    }
-    await writeFile(lockPath, `pid:${process.pid} ts:${Date.now()}`, "utf-8");
-    return async () => {
+    const bookDir = this.bookDir(bookId);
+    await mkdir(bookDir, { recursive: true });
+    const lockPath = join(bookDir, ".write.lock");
+
+    const release = async () => {
       try {
         await unlink(lockPath);
       } catch {
         // ignore
       }
     };
+
+    const lockContent = () => `pid:${process.pid} ts:${Date.now()}`;
+
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await writeFile(lockPath, lockContent(), { encoding: "utf-8", flag: "wx" });
+        return release;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException | undefined)?.code;
+        if (code !== "EEXIST") {
+          throw error;
+        }
+
+        let lockData = "";
+        try {
+          lockData = await readFile(lockPath, "utf-8");
+        } catch (readError) {
+          const readCode = (readError as NodeJS.ErrnoException | undefined)?.code;
+          if (readCode === "ENOENT") continue; // raced with unlock; retry
+          throw readError;
+        }
+
+        const pidMatch = lockData.match(/pid:(\d+)/);
+        if (pidMatch) {
+          const lockPid = parseInt(pidMatch[1]!, 10);
+          try {
+            process.kill(lockPid, 0);
+          } catch (killError) {
+            const killCode = (killError as NodeJS.ErrnoException | undefined)?.code;
+            if (killCode === "ESRCH") {
+              // Stale lock: process is gone
+              try {
+                await unlink(lockPath);
+              } catch {
+                // ignore, retry will handle races
+              }
+              continue;
+            }
+          }
+        }
+
+        throw new Error(
+          `Book "${bookId}" is locked by another process (${lockData}). ` +
+            `If this is stale, delete ${lockPath}`,
+        );
+      }
+    }
+
+    throw new Error(`Failed to acquire lock for book "${bookId}" (${lockPath})`);
   }
 
   get booksDir(): string {

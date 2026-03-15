@@ -48,6 +48,7 @@ export class ReviserAgent extends BaseAgent {
     issues: ReadonlyArray<AuditIssue>,
     mode: ReviseMode = "rewrite",
     genre?: string,
+    authorInstruction?: string,
   ): Promise<ReviseOutput> {
     const [currentState, ledger, hooks, styleGuideRaw] = await Promise.all([
       this.readFileSafe(join(bookDir, "story/current_state.md")),
@@ -113,6 +114,9 @@ ${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账�
 
 ## 审稿问题
 ${issueList}
+
+## 作者额外修改要求
+${authorInstruction?.trim() ? authorInstruction.trim() : "（无，按审稿问题和修稿模式处理）"}
 
 ## 当前状态卡
 ${currentState}

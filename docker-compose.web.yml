@@ -1,0 +1,31 @@
+services:
+  service:
+    build:
+      context: .
+      dockerfile: Dockerfile.service
+    environment:
+      PORT: 4010
+      INKOS_PROJECT_ROOT: /data/project
+    volumes:
+      - inkos_project:/data/project
+      - inkos_home:/root/.inkos
+    ports:
+      - "4010:4010"
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    environment:
+      PORT: 3000
+      INKOS_SERVICE_URL: http://service:4010
+    depends_on:
+      - service
+    ports:
+      - "13006:3000"
+    restart: unless-stopped
+
+volumes:
+  inkos_project:
+  inkos_home:

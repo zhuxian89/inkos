@@ -13,7 +13,9 @@
     "dev": "pnpm -r dev",
     "test": "pnpm -r test",
     "lint": "pnpm -r lint",
-    "typecheck": "pnpm -r typecheck",
+    "typecheck": "pnpm --filter @actalk/inkos-core build && pnpm -r typecheck",
+    "dev:web": "pnpm --parallel --filter @actalk/inkos-core --filter @actalk/inkos --filter @actalk/inkos-service --filter @actalk/inkos-web dev",
+    "build:web": "pnpm --filter @actalk/inkos-core build && pnpm --filter @actalk/inkos build && pnpm --filter @actalk/inkos-service build && pnpm --filter @actalk/inkos-web build",
     "release": "pnpm build && pnpm test && pnpm -r --filter './packages/*' publish --no-git-checks"
   },
   "engines": {
