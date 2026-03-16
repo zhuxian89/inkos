@@ -1,6 +1,24 @@
 "use client";
 
-import { App, Alert, Button, Card, Col, Form, Input, Radio, Row, Space, Statistic, Tag, Typography } from "antd";
+import {
+  App,
+  Alert,
+  Button,
+  Card,
+  Col,
+  Form,
+  Input,
+  Modal,
+  Popconfirm,
+  Radio,
+  Row,
+  Select,
+  Space,
+  Statistic,
+  Table,
+  Tag,
+  Typography,
+} from "antd";
 import { useEffect, useState, useTransition } from "react";
 
 interface SetupValues {
@@ -8,6 +26,14 @@ interface SetupValues {
   readonly provider: string;
   readonly baseUrl: string;
   readonly apiKey: string;
+  readonly model: string;
+}
+
+interface ProfileFormValues {
+  readonly name: string;
+  readonly provider: string;
+  readonly baseUrl: string;
+  readonly apiKey?: string;
   readonly model: string;
 }
 
@@ -38,6 +64,23 @@ interface CommandCatalogResponse {
   };
 }
 
+interface LlmProfile {
+  readonly id: string;
+  readonly name: string;
+  readonly provider: string;
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly isActive: boolean;
+  readonly apiKeyConfigured: boolean;
+  readonly updatedAt: string;
+}
+
+interface LlmProfilesResponse {
+  readonly ok: boolean;
+  readonly profiles: ReadonlyArray<LlmProfile>;
+  readonly activeProfileId: string | null;
+}
+
 export function SetupWorkspace() {
   const { message } = App.useApp();
   const [initialized, setInitialized] = useState<boolean>(false);
@@ -46,7 +89,15 @@ export function SetupWorkspace() {
   const [daemon, setDaemon] = useState<CommandCatalogResponse["daemon"] | null>(null);
   const [doctorResult, setDoctorResult] = useState<unknown>(null);
   const [daemonResult, setDaemonResult] = useState<unknown>(null);
+  const [profiles, setProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
+  const [activeProfileId, setActiveProfileId] = useState<string | null>(null);
+  const [profileLoading, setProfileLoading] = useState(false);
+  const [profileModalOpen, setProfileModalOpen] = useState(false);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [editingProfile, setEditingProfile] = useState<LlmProfile | null>(null);
+  const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
   const [form] = Form.useForm<SetupValues>();
+  const [profileForm] = Form.useForm<ProfileFormValues>();
   const [result, setResult] = useState<unknown>(null);
   const [resultType, setResultType] = useState<"success" | "error" | null>(null);
   const [isPending, startTransition] = useTransition();
@@ -54,17 +105,24 @@ export function SetupWorkspace() {
   const [daemonAction, setDaemonAction] = useState<"up" | "down" | null>(null);
 
   async function loadSettingsContext(): Promise<void> {
-    const [summaryData, catalogData] = await Promise.all([
+    const [summaryData, catalogData, profileData] = await Promise.all([
       fetch("/api/inkos/summary", { cache: "no-store" }).then((response) => response.json()),
       fetch("/api/inkos/commands", { cache: "no-store" }).then((response) => response.json()),
+      fetch("/api/inkos/llm-profiles", { cache: "no-store" }).then((response) => response.json()),
     ]);
     const data = summaryData as SetupSummaryResponse;
+    const profilePayload = profileData as LlmProfilesResponse;
+
     setSummary(data);
     setDaemon((catalogData as CommandCatalogResponse).daemon);
     setInitialized(Boolean(data.initialized));
-    const provider = data.globalLlm?.provider ?? data.config?.llm?.provider ?? "openai";
-    const baseUrl = data.globalLlm?.baseUrl ?? data.config?.llm?.baseUrl ?? "https://api.openai.com/v1";
-    const model = data.globalLlm?.model ?? data.config?.llm?.model ?? "gpt-4o";
+    setProfiles(Array.isArray(profilePayload.profiles) ? profilePayload.profiles : []);
+    setActiveProfileId(profilePayload.activeProfileId ?? null);
+
+    const activeProfile = profilePayload.profiles?.find((item) => item.id === profilePayload.activeProfileId);
+    const provider = activeProfile?.provider ?? data.globalLlm?.provider ?? data.config?.llm?.provider ?? "openai";
+    const baseUrl = activeProfile?.baseUrl ?? data.globalLlm?.baseUrl ?? data.config?.llm?.baseUrl ?? "https://api.openai.com/v1";
+    const model = activeProfile?.model ?? data.globalLlm?.model ?? data.config?.llm?.model ?? "gpt-4o";
     const hasApiKey = Boolean(data.globalLlm?.apiKeyConfigured);
     setApiKeyConfigured(hasApiKey);
     form.setFieldsValue({
@@ -128,6 +186,103 @@ export function SetupWorkspace() {
       .then((response) => response.json())
       .then((data) => setDoctorResult(data))
       .finally(() => setIsTesting(false));
+  }
+
+  function openCreateProfile(): void {
+    const current = form.getFieldsValue();
+    setEditingProfile(null);
+    profileForm.setFieldsValue({
+      name: "",
+      provider: current.provider ?? "openai",
+      baseUrl: current.baseUrl ?? "https://api.openai.com/v1",
+      model: current.model ?? "gpt-4o",
+      apiKey: "",
+    });
+    setProfileModalOpen(true);
+  }
+
+  function openEditProfile(profile: LlmProfile): void {
+    setEditingProfile(profile);
+    profileForm.setFieldsValue({
+      name: profile.name,
+      provider: profile.provider,
+      baseUrl: profile.baseUrl,
+      model: profile.model,
+      apiKey: "",
+    });
+    setProfileModalOpen(true);
+  }
+
+  function saveProfile(values: ProfileFormValues): void {
+    if (profileSaving) return;
+    setProfileSaving(true);
+    const method = editingProfile ? "PUT" : "POST";
+    const url = editingProfile ? `/api/inkos/llm-profiles/${editingProfile.id}` : "/api/inkos/llm-profiles";
+    void fetch(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        name: values.name,
+        provider: values.provider,
+        baseUrl: values.baseUrl,
+        model: values.model,
+        apiKey: values.apiKey?.trim() || undefined,
+        activate: !editingProfile,
+      }),
+    })
+      .then((response) => response.json())
+      .then(async (data) => {
+        if (!data?.ok) {
+          throw new Error(data?.error ?? "保存配置失败");
+        }
+        setProfileModalOpen(false);
+        profileForm.resetFields();
+        await loadSettingsContext();
+        void message.success(editingProfile ? "配置已更新" : "配置已创建并激活");
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setProfileSaving(false));
+  }
+
+  function activateProfile(profileId: string): void {
+    if (profileLoading) return;
+    setProfileLoading(true);
+    void fetch(`/api/inkos/llm-profiles/${profileId}/activate`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+    })
+      .then((response) => response.json())
+      .then(async (data) => {
+        if (!data?.ok) {
+          throw new Error(data?.error ?? "激活配置失败");
+        }
+        await loadSettingsContext();
+        void message.success("已切换到目标配置");
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setProfileLoading(false));
+  }
+
+  function deleteProfile(profileId: string): void {
+    if (deletingProfileId) return;
+    setDeletingProfileId(profileId);
+    void fetch(`/api/inkos/llm-profiles/${profileId}`, { method: "DELETE" })
+      .then((response) => response.json())
+      .then(async (data) => {
+        if (!data?.ok) {
+          throw new Error(data?.error ?? "删除配置失败");
+        }
+        await loadSettingsContext();
+        void message.success("配置已删除");
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setDeletingProfileId(null));
   }
 
   function toggleDaemon(action: "up" | "down"): void {
@@ -199,6 +354,78 @@ export function SetupWorkspace() {
         </Form>
       </Card>
 
+      <Card
+        title="多套配置切换"
+        extra={(
+          <Space>
+            <Button onClick={() => void loadSettingsContext()} loading={profileLoading}>刷新</Button>
+            <Button type="primary" onClick={openCreateProfile}>新建配置</Button>
+          </Space>
+        )}
+      >
+        <Typography.Paragraph type="secondary">
+          切换后会把选中配置写入原来的 `~/.inkos/.env`，运行时读取逻辑不变。
+        </Typography.Paragraph>
+        <Space direction="vertical" style={{ width: "100%" }} size={12}>
+          <Select
+            placeholder="选择要激活的配置"
+            value={activeProfileId ?? undefined}
+            loading={profileLoading}
+            options={profiles.map((profile) => ({
+              value: profile.id,
+              label: `${profile.name} · ${profile.provider}/${profile.model}`,
+            }))}
+            onChange={(value) => activateProfile(String(value))}
+            style={{ width: "100%" }}
+          />
+          <Table<LlmProfile>
+            rowKey="id"
+            size="small"
+            pagination={false}
+            dataSource={[...profiles]}
+            columns={[
+              { title: "名称", dataIndex: "name", key: "name" },
+              { title: "模型", key: "model", render: (_v, r) => `${r.provider}/${r.model}` },
+              {
+                title: "状态",
+                key: "status",
+                width: 120,
+                render: (_v, r) => (r.isActive ? <Tag color="green">已激活</Tag> : <Tag>未激活</Tag>),
+              },
+              {
+                title: "操作",
+                key: "actions",
+                width: 260,
+                render: (_v, record) => (
+                  <Space>
+                    <Button size="small" onClick={() => openEditProfile(record)}>编辑</Button>
+                    <Button
+                      size="small"
+                      type="primary"
+                      ghost
+                      disabled={record.isActive}
+                      onClick={() => activateProfile(record.id)}
+                    >
+                      激活
+                    </Button>
+                    <Popconfirm
+                      title="确认删除这个配置吗？"
+                      description={record.isActive ? "当前激活配置不能删除。" : "删除后不可恢复。"}
+                      onConfirm={() => deleteProfile(record.id)}
+                      disabled={record.isActive}
+                    >
+                      <Button size="small" danger disabled={record.isActive} loading={deletingProfileId === record.id}>
+                        删除
+                      </Button>
+                    </Popconfirm>
+                  </Space>
+                ),
+              },
+            ]}
+          />
+        </Space>
+      </Card>
+
       <Row gutter={[16, 16]}>
         <Col xs={24} xl={12}>
           <Card
@@ -248,6 +475,45 @@ export function SetupWorkspace() {
           />
         )}
       </Card>
+
+      <Modal
+        open={profileModalOpen}
+        onCancel={() => setProfileModalOpen(false)}
+        title={editingProfile ? "编辑配置" : "新建配置"}
+        footer={null}
+        destroyOnClose
+      >
+        <Form<ProfileFormValues> layout="vertical" form={profileForm} onFinish={saveProfile}>
+          <Form.Item label="配置名称" name="name" rules={[{ required: true, message: "请输入配置名称" }]}>
+            <Input placeholder="例如：OpenAI-主力" />
+          </Form.Item>
+          <Form.Item label="服务商" name="provider" rules={[{ required: true }]}>
+            <Radio.Group
+              options={[
+                { label: "openai", value: "openai" },
+                { label: "anthropic", value: "anthropic" },
+              ]}
+              optionType="button"
+              buttonStyle="solid"
+            />
+          </Form.Item>
+          <Form.Item label="Base URL（接口地址）" name="baseUrl" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Form.Item label="API Key（密钥）" name="apiKey">
+            <Input.Password placeholder={editingProfile ? "留空表示保持不变" : "首次创建建议填写"} />
+          </Form.Item>
+          <Form.Item label="模型" name="model" rules={[{ required: true }]}>
+            <Input />
+          </Form.Item>
+          <Space>
+            <Button type="primary" htmlType="submit" loading={profileSaving}>
+              {editingProfile ? "保存" : "创建并激活"}
+            </Button>
+            <Button onClick={() => setProfileModalOpen(false)}>取消</Button>
+          </Space>
+        </Form>
+      </Modal>
     </Space>
   );
 }

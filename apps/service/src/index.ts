@@ -2,9 +2,11 @@ import { StateManager, chatCompletion, createLLMClient, type ChapterMeta, type L
 import cors from "cors";
 import express from "express";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { commandRegistry, getCommandDefinition } from "./command-registry.js";
@@ -263,6 +265,193 @@ async function readGlobalLlmEnv(): Promise<{
     };
   } catch {
     return {};
+  }
+}
+
+interface LlmProfileRow {
+  readonly id: string;
+  readonly name: string;
+  readonly provider: "openai" | "anthropic";
+  readonly base_url: string;
+  readonly api_key: string;
+  readonly model: string;
+  readonly temperature: number | null;
+  readonly max_tokens: number | null;
+  readonly thinking_budget: number | null;
+  readonly api_format: "chat" | "responses" | null;
+  readonly is_active: number;
+  readonly created_at: number;
+  readonly updated_at: number;
+}
+
+interface LlmProfilePayload {
+  readonly name: string;
+  readonly provider: "openai" | "anthropic";
+  readonly baseUrl: string;
+  readonly apiKey: string;
+  readonly model: string;
+  readonly temperature?: number;
+  readonly maxTokens?: number;
+  readonly thinkingBudget?: number;
+  readonly apiFormat?: "chat" | "responses";
+}
+
+function inkosHomeDir(): string {
+  return join(process.env.HOME ?? "/root", ".inkos");
+}
+
+function globalLlmEnvPath(): string {
+  return join(inkosHomeDir(), ".env");
+}
+
+function llmProfilesDbPath(): string {
+  return join(inkosHomeDir(), "profiles.db");
+}
+
+function openProfilesDb(): DatabaseSync {
+  const db = new DatabaseSync(llmProfilesDbPath());
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS llm_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      api_key TEXT NOT NULL,
+      model TEXT NOT NULL,
+      temperature REAL,
+      max_tokens INTEGER,
+      thinking_budget INTEGER,
+      api_format TEXT,
+      is_active INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+  `);
+  return db;
+}
+
+function mapProfileRow(row: LlmProfileRow) {
+  return {
+    id: row.id,
+    name: row.name,
+    provider: row.provider,
+    baseUrl: row.base_url,
+    model: row.model,
+    temperature: row.temperature ?? undefined,
+    maxTokens: row.max_tokens ?? undefined,
+    thinkingBudget: row.thinking_budget ?? undefined,
+    apiFormat: row.api_format ?? undefined,
+    apiKeyConfigured: Boolean(row.api_key),
+    isActive: row.is_active === 1,
+    createdAt: new Date(row.created_at).toISOString(),
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
+function getProfileById(db: DatabaseSync, id: string): LlmProfileRow | null {
+  const row = db.prepare("SELECT * FROM llm_profiles WHERE id = ?").get(id) as LlmProfileRow | undefined;
+  return row ?? null;
+}
+
+async function writeGlobalLlmEnv(payload: LlmProfilePayload): Promise<void> {
+  await mkdir(inkosHomeDir(), { recursive: true });
+  await writeFile(
+    globalLlmEnvPath(),
+    [
+      "# InkOS Global LLM Configuration",
+      `INKOS_LLM_PROVIDER=${payload.provider}`,
+      `INKOS_LLM_BASE_URL=${payload.baseUrl}`,
+      `INKOS_LLM_API_KEY=${payload.apiKey}`,
+      `INKOS_LLM_MODEL=${payload.model}`,
+      ...(payload.temperature !== undefined ? [`INKOS_LLM_TEMPERATURE=${payload.temperature}`] : []),
+      ...(payload.maxTokens !== undefined ? [`INKOS_LLM_MAX_TOKENS=${payload.maxTokens}`] : []),
+      ...(payload.thinkingBudget !== undefined ? [`INKOS_LLM_THINKING_BUDGET=${payload.thinkingBudget}`] : []),
+      ...(payload.apiFormat ? [`INKOS_LLM_API_FORMAT=${payload.apiFormat}`] : []),
+    ].join("\n") + "\n",
+    "utf-8",
+  );
+}
+
+async function activateLlmProfile(profileId: string): Promise<ReturnType<typeof mapProfileRow>> {
+  const db = openProfilesDb();
+  try {
+    const profile = getProfileById(db, profileId);
+    if (!profile) {
+      throw new Error(`LLM profile not found: ${profileId}`);
+    }
+
+    db.exec("UPDATE llm_profiles SET is_active = 0");
+    db.prepare("UPDATE llm_profiles SET is_active = 1, updated_at = ? WHERE id = ?").run(Date.now(), profileId);
+    await writeGlobalLlmEnv({
+      name: profile.name,
+      provider: profile.provider,
+      baseUrl: profile.base_url,
+      apiKey: profile.api_key,
+      model: profile.model,
+      temperature: profile.temperature ?? undefined,
+      maxTokens: profile.max_tokens ?? undefined,
+      thinkingBudget: profile.thinking_budget ?? undefined,
+      apiFormat: profile.api_format ?? undefined,
+    });
+    const activated = getProfileById(db, profileId);
+    if (!activated) throw new Error(`LLM profile activation failed: ${profileId}`);
+    return mapProfileRow(activated);
+  } finally {
+    db.close();
+  }
+}
+
+async function upsertActiveLlmProfileFromInit(payload: LlmProfilePayload): Promise<void> {
+  const db = openProfilesDb();
+  const now = Date.now();
+  try {
+    const active = db.prepare("SELECT * FROM llm_profiles WHERE is_active = 1 LIMIT 1").get() as LlmProfileRow | undefined;
+    if (active) {
+      db
+        .prepare(
+          `UPDATE llm_profiles
+             SET name = ?, provider = ?, base_url = ?, api_key = ?, model = ?,
+                 temperature = ?, max_tokens = ?, thinking_budget = ?, api_format = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          payload.name,
+          payload.provider,
+          payload.baseUrl,
+          payload.apiKey,
+          payload.model,
+          payload.temperature ?? null,
+          payload.maxTokens ?? null,
+          payload.thinkingBudget ?? null,
+          payload.apiFormat ?? null,
+          now,
+          active.id,
+        );
+      return;
+    }
+
+    db
+      .prepare(
+        `INSERT INTO llm_profiles
+          (id, name, provider, base_url, api_key, model, temperature, max_tokens, thinking_budget, api_format, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+      )
+      .run(
+        randomUUID(),
+        payload.name,
+        payload.provider,
+        payload.baseUrl,
+        payload.apiKey,
+        payload.model,
+        payload.temperature ?? null,
+        payload.maxTokens ?? null,
+        payload.thinkingBudget ?? null,
+        payload.apiFormat ?? null,
+        now,
+        now,
+      );
+  } finally {
+    db.close();
   }
 }
 
@@ -616,6 +805,204 @@ app.get("/api/books/:bookId/chapters/:chapter", async (req, res) => {
   }
 });
 
+app.get("/api/llm-profiles", async (_req, res) => {
+  try {
+    const db = openProfilesDb();
+    try {
+      const rows = db
+        .prepare("SELECT * FROM llm_profiles ORDER BY is_active DESC, updated_at DESC, created_at DESC")
+        .all() as unknown as LlmProfileRow[];
+      const profiles = rows.map((row) => mapProfileRow(row));
+      const active = rows.find((row) => row.is_active === 1);
+      res.json({ ok: true, profiles, activeProfileId: active?.id ?? null });
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    logError("llm_profiles.list.error", { error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.post("/api/llm-profiles", async (req, res) => {
+  const schema = z.object({
+    name: z.string().trim().min(1),
+    provider: z.enum(["openai", "anthropic"]).default("openai"),
+    baseUrl: z.string().url().default("https://api.openai.com/v1"),
+    apiKey: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).default("gpt-4o"),
+    temperature: z.number().min(0).max(2).optional(),
+    maxTokens: z.number().int().min(1).optional(),
+    thinkingBudget: z.number().int().min(0).optional(),
+    apiFormat: z.enum(["chat", "responses"]).optional(),
+    activate: z.boolean().default(false),
+  });
+
+  try {
+    const input = schema.parse(req.body ?? {});
+    const existingGlobal = await readGlobalLlmEnv();
+    const finalApiKey = input.apiKey ?? existingGlobal.apiKey;
+    if (!finalApiKey) {
+      throw new Error("API Key is required for creating a profile.");
+    }
+
+    const now = Date.now();
+    const id = randomUUID();
+    const db = openProfilesDb();
+    try {
+      db
+        .prepare(
+          `INSERT INTO llm_profiles
+            (id, name, provider, base_url, api_key, model, temperature, max_tokens, thinking_budget, api_format, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+        )
+        .run(
+          id,
+          input.name,
+          input.provider,
+          input.baseUrl,
+          finalApiKey,
+          input.model,
+          input.temperature ?? null,
+          input.maxTokens ?? null,
+          input.thinkingBudget ?? null,
+          input.apiFormat ?? null,
+          now,
+          now,
+        );
+    } finally {
+      db.close();
+    }
+
+    const profile = input.activate
+      ? await activateLlmProfile(id)
+      : (() => {
+          const db2 = openProfilesDb();
+          try {
+            const row = getProfileById(db2, id);
+            if (!row) throw new Error(`LLM profile create verification failed: ${id}`);
+            return mapProfileRow(row);
+          } finally {
+            db2.close();
+          }
+        })();
+
+    logInfo("llm_profiles.create.done", {
+      profileId: id,
+      name: input.name,
+      provider: input.provider,
+      model: input.model,
+      activated: input.activate,
+    });
+    res.json({ ok: true, profile, activated: input.activate });
+  } catch (error) {
+    logError("llm_profiles.create.error", { error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.put("/api/llm-profiles/:id", async (req, res) => {
+  const schema = z.object({
+    name: z.string().trim().min(1).optional(),
+    provider: z.enum(["openai", "anthropic"]).optional(),
+    baseUrl: z.string().url().optional(),
+    apiKey: z.string().trim().min(1).optional(),
+    model: z.string().trim().min(1).optional(),
+    temperature: z.number().min(0).max(2).optional(),
+    maxTokens: z.number().int().min(1).optional(),
+    thinkingBudget: z.number().int().min(0).optional(),
+    apiFormat: z.enum(["chat", "responses"]).optional(),
+    activate: z.boolean().optional(),
+  });
+
+  try {
+    const input = schema.parse(req.body ?? {});
+    const profileId = req.params.id;
+    const db = openProfilesDb();
+    try {
+      const existing = getProfileById(db, profileId);
+      if (!existing) {
+        throw new Error(`LLM profile not found: ${profileId}`);
+      }
+      const now = Date.now();
+      db
+        .prepare(
+          `UPDATE llm_profiles
+             SET name = ?, provider = ?, base_url = ?, api_key = ?, model = ?,
+                 temperature = ?, max_tokens = ?, thinking_budget = ?, api_format = ?, updated_at = ?
+           WHERE id = ?`,
+        )
+        .run(
+          input.name ?? existing.name,
+          input.provider ?? existing.provider,
+          input.baseUrl ?? existing.base_url,
+          input.apiKey ?? existing.api_key,
+          input.model ?? existing.model,
+          input.temperature ?? existing.temperature,
+          input.maxTokens ?? existing.max_tokens,
+          input.thinkingBudget ?? existing.thinking_budget,
+          input.apiFormat ?? existing.api_format,
+          now,
+          profileId,
+        );
+    } finally {
+      db.close();
+    }
+
+    const profile = input.activate ? await activateLlmProfile(profileId) : (() => {
+      const db2 = openProfilesDb();
+      try {
+        const updated = getProfileById(db2, profileId);
+        if (!updated) throw new Error(`LLM profile update verification failed: ${profileId}`);
+        return mapProfileRow(updated);
+      } finally {
+        db2.close();
+      }
+    })();
+    logInfo("llm_profiles.update.done", { profileId, activated: input.activate ?? false });
+    res.json({ ok: true, profile, activated: input.activate ?? false });
+  } catch (error) {
+    logError("llm_profiles.update.error", { profileId: req.params.id, error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.post("/api/llm-profiles/:id/activate", async (req, res) => {
+  try {
+    const profileId = req.params.id;
+    const profile = await activateLlmProfile(profileId);
+    logInfo("llm_profiles.activate.done", { profileId });
+    res.json({ ok: true, profile, activeProfileId: profileId });
+  } catch (error) {
+    logError("llm_profiles.activate.error", { profileId: req.params.id, error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.delete("/api/llm-profiles/:id", async (req, res) => {
+  try {
+    const profileId = req.params.id;
+    const db = openProfilesDb();
+    try {
+      const existing = getProfileById(db, profileId);
+      if (!existing) {
+        throw new Error(`LLM profile not found: ${profileId}`);
+      }
+      if (existing.is_active === 1) {
+        throw new Error("Active profile cannot be deleted. Please activate another profile first.");
+      }
+      db.prepare("DELETE FROM llm_profiles WHERE id = ?").run(profileId);
+    } finally {
+      db.close();
+    }
+    logInfo("llm_profiles.delete.done", { profileId });
+    res.json({ ok: true, profileId });
+  } catch (error) {
+    logError("llm_profiles.delete.error", { profileId: req.params.id, error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
 app.post("/api/project/init", async (req, res) => {
   const schema = z.object({
     name: z.string().min(1).optional(),
@@ -645,7 +1032,7 @@ app.post("/api/project/init", async (req, res) => {
     await mkdir(projectRoot, { recursive: true });
     await mkdir(join(projectRoot, "books"), { recursive: true });
     await mkdir(join(projectRoot, "radar"), { recursive: true });
-    await mkdir(join(process.env.HOME ?? "/root", ".inkos"), { recursive: true });
+    await mkdir(inkosHomeDir(), { recursive: true });
 
     const config = {
       name: input.name ?? basename(projectRoot),
@@ -678,21 +1065,28 @@ app.post("/api/project/init", async (req, res) => {
       ].join("\n"),
       "utf-8",
     );
-    await writeFile(
-      join(process.env.HOME ?? "/root", ".inkos", ".env"),
-      [
-        "# InkOS Global LLM Configuration",
-        `INKOS_LLM_PROVIDER=${input.provider}`,
-        `INKOS_LLM_BASE_URL=${input.baseUrl}`,
-        `INKOS_LLM_API_KEY=${finalApiKey}`,
-        `INKOS_LLM_MODEL=${input.model}`,
-        ...(input.temperature !== undefined ? [`INKOS_LLM_TEMPERATURE=${input.temperature}`] : []),
-        ...(input.maxTokens !== undefined ? [`INKOS_LLM_MAX_TOKENS=${input.maxTokens}`] : []),
-        ...(input.thinkingBudget !== undefined ? [`INKOS_LLM_THINKING_BUDGET=${input.thinkingBudget}`] : []),
-        ...(input.apiFormat ? [`INKOS_LLM_API_FORMAT=${input.apiFormat}`] : []),
-      ].join("\n") + "\n",
-      "utf-8",
-    );
+    await writeGlobalLlmEnv({
+      name: input.name ?? basename(projectRoot),
+      provider: input.provider,
+      baseUrl: input.baseUrl,
+      apiKey: finalApiKey,
+      model: input.model,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens,
+      thinkingBudget: input.thinkingBudget,
+      apiFormat: input.apiFormat,
+    });
+    await upsertActiveLlmProfileFromInit({
+      name: input.name ?? basename(projectRoot),
+      provider: input.provider,
+      baseUrl: input.baseUrl,
+      apiKey: finalApiKey,
+      model: input.model,
+      temperature: input.temperature,
+      maxTokens: input.maxTokens,
+      thinkingBudget: input.thinkingBudget,
+      apiFormat: input.apiFormat,
+    });
 
     logInfo("project.init.done", {
       name: config.name,

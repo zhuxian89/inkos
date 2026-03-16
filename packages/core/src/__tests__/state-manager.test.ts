@@ -346,6 +346,20 @@ describe("StateManager", () => {
       expect(typeof release2).toBe("function");
       await release2();
     });
+
+    it("reclaims a stale lock when the PID no longer exists", async () => {
+      await mkdir(manager.bookDir("lock-book-stale"), { recursive: true });
+      const lockPath = join(manager.bookDir("lock-book-stale"), ".write.lock");
+      const stalePid = process.pid + 1_000_000;
+      await writeFile(lockPath, `pid:${stalePid} ts:${Date.now() - 3600_000}`, "utf-8");
+
+      const release = await manager.acquireBookLock("lock-book-stale");
+      const data = await readFile(lockPath, "utf-8");
+      expect(data).toMatch(new RegExp(`pid:${process.pid}\\b`));
+
+      await release();
+      await expect(stat(lockPath)).rejects.toThrow();
+    });
   });
 
   // -------------------------------------------------------------------------

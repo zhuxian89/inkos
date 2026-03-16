@@ -7,8 +7,11 @@ services:
       PORT: 4010
       INKOS_PROJECT_ROOT: /data/project
     volumes:
-      - inkos_project:/data/project
-      - inkos_home:/root/.inkos
+      # Project workspace persisted on host:
+      # books/, radar/, genres/, inkos.json, .env, exports...
+      - ${HOME}/inkos-data/project:/data/project
+      # Global InkOS config persisted on host: ~/.inkos/.env in container
+      - ${HOME}/inkos-data/inkos-home:/root/.inkos
     ports:
       - "4010:4010"
     restart: unless-stopped
@@ -25,7 +28,3 @@ services:
     ports:
       - "13006:3000"
     restart: unless-stopped
-
-volumes:
-  inkos_project:
-  inkos_home:
