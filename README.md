@@ -20,6 +20,45 @@
 
 Agent 写小说。写、审、改，全程接管。
 
+## Docker 部署（推荐）
+
+现在支持用 Docker 一键启动 Web UI + Service（无需本地 Node 环境）。
+
+- Web: http://localhost:13006
+- Service: http://localhost:4010
+- 数据持久化目录：`~/inkos-data/`
+
+### 1）准备环境
+
+- 安装 Docker Desktop（Mac/Windows）或 Docker Engine（Linux）
+- 确保 `docker compose` 可用
+
+### 2）配置环境变量
+
+```bash
+cp .env.example .env
+```
+
+编辑 `.env`（至少填这几个）：
+- `INKOS_LLM_BASE_URL`
+- `INKOS_LLM_API_KEY`
+- `INKOS_LLM_MODEL`
+
+### 3）启动
+
+```bash
+docker compose -f docker-compose.web.yml up -d --build
+```
+
+### 4）停止 / 查看日志
+
+```bash
+docker compose -f docker-compose.web.yml down
+docker compose -f docker-compose.web.yml logs -f
+```
+
+> 说明：工作区会映射到 `~/inkos-data/project`，全局配置映射到 `~/inkos-data/inkos-home`。
+
 ## v0.4 更新
 
 番外写作 + 文风仿写 + 写后验证器 + 审计闭环加固。

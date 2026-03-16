@@ -20,6 +20,45 @@
 
 Open-source multi-agent system that autonomously writes, audits, and revises novels — with human review gates that keep you in control.
 
+## Docker deployment (recommended)
+
+You can now run Web UI + Service with Docker (no local Node required).
+
+- Web: http://localhost:13006
+- Service: http://localhost:4010
+- Persistent data dir: `~/inkos-data/`
+
+### 1) Prerequisites
+
+- Install Docker Desktop (Mac/Windows) or Docker Engine (Linux)
+- Ensure `docker compose` works
+
+### 2) Configure environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` (at least):
+- `INKOS_LLM_BASE_URL`
+- `INKOS_LLM_API_KEY`
+- `INKOS_LLM_MODEL`
+
+### 3) Start
+
+```bash
+docker compose -f docker-compose.web.yml up -d --build
+```
+
+### 4) Stop / logs
+
+```bash
+docker compose -f docker-compose.web.yml down
+docker compose -f docker-compose.web.yml logs -f
+```
+
+> Workspace is mounted to `~/inkos-data/project`, and global InkOS config is mounted to `~/inkos-data/inkos-home`.
+
 ## v0.4 Update
 
 Spinoff writing + style cloning + post-write validator + audit-revise hardening.
