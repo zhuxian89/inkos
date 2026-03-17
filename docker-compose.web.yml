@@ -6,6 +6,7 @@ services:
     environment:
       PORT: 4010
       INKOS_PROJECT_ROOT: /data/project
+      INKOS_HOME: /root/.inkos
     volumes:
       # Project workspace persisted on host:
       # books/, radar/, genres/, inkos.json, .env, exports...

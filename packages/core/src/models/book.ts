@@ -6,6 +6,7 @@ export type Platform = z.infer<typeof PlatformSchema>;
 export const GenreSchema = z.enum([
   "xuanhuan",
   "xianxia",
+  "chuanyue",
   "urban",
   "horror",
   "other",

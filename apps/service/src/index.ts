@@ -1,4 +1,4 @@
-import { StateManager, chatCompletion, createLLMClient, type ChapterMeta, type LLMMessage } from "@actalk/inkos-core";
+import { StateManager, chatCompletion, createLLMClient, readGenreProfile, type ChapterMeta, type LLMMessage } from "@actalk/inkos-core";
 import cors from "cors";
 import express from "express";
 import { spawn } from "node:child_process";
@@ -40,6 +40,27 @@ interface InitAssistantMessage {
   readonly content: string;
 }
 
+interface ChapterAssistantMessage {
+  readonly role: "user" | "assistant";
+  readonly content: string;
+}
+
+const PLATFORM_GUIDANCE: Record<string, string> = {
+  tomato: "番茄：节奏要快，前三章要有钩子和反馈，强调强冲突、强反转、强情绪兑现。",
+  qidian: "起点：设定完整度和世界观逻辑更重要，允许慢一点铺陈，但主线和成长曲线必须清晰。",
+  feilu: "飞卢：题眼直接，卖点前置，冲突密集，主角动机和爽点要持续高频兑现。",
+  other: "其他平台：按通俗网文逻辑处理，优先确保题眼明确、主线稳定、开篇抓人。",
+};
+
+const SUPPORTED_GENRES = [
+  "xuanhuan(玄幻)",
+  "xianxia(仙侠)",
+  "chuanyue(穿越)",
+  "urban(都市)",
+  "horror(恐怖)",
+  "other(其他)",
+].join("、");
+
 const jobs = new Map<string, Job>();
 
 function generateJobId(): string {
@@ -58,7 +79,7 @@ setInterval(() => {
 }, 600_000);
 
 app.use(cors());
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "10mb" }));
 app.use((req, res, next) => {
   if (req.path.startsWith("/api/jobs/")) {
     next();
@@ -92,6 +113,14 @@ function formatMeta(meta?: Record<string, unknown>): string {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function sanitizeFilename(filename: string): string {
+  return filename
+    .replace(/[/\\?%*:|"<>]/g, "-")
+    .replace(/\s+/g, "_")
+    .replace(/-+/g, "-")
+    .slice(0, 120);
 }
 
 function sanitizeForLog(value: unknown): unknown {
@@ -244,8 +273,7 @@ async function readGlobalLlmEnv(): Promise<{
   readonly model?: string;
 }> {
   try {
-    const home = process.env.HOME ?? "/root";
-    const raw = await readFile(join(home, ".inkos", ".env"), "utf-8");
+    const raw = await readFile(globalLlmEnvPath(), "utf-8");
     const pairs = raw
       .split("\n")
       .map((line) => line.trim())
@@ -296,8 +324,12 @@ interface LlmProfilePayload {
   readonly apiFormat?: "chat" | "responses";
 }
 
+function resolveInkosHomeDir(): string {
+  return process.env.INKOS_HOME?.trim() || join(process.env.HOME ?? "/root", ".inkos");
+}
+
 function inkosHomeDir(): string {
-  return join(process.env.HOME ?? "/root", ".inkos");
+  return resolveInkosHomeDir();
 }
 
 function globalLlmEnvPath(): string {
@@ -353,6 +385,20 @@ function getProfileById(db: DatabaseSync, id: string): LlmProfileRow | null {
   return row ?? null;
 }
 
+function profileRowToPayload(profile: LlmProfileRow): LlmProfilePayload {
+  return {
+    name: profile.name,
+    provider: profile.provider,
+    baseUrl: profile.base_url,
+    apiKey: profile.api_key,
+    model: profile.model,
+    temperature: profile.temperature ?? undefined,
+    maxTokens: profile.max_tokens ?? undefined,
+    thinkingBudget: profile.thinking_budget ?? undefined,
+    apiFormat: profile.api_format ?? undefined,
+  };
+}
+
 async function writeGlobalLlmEnv(payload: LlmProfilePayload): Promise<void> {
   await mkdir(inkosHomeDir(), { recursive: true });
   await writeFile(
@@ -382,23 +428,313 @@ async function activateLlmProfile(profileId: string): Promise<ReturnType<typeof 
 
     db.exec("UPDATE llm_profiles SET is_active = 0");
     db.prepare("UPDATE llm_profiles SET is_active = 1, updated_at = ? WHERE id = ?").run(Date.now(), profileId);
-    await writeGlobalLlmEnv({
-      name: profile.name,
-      provider: profile.provider,
-      baseUrl: profile.base_url,
-      apiKey: profile.api_key,
-      model: profile.model,
-      temperature: profile.temperature ?? undefined,
-      maxTokens: profile.max_tokens ?? undefined,
-      thinkingBudget: profile.thinking_budget ?? undefined,
-      apiFormat: profile.api_format ?? undefined,
-    });
+    await writeGlobalLlmEnv(profileRowToPayload(profile));
     const activated = getProfileById(db, profileId);
     if (!activated) throw new Error(`LLM profile activation failed: ${profileId}`);
     return mapProfileRow(activated);
   } finally {
     db.close();
   }
+}
+
+async function testLlmProfile(profileId: string): Promise<{
+  readonly profileId: string;
+  readonly model: string;
+  readonly provider: string;
+  readonly responsePreview: string;
+}> {
+  const db = openProfilesDb();
+  let profile: LlmProfileRow | null = null;
+  try {
+    profile = getProfileById(db, profileId);
+  } finally {
+    db.close();
+  }
+
+  if (!profile) {
+    throw new Error(`LLM profile not found: ${profileId}`);
+  }
+
+  const payload = profileRowToPayload(profile);
+  const client = createLLMClient({
+    provider: payload.provider,
+    baseUrl: payload.baseUrl,
+    apiKey: payload.apiKey,
+    model: payload.model,
+    temperature: payload.temperature ?? 0.7,
+    maxTokens: payload.maxTokens ?? 8192,
+    thinkingBudget: payload.thinkingBudget ?? 0,
+    apiFormat: payload.apiFormat ?? "chat",
+  });
+
+  const response = await chatCompletion(client, payload.model, [
+    {
+      role: "system",
+      content: "You are a health check assistant. Reply in plain text with a very short confirmation.",
+    },
+    {
+      role: "user",
+      content: "Reply with: LLM test passed",
+    },
+  ], {
+    temperature: 0,
+    maxTokens: 32,
+  });
+
+  return {
+    profileId,
+    provider: payload.provider,
+    model: payload.model,
+    responsePreview: response.content.trim().slice(0, 200),
+  };
+}
+
+async function chatWithLlmProfile(
+  profileId: string,
+  messages: ReadonlyArray<{ readonly role: "system" | "user" | "assistant"; readonly content: string }>,
+  options?: {
+    readonly useStream?: boolean;
+    readonly includeReasoning?: boolean;
+  },
+): Promise<{
+  readonly profileId: string;
+  readonly provider: string;
+  readonly model: string;
+  readonly content: string;
+  readonly reasoning?: string;
+  readonly applied: {
+    readonly useStream: boolean;
+    readonly includeReasoning: boolean;
+  };
+  readonly usage: {
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly totalTokens: number;
+  };
+}> {
+  const db = openProfilesDb();
+  let profile: LlmProfileRow | null = null;
+  try {
+    profile = getProfileById(db, profileId);
+  } finally {
+    db.close();
+  }
+
+  if (!profile) {
+    throw new Error(`LLM profile not found: ${profileId}`);
+  }
+
+  const payload = profileRowToPayload(profile);
+  const client = createLLMClient({
+    provider: payload.provider,
+    baseUrl: payload.baseUrl,
+    apiKey: payload.apiKey,
+    model: payload.model,
+    temperature: payload.temperature ?? 0.7,
+    maxTokens: payload.maxTokens ?? 8192,
+    thinkingBudget: payload.thinkingBudget ?? 0,
+    apiFormat: payload.apiFormat ?? "chat",
+  });
+
+  const useStream = options?.useStream ?? true;
+  const includeReasoning = options?.includeReasoning ?? false;
+
+  if (client.provider === "openai" && client.apiFormat === "chat" && client._openai) {
+    const response = await chatWithOpenAiCompatibleProfile(client._openai, payload.model, messages, {
+      useStream,
+      includeReasoning,
+    });
+
+    return {
+      profileId,
+      provider: payload.provider,
+      model: payload.model,
+      content: response.content,
+      reasoning: response.reasoning,
+      applied: {
+        useStream,
+        includeReasoning,
+      },
+      usage: response.usage,
+    };
+  }
+
+  const response = await chatCompletion(client, payload.model, messages, {
+    temperature: 0.7,
+    maxTokens: 1000,
+  });
+
+  return {
+    profileId,
+    provider: payload.provider,
+    model: payload.model,
+    content: response.content,
+    applied: {
+      useStream: true,
+      includeReasoning: false,
+    },
+    usage: response.usage,
+  };
+}
+
+function isMoonshotCompatible(model: string, client: { baseURL?: string }): boolean {
+  const normalizedModel = model.toLowerCase();
+  const normalizedBaseUrl = client.baseURL?.toLowerCase() ?? "";
+  return normalizedModel.includes("moonshot")
+    || normalizedModel.includes("kimi")
+    || normalizedBaseUrl.includes("moonshot");
+}
+
+function extractTextValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => extractTextValue(item)).join("");
+  }
+  if (value && typeof value === "object") {
+    if ("text" in value && typeof value.text === "string") {
+      return value.text;
+    }
+    if ("content" in value) {
+      return extractTextValue((value as { content?: unknown }).content);
+    }
+  }
+  return "";
+}
+
+async function chatWithOpenAiCompatibleProfile(
+  client: any,
+  model: string,
+  messages: ReadonlyArray<{ readonly role: "system" | "user" | "assistant"; readonly content: string }>,
+  options: {
+    readonly useStream: boolean;
+    readonly includeReasoning: boolean;
+  },
+): Promise<{
+  readonly content: string;
+  readonly reasoning?: string;
+  readonly usage: {
+    readonly promptTokens: number;
+    readonly completionTokens: number;
+    readonly totalTokens: number;
+  };
+}> {
+  const moonshotCompat = isMoonshotCompatible(model, client);
+  const request = {
+    model,
+    messages: messages.map((message) => ({
+      role: message.role,
+      content: message.content,
+    })),
+    temperature: 0.7,
+    max_tokens: 1000,
+  };
+
+  if (options.useStream) {
+    const stream = await client.chat.completions.create({
+      ...request,
+      stream: true,
+    });
+
+    const contentChunks: string[] = [];
+    const reasoningChunks: string[] = [];
+    let promptTokens = 0;
+    let completionTokens = 0;
+
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta as {
+        content?: unknown;
+        reasoning?: unknown;
+        reasoning_content?: unknown;
+      } | undefined;
+
+      const content = extractTextValue(delta?.content);
+      if (content) {
+        contentChunks.push(content);
+      }
+
+      if (options.includeReasoning) {
+        const reasoning = extractTextValue(
+          moonshotCompat ? (delta?.reasoning_content ?? delta?.reasoning) : delta?.reasoning,
+        );
+        if (reasoning) {
+          reasoningChunks.push(reasoning);
+        }
+      }
+
+      if (chunk.usage) {
+        promptTokens = chunk.usage.prompt_tokens ?? 0;
+        completionTokens = chunk.usage.completion_tokens ?? 0;
+      }
+    }
+
+    const content = contentChunks.join("").trim();
+    if (!content) {
+      throw new Error("LLM returned empty response");
+    }
+
+    const reasoning = reasoningChunks.join("").trim();
+    return {
+      content,
+      reasoning: reasoning || undefined,
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens: promptTokens + completionTokens,
+      },
+    };
+  }
+
+  const completion = await client.chat.completions.create({
+    ...request,
+    stream: false,
+  });
+
+  const message = completion.choices[0]?.message as {
+    content?: unknown;
+    reasoning?: unknown;
+    reasoning_content?: unknown;
+  } | undefined;
+
+  const content = extractTextValue(message?.content).trim();
+  if (!content) {
+    throw new Error("LLM returned empty response");
+  }
+
+  const reasoning = options.includeReasoning
+    ? extractTextValue(moonshotCompat ? (message?.reasoning_content ?? message?.reasoning) : message?.reasoning).trim()
+    : "";
+
+  return {
+    content,
+    reasoning: reasoning || undefined,
+    usage: {
+      promptTokens: completion.usage?.prompt_tokens ?? 0,
+      completionTokens: completion.usage?.completion_tokens ?? 0,
+      totalTokens: completion.usage?.total_tokens
+        ?? ((completion.usage?.prompt_tokens ?? 0) + (completion.usage?.completion_tokens ?? 0)),
+    },
+  };
+}
+
+async function buildProfileChatSystemPrompt(input?: {
+  readonly genre?: string;
+  readonly platform?: string;
+  readonly provider?: string;
+  readonly model?: string;
+}): Promise<string> {
+  const genre = input?.genre?.trim() || "other";
+  const platform = input?.platform?.trim() || "other";
+  const systemContext = await buildInitAssistantSystemContext({ genre, platform });
+
+  return [
+    "以下内容是当前项目的业务背景资料，仅用于帮助你理解 InkOS 的使用场景。",
+    `当前测试面板绑定的模型配置：provider=${input?.provider ?? "unknown"}，model=${input?.model ?? "unknown"}。`,
+    "这些背景信息不会改变你的真实模型能力，也不要求你扮演任何项目内角色。",
+    "当问题与小说生产、题材、平台、写作流程、审计流程有关时，可以结合这些背景信息提高回答相关性。",
+    "当问题与这些背景无关时，按你本身的正常能力回答即可。",
+    "",
+    systemContext,
+  ].join("\n");
 }
 
 async function upsertActiveLlmProfileFromInit(payload: LlmProfilePayload): Promise<void> {
@@ -587,6 +923,14 @@ async function readAuthorBrief(bookId: string): Promise<string> {
   }
 }
 
+async function readStoryFile(bookId: string, filename: string): Promise<string> {
+  try {
+    return await readFile(join(projectRoot, "books", bookId, "story", filename), "utf-8");
+  } catch {
+    return "";
+  }
+}
+
 async function writeAuthorBrief(bookId: string, content: string): Promise<void> {
   if (!content.trim()) return;
   await mkdir(dirname(authorBriefPath(bookId)), { recursive: true });
@@ -597,6 +941,15 @@ function composeInitContext(context?: string, authorBrief?: string): string | un
   const sections = [
     context?.trim() ? `## 作者补充约束\n${context.trim()}` : "",
     authorBrief?.trim() ? `## 作者创作简报\n${authorBrief.trim()}` : "",
+  ].filter(Boolean);
+
+  return sections.length > 0 ? sections.join("\n\n") : undefined;
+}
+
+function mergeAuthorBrief(context?: string, authorBrief?: string): string | undefined {
+  const sections = [
+    context?.trim() ? `## 长期创作约束\n${context.trim()}` : "",
+    authorBrief?.trim() ? authorBrief.trim() : "",
   ].filter(Boolean);
 
   return sections.length > 0 ? sections.join("\n\n") : undefined;
@@ -628,6 +981,48 @@ function parseInitAssistantPayload(raw: string, currentBrief?: string): { reply:
   };
 }
 
+async function buildInitAssistantSystemContext(input: {
+  readonly genre: string;
+  readonly platform: string;
+}): Promise<string> {
+  let genreContext = `题材 ${input.genre} 暂无专属 profile，请按通俗网文开书逻辑处理。`;
+
+  try {
+    const parsed = await readGenreProfile(projectRoot, input.genre);
+    const trimmedBody = parsed.body
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .join("\n")
+      .slice(0, 2200);
+    genreContext = [
+      `题材名称：${parsed.profile.name}（${parsed.profile.id}）`,
+      `章节类型：${parsed.profile.chapterTypes.join("、")}`,
+      `节奏规则：${parsed.profile.pacingRule}`,
+      `爽点类型：${parsed.profile.satisfactionTypes.join("、")}`,
+      "",
+      "题材规则摘要：",
+      trimmedBody,
+    ].join("\n");
+  } catch {
+    // Fallback to generic context.
+  }
+
+  return [
+    "## InkOS 系统上下文",
+    "你服务的是 InkOS 小说生产系统，不是通用聊天机器人。",
+    `系统当前支持的标准题材有：${SUPPORTED_GENRES}。如果作者的想法跨题材，你要帮助他收束成最接近的一种主题材。`,
+    "作者一旦确认方案，系统后续会基于该方案自动生成：故事圣经、卷纲、本书规则、当前状态、伏笔池、资源账本、章节摘要等长期记忆文件。",
+    "所以你在初始化阶段必须帮作者把以下内容尽量聊清楚：题眼、主线、主角目标、阶段性高潮、结局方向、关键角色、世界或舞台边界、明显禁忌。",
+    "如果作者要写爽文，你要主动把爽点结构、反转节奏、开篇钩子和回报机制聊实，不要停留在空泛概念。",
+    "",
+    "## 平台偏好",
+    PLATFORM_GUIDANCE[input.platform] ?? PLATFORM_GUIDANCE.other,
+    "",
+    "## 题材知识",
+    genreContext,
+  ].join("\n");
+}
+
 async function runInitAssistant(input: {
   readonly title: string;
   readonly genre: string;
@@ -640,16 +1035,24 @@ async function runInitAssistant(input: {
 }): Promise<{ reply: string; brief: string }> {
   const config = await loadProjectConfig(projectRoot);
   const client = createLLMClient(config.llm);
+  const systemContext = await buildInitAssistantSystemContext({
+    genre: input.genre,
+    platform: input.platform,
+  });
 
   const systemPrompt = [
     "你是 InkOS 的智能初始化助手，负责在作者开书前通过对话梳理小说方案。",
     "你的任务不是直接写小说，而是帮助作者明确：主题、卖点、主线走向、阶段高潮、结局方向、主角人设、平台适配点。",
     "请使用简体中文，语气像资深网文编辑，直接、具体、可执行。",
     "如果信息还不完整，可以继续追问，但一次最多问 3 个关键问题。",
+    "你必须显式利用系统给你的平台信息、题材规则和 InkOS 架构上下文，不要把自己当成普通写作助手。",
+    "遇到书名还不稳、主线不清、结局含糊、主角动机发虚时，优先追问这些关键点。",
     "每次都要同步维护一份可直接用于初始化的“创作简报”。",
     "输出必须是 JSON，对象结构如下：",
     "{\"reply\":\"给作者的话\",\"brief\":\"完整创作简报Markdown\"}",
     "不要输出 Markdown 代码块，不要输出额外解释。",
+    "",
+    systemContext,
   ].join("\n");
 
   const metaPrompt = [
@@ -665,9 +1068,12 @@ async function runInitAssistant(input: {
     input.currentBrief?.trim() ? input.currentBrief.trim() : "（暂无，请你根据对话逐步整理）",
     "",
     "创作简报建议至少包含这些部分：",
+    "## 书名候选与题眼",
     "## 核心概念",
     "## 题材卖点与平台方向",
+    "## 开篇切入与前三章钩子",
     "## 主线走向",
+    "## 阶段高潮设计",
     "## 结局方向",
     "## 主角与关键角色",
     "## 世界观/舞台",
@@ -689,6 +1095,90 @@ async function runInitAssistant(input: {
   return parseInitAssistantPayload(response.content, input.currentBrief);
 }
 
+async function updateProjectModelOverrides(updates: Record<string, string | null | undefined>): Promise<Record<string, unknown>> {
+  const configPath = join(projectRoot, "inkos.json");
+  const raw = await readFile(configPath, "utf-8");
+  const config = JSON.parse(raw) as Record<string, unknown> & {
+    modelOverrides?: Record<string, string>;
+  };
+
+  const merged = { ...(config.modelOverrides ?? {}) };
+  for (const [key, value] of Object.entries(updates)) {
+    if (value && value.trim()) {
+      merged[key] = value.trim();
+    } else {
+      delete merged[key];
+    }
+  }
+
+  if (Object.keys(merged).length > 0) {
+    config.modelOverrides = merged;
+  } else {
+    delete config.modelOverrides;
+  }
+
+  await writeFile(configPath, JSON.stringify(config, null, 2), "utf-8");
+  return config;
+}
+
+async function runChapterAssistant(input: {
+  readonly bookId: string;
+  readonly chapterNumber: number;
+  readonly messages: ReadonlyArray<ChapterAssistantMessage>;
+}): Promise<{ reply: string }> {
+  const config = await loadProjectConfig(projectRoot);
+  const state = new StateManager(projectRoot);
+  const book = await state.loadBookConfig(input.bookId);
+  const chapterMeta = (await state.loadChapterIndex(input.bookId)).find((item) => item.number === input.chapterNumber);
+  const chapterFile = await findChapterFile(state.bookDir(input.bookId), input.chapterNumber);
+  const chapterRaw = await readFile(chapterFile, "utf-8");
+  const chapterContent = chapterRaw.split("\n").slice(2).join("\n").trim();
+  const authorBrief = await readAuthorBrief(input.bookId);
+  const currentState = await readStoryFile(input.bookId, "current_state.md");
+  const chapterSummaries = await readStoryFile(input.bookId, "chapter_summaries.md");
+  const dialogueModel = (config.modelOverrides?.dialogue ?? config.llm.model).trim();
+  const client = createLLMClient(config.llm);
+
+  const systemPrompt = [
+    "你是 InkOS 的章节级写作编辑助手。",
+    "你的任务是围绕当前章节提供具体、可执行的讨论意见：这一章哪里强、哪里弱、怎么改、下一步怎么写。",
+    "你不是泛泛聊天，要优先输出适合直接喂给修订或续写的建议。",
+    "如果用户在讨论修改意见，你要结合当前章节正文、长期创作约束、审计问题一起回答。",
+    "请使用简体中文，结论要直接，尽量给出分点建议。",
+  ].join("\n");
+
+  const contextPrompt = [
+    `书籍：${book.title}（${input.bookId}）`,
+    `题材：${book.genre}`,
+    `平台：${book.platform}`,
+    `章节：第${input.chapterNumber}章 ${chapterMeta?.title ?? ""}`.trim(),
+    chapterMeta?.status ? `当前状态：${chapterMeta.status}` : "",
+    chapterMeta?.auditIssues?.length ? `审计问题：\n- ${chapterMeta.auditIssues.join("\n- ")}` : "审计问题：（暂无）",
+    authorBrief.trim() ? `长期创作约束：\n${authorBrief.trim()}` : "长期创作约束：（暂无）",
+    currentState.trim() ? `当前状态卡：\n${currentState.trim()}` : "",
+    chapterSummaries.trim() ? `章节摘要：\n${chapterSummaries.trim().slice(-3000)}` : "",
+    `当前章节正文：\n${chapterContent.slice(0, 12000)}`,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  const response = await chatCompletion(
+    client,
+    dialogueModel,
+    [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: contextPrompt },
+      ...input.messages.map((message) => ({ role: message.role, content: message.content })),
+    ],
+    {
+      temperature: 0.7,
+      maxTokens: 4096,
+    },
+  );
+
+  return { reply: response.content.trim() };
+}
+
 app.get("/api/health", async (_req, res) => {
   res.json({
     ok: true,
@@ -700,6 +1190,36 @@ app.get("/api/health", async (_req, res) => {
 
 app.get("/api/project/summary", async (_req, res) => {
   res.json(await loadProjectSummary(projectRoot));
+});
+
+app.get("/api/project/config", async (_req, res) => {
+  try {
+    const raw = await readFile(join(projectRoot, "inkos.json"), "utf-8");
+    res.json({ ok: true, config: JSON.parse(raw) });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.put("/api/project/config", async (req, res) => {
+  const schema = z.object({
+    modelOverrides: z.object({
+      dialogue: z.string().optional().nullable(),
+    }).optional(),
+  });
+
+  try {
+    const input = schema.parse(req.body ?? {});
+    logInfo("project.config.update.start", { keys: Object.keys(input.modelOverrides ?? {}) });
+    const config = await updateProjectModelOverrides({
+      dialogue: input.modelOverrides?.dialogue,
+    });
+    logInfo("project.config.update.done", { hasDialogueOverride: Boolean((config.modelOverrides as Record<string, unknown> | undefined)?.dialogue) });
+    res.json({ ok: true, config });
+  } catch (error) {
+    logError("project.config.update.error", { error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
 });
 
 app.get("/api/books/:bookId/status", async (req, res) => {
@@ -729,7 +1249,7 @@ app.put("/api/books/:bookId/config", async (req, res) => {
     targetChapters: z.number().int().min(1).optional(),
     chapterWordCount: z.number().int().min(1000).optional(),
     status: z.enum(["incubating", "outlining", "active", "paused", "completed", "dropped"]).optional(),
-    genre: z.enum(["xuanhuan", "xianxia", "urban", "horror", "other"]).optional(),
+    genre: z.enum(["xuanhuan", "xianxia", "chuanyue", "urban", "horror", "other"]).optional(),
     platform: z.enum(["tomato", "feilu", "qidian", "other"]).optional(),
   });
 
@@ -749,6 +1269,77 @@ app.put("/api/books/:bookId/config", async (req, res) => {
     res.json({ ok: true, book: updated });
   } catch (error) {
     logError("books.config.update.error", { bookId: req.params.bookId, error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.post("/api/books/:bookId/style-import", async (req, res) => {
+  const schema = z.object({
+    filename: z.string().min(1),
+    content: z.string().min(1),
+    name: z.string().optional(),
+    statsOnly: z.boolean().optional(),
+  });
+
+  try {
+    const input = schema.parse(req.body ?? {});
+    const state = new StateManager(projectRoot);
+    const bookId = await resolveBookId(projectRoot, req.params.bookId);
+    const bookDir = state.bookDir(bookId);
+    const refsDir = join(bookDir, "story", "style_references");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const safeName = sanitizeFilename(input.filename.endsWith(".txt") ? input.filename : `${input.filename}.txt`);
+    const savedPath = join(refsDir, `${timestamp}_${safeName}`);
+
+    logInfo("books.style_import.upload.start", {
+      bookId,
+      filename: input.filename,
+      bytes: input.content.length,
+      statsOnly: input.statsOnly ?? false,
+    });
+
+    await mkdir(refsDir, { recursive: true });
+    await writeFile(savedPath, input.content, "utf-8");
+
+    const args = ["style", "import", savedPath, bookId];
+    if (input.name?.trim()) {
+      args.push("--name", input.name.trim());
+    }
+    if (input.statsOnly) {
+      args.push("--stats-only");
+    }
+    args.push("--json");
+
+    const result = await spawnCli(args, {
+      expectJson: true,
+      timeoutMs: webCommandTimeoutMs,
+    });
+
+    const ok = result.code === 0 && (!result.parsed || !("error" in (result.parsed as Record<string, unknown>)));
+    if (!ok) {
+      throw new Error(
+        typeof (result.parsed as { error?: unknown } | undefined)?.error === "string"
+          ? String((result.parsed as { error?: unknown }).error)
+          : result.stderr || result.stdout || "导入参考文风失败",
+      );
+    }
+
+    logInfo("books.style_import.upload.done", {
+      bookId,
+      savedPath,
+      statsOnly: input.statsOnly ?? false,
+    });
+    res.json({
+      ok: true,
+      bookId,
+      savedPath,
+      imported: result.parsed ?? { ok: true },
+    });
+  } catch (error) {
+    logError("books.style_import.upload.error", {
+      bookId: req.params.bookId,
+      error: describeError(error),
+    });
     res.status(400).json({ ok: false, error: describeError(error) });
   }
 });
@@ -802,6 +1393,39 @@ app.get("/api/books/:bookId/chapters/:chapter", async (req, res) => {
     });
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
+  const schema = z.object({
+    messages: z.array(z.object({
+      role: z.enum(["user", "assistant"]),
+      content: z.string().min(1),
+    })).min(1),
+  });
+
+  try {
+    const bookId = await resolveBookId(projectRoot, req.params.bookId);
+    const chapterNumber = parseInt(req.params.chapter, 10);
+    if (!Number.isFinite(chapterNumber) || chapterNumber < 1) {
+      throw new Error(`Invalid chapter number: ${req.params.chapter}`);
+    }
+    const input = schema.parse(req.body ?? {});
+    logInfo("chapter.chat.start", { bookId, chapterNumber, messageCount: input.messages.length });
+    const result = await runChapterAssistant({
+      bookId,
+      chapterNumber,
+      messages: input.messages,
+    });
+    logInfo("chapter.chat.done", { bookId, chapterNumber });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    logError("chapter.chat.error", {
+      bookId: req.params.bookId,
+      chapter: req.params.chapter,
+      error: describeError(error),
+    });
+    res.status(400).json({ ok: false, error: describeError(error) });
   }
 });
 
@@ -979,6 +1603,79 @@ app.post("/api/llm-profiles/:id/activate", async (req, res) => {
   }
 });
 
+app.post("/api/llm-profiles/:id/test", async (req, res) => {
+  try {
+    const profileId = req.params.id;
+    logInfo("llm_profiles.test.start", { profileId });
+    const result = await testLlmProfile(profileId);
+    logInfo("llm_profiles.test.done", {
+      profileId,
+      provider: result.provider,
+      model: result.model,
+    });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    logError("llm_profiles.test.error", { profileId: req.params.id, error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.post("/api/llm-profiles/:id/chat", async (req, res) => {
+  try {
+    const profileId = req.params.id;
+    const incoming: unknown[] = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = incoming
+      .filter((item: unknown): item is { role?: unknown; content?: unknown } => Boolean(item) && typeof item === "object")
+      .map((item: { role?: unknown; content?: unknown }) => ({
+        role: item.role === "assistant" ? "assistant" : item.role === "system" ? "system" : "user",
+        content: typeof item.content === "string" ? item.content : "",
+      }))
+      .filter((item) => item.content.trim().length > 0) as Array<{ role: "system" | "user" | "assistant"; content: string }>;
+
+    if (messages.length === 0) {
+      res.status(400).json({ ok: false, error: "messages is required" });
+      return;
+    }
+
+    const genre = typeof req.body?.genre === "string" ? req.body.genre : undefined;
+    const platform = typeof req.body?.platform === "string" ? req.body.platform : undefined;
+    const useStream = req.body?.useStream !== false;
+    const includeReasoning = req.body?.includeReasoning === true;
+    const db = openProfilesDb();
+    let profile: LlmProfileRow | null = null;
+    try {
+      profile = getProfileById(db, profileId);
+    } finally {
+      db.close();
+    }
+    const systemPrompt = await buildProfileChatSystemPrompt({
+      genre,
+      platform,
+      provider: profile?.provider,
+      model: profile?.model,
+    });
+    const normalizedMessages = [
+      { role: "system" as const, content: systemPrompt },
+      ...messages.filter((item) => item.role !== "system"),
+    ];
+
+    logInfo("llm_profiles.chat.start", { profileId, messageCount: normalizedMessages.length, genre, platform });
+    const result = await chatWithLlmProfile(profileId, normalizedMessages, { useStream, includeReasoning });
+    logInfo("llm_profiles.chat.done", {
+      profileId,
+      provider: result.provider,
+      model: result.model,
+      useStream: result.applied.useStream,
+      includeReasoning: result.applied.includeReasoning,
+      totalTokens: result.usage.totalTokens,
+    });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    logError("llm_profiles.chat.error", { profileId: req.params.id, error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
 app.delete("/api/llm-profiles/:id", async (req, res) => {
   try {
     const profileId = req.params.id;
@@ -1141,7 +1838,7 @@ app.get("/api/review/pending", async (req, res) => {
 app.post("/api/init-assistant/chat", async (req, res) => {
   const schema = z.object({
     title: z.string().min(1).default("未命名作品"),
-    genre: z.enum(["xuanhuan", "xianxia", "urban", "horror", "other"]).default("other"),
+    genre: z.enum(["xuanhuan", "xianxia", "chuanyue", "urban", "horror", "other"]).default("other"),
     platform: z.enum(["tomato", "feilu", "qidian", "other"]).default("tomato"),
     targetChapters: z.number().int().min(1).default(200),
     chapterWords: z.number().int().min(1000).default(3000),
@@ -1177,7 +1874,7 @@ app.post("/api/init-assistant/chat", async (req, res) => {
 app.post("/api/books", async (req, res) => {
   const schema = z.object({
     title: z.string().min(1),
-    genre: z.enum(["xuanhuan", "xianxia", "urban", "horror", "other"]).default("xuanhuan"),
+    genre: z.enum(["xuanhuan", "xianxia", "chuanyue", "urban", "horror", "other"]).default("chuanyue"),
     platform: z.enum(["tomato", "feilu", "qidian", "other"]).default("tomato"),
     targetChapters: z.number().int().min(1).default(200),
     chapterWords: z.number().int().min(1000).default(3000),
@@ -1191,7 +1888,8 @@ app.post("/api/books", async (req, res) => {
     const input = schema.parse(req.body ?? {});
     const book = await createBookConfig(input);
     const initMode = input.initMode ?? (input.fastInit ? "fast" : "full");
-    const initContext = composeInitContext(input.context, input.authorBrief);
+    const mergedBrief = mergeAuthorBrief(input.context, input.authorBrief);
+    const initContext = composeInitContext(input.context, mergedBrief);
     logInfo("books.create.accepted", {
       bookId: book.id,
       title: book.title,
@@ -1234,9 +1932,9 @@ app.post("/api/books", async (req, res) => {
           await pipeline.initBook(book);
         }
 
-        if (input.authorBrief?.trim()) {
+        if (mergedBrief?.trim()) {
           updateJobStep(job, "保存：作者创作简报");
-          await writeAuthorBrief(book.id, input.authorBrief);
+          await writeAuthorBrief(book.id, mergedBrief);
         }
 
         job.result = {

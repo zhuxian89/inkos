@@ -57,7 +57,7 @@ const TOOLS: ReadonlyArray<ToolDefinition> = [
       type: "object",
       properties: {
         title: { type: "string", description: "书名" },
-        genre: { type: "string", enum: ["xuanhuan", "xianxia", "urban", "horror", "other"], description: "题材" },
+        genre: { type: "string", enum: ["xuanhuan", "xianxia", "chuanyue", "urban", "horror", "other"], description: "题材" },
         platform: { type: "string", enum: ["tomato", "feilu", "qidian", "other"], description: "目标平台" },
         brief: { type: "string", description: "创作简述/需求（自然语言）" },
       },

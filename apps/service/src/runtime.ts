@@ -9,10 +9,9 @@ import {
 } from "@actalk/inkos-core";
 import { config as loadEnv } from "dotenv";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join } from "node:path";
 
-export const GLOBAL_CONFIG_DIR = join(homedir(), ".inkos");
+export const GLOBAL_CONFIG_DIR = process.env.INKOS_HOME?.trim() || join(process.env.HOME ?? "/root", ".inkos");
 export const GLOBAL_ENV_PATH = join(GLOBAL_CONFIG_DIR, ".env");
 
 export async function loadProjectConfig(projectRoot: string): Promise<ProjectConfig> {
@@ -34,7 +33,7 @@ export async function loadProjectConfig(projectRoot: string): Promise<ProjectCon
 
   const apiKey = env.INKOS_LLM_API_KEY;
   if (!apiKey) {
-    throw new Error("INKOS_LLM_API_KEY not set. Configure ~/.inkos/.env or project .env first.");
+    throw new Error("INKOS_LLM_API_KEY not set. Configure INKOS_HOME/.env or project .env first.");
   }
   config.llm.apiKey = apiKey;
 

@@ -55,6 +55,14 @@ export interface ChatWithToolsResult {
   readonly toolCalls: ReadonlyArray<ToolCall>;
 }
 
+function isMoonshotModel(model: string, client: OpenAI): boolean {
+  const normalizedModel = model.toLowerCase();
+  const normalizedBaseUrl = client.baseURL?.toLowerCase() ?? "";
+  return normalizedModel.includes("moonshot")
+    || normalizedModel.includes("kimi")
+    || normalizedBaseUrl.includes("moonshot");
+}
+
 // === Factory ===
 
 export function createLLMClient(config: LLMConfig): LLMClient {
@@ -178,7 +186,8 @@ async function chatCompletionOpenAIChat(
   options: { readonly temperature: number; readonly maxTokens: number },
   webSearch?: boolean,
 ): Promise<LLMResponse> {
-  const stream = await client.chat.completions.create({
+  const moonshotCompat = isMoonshotModel(model, client);
+  const request = {
     model,
     messages: messages.map((m) => ({
       role: m.role,
@@ -186,17 +195,28 @@ async function chatCompletionOpenAIChat(
     })),
     temperature: options.temperature,
     max_tokens: options.maxTokens,
-    stream: true,
     ...(webSearch ? { web_search_options: { search_context_size: "medium" as const } } : {}),
-  });
+  };
 
   const chunks: string[] = [];
   let inputTokens = 0;
   let outputTokens = 0;
+  const stream = await client.chat.completions.create({
+    ...request,
+    stream: true,
+  });
 
   for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta?.content;
-    if (delta) chunks.push(delta);
+    const delta = chunk.choices[0]?.delta as {
+      content?: string | null;
+      reasoning_content?: string | null;
+    } | undefined;
+    const textDelta = delta?.content
+      ?? (moonshotCompat ? delta?.reasoning_content : undefined)
+      ?? "";
+    if (textDelta) {
+      chunks.push(textDelta);
+    }
     if (chunk.usage) {
       inputTokens = chunk.usage.prompt_tokens ?? 0;
       outputTokens = chunk.usage.completion_tokens ?? 0;
@@ -204,7 +224,9 @@ async function chatCompletionOpenAIChat(
   }
 
   const content = chunks.join("");
-  if (!content) throw new Error("LLM returned empty response");
+  if (!content.trim()) {
+    throw new Error("LLM returned empty response");
+  }
 
   return {
     content,

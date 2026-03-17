@@ -27,8 +27,8 @@ export interface ProjectSummary {
 
 async function loadGlobalLlmConfig(): Promise<ProjectSummary["globalLlm"]> {
   try {
-    const home = process.env.HOME ?? "/root";
-    const raw = await readFile(join(home, ".inkos", ".env"), "utf-8");
+    const inkosHome = process.env.INKOS_HOME?.trim() || join(process.env.HOME ?? "/root", ".inkos");
+    const raw = await readFile(join(inkosHome, ".env"), "utf-8");
     const entries = raw
       .split("\n")
       .map((line) => line.trim())

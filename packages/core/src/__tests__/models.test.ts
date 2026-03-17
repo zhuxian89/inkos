@@ -123,6 +123,7 @@ describe("GenreSchema", () => {
   const validGenres = [
     "xuanhuan",
     "xianxia",
+    "chuanyue",
     "urban",
     "horror",
     "other",

@@ -1,9 +1,10 @@
 "use client";
 
-import { App, Alert, Button, Card, Descriptions, Space, Table, Typography } from "antd";
+import { App, Alert, Button, Card, Descriptions, Input, Modal, Space, Table, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { ChatPanel } from "./chat-panel";
 import { IssueTags } from "./issue-tags";
 import { ChapterActions } from "./chapter-actions";
 
@@ -24,6 +25,11 @@ interface ChapterDetail {
   readonly error?: string;
 }
 
+interface ChapterChatMessage {
+  readonly role: "user" | "assistant";
+  readonly content: string;
+}
+
 export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: string; embedded?: boolean }>) {
   const { message } = App.useApp();
   const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>([]);
@@ -32,6 +38,10 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [openingChapter, setOpeningChapter] = useState<number | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [reviewAction, setReviewAction] = useState<string | null>(null);
+  const [chatChapter, setChatChapter] = useState<ChapterMeta | null>(null);
+  const [chatMessages, setChatMessages] = useState<ReadonlyArray<ChapterChatMessage>>([]);
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatting, setChatting] = useState(false);
 
   async function loadChapters(): Promise<void> {
     setIsRefreshing(true);
@@ -81,6 +91,36 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       .finally(() => setReviewAction(null));
   }
 
+  function openChapterChat(row: ChapterMeta): void {
+    setChatChapter(row);
+    setChatMessages([]);
+    setChatDraft("");
+  }
+
+  function sendChapterChat(): void {
+    if (!chatChapter || !chatDraft.trim() || chatting) return;
+    const nextMessages = [...chatMessages, { role: "user" as const, content: chatDraft.trim() }];
+    setChatMessages(nextMessages);
+    setChatDraft("");
+    setChatting(true);
+    void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chatChapter.number}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messages: nextMessages }),
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || !data?.ok) {
+          throw new Error(data?.error ?? "章节对话失败");
+        }
+        setChatMessages((prev) => [...prev, { role: "assistant", content: String(data.reply ?? "") }]);
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setChatting(false));
+  }
+
   const columns: ColumnsType<ChapterMeta> = [
     {
       title: "操作",
@@ -89,6 +129,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       render: (_, row) => (
         <Space>
           <Button size="small" loading={openingChapter === row.number} onClick={() => loadChapterDetail(row.number)}>打开</Button>
+          <Button size="small" onClick={() => openChapterChat(row)}>对话</Button>
           <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}><Button size="small" type="link">详情</Button></Link>
           <ChapterActions
             bookId={bookId}
@@ -151,6 +192,35 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           <Alert type="info" showIcon message={<pre style={{ margin: 0 }}>{JSON.stringify(actionResult, null, 2)}</pre>} />
         )}
       </Card>
+
+      <Modal
+        open={Boolean(chatChapter)}
+        onCancel={() => {
+          if (!chatting) setChatChapter(null);
+        }}
+        footer={null}
+        width={860}
+        destroyOnClose
+        title={chatChapter ? `章节对话 · Ch.${chatChapter.number} ${chatChapter.title}` : "章节对话"}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          <Typography.Text type="secondary">
+            这里可以直接讨论这一章怎么改、哪里不够强、下一章怎么接。系统会自动读取本章正文、审计问题、书籍设定和长期创作约束。
+          </Typography.Text>
+          <ChatPanel
+            messages={chatMessages}
+            value={chatDraft}
+            onChange={setChatDraft}
+            onSend={sendChapterChat}
+            sending={chatting}
+            placeholder="例如：这一章的冲突太平了，帮我指出最该重写的三处，并给出具体修改方向。"
+            emptyText="先说一句你想讨论什么，例如“这一章结尾不够炸，帮我给出三种改法”。"
+            minHeight={320}
+            maxHeight={480}
+            footerRight={<Button onClick={() => setChatChapter(null)} disabled={chatting}>关闭</Button>}
+          />
+        </Space>
+      </Modal>
     </Space>
   );
 

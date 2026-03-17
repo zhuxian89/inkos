@@ -4,6 +4,8 @@ export function labelGenre(genre: string): string {
       return "玄幻";
     case "xianxia":
       return "仙侠";
+    case "chuanyue":
+      return "穿越";
     case "urban":
       return "都市";
     case "horror":
@@ -48,4 +50,3 @@ export function labelBookStatus(status: string): string {
       return status;
   }
 }
-

@@ -4,6 +4,7 @@ import { Alert, Button, Card, Col, Divider, Form, Input, InputNumber, Radio, Row
 import type { ColumnsType } from "antd/es/table";
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useRef, useState, useTransition } from "react";
+import { ChatPanel } from "./chat-panel";
 import { IssueTags } from "./issue-tags";
 import { labelBookStatus, labelGenre, labelPlatform } from "./labels";
 
@@ -200,7 +201,7 @@ export function InkosConsole() {
     });
     createBookForm.setFieldsValue({
       title: "",
-      genre: "xuanhuan",
+      genre: "chuanyue",
       platform: "tomato",
       targetChapters: 200,
       chapterWords: 3000,
@@ -336,7 +337,7 @@ export function InkosConsole() {
   function submitCreateBook(values: CreateBookValues): void {
     if (isCreatingBook) return;
     if (values.initMode === "smart" && !initAssistantBrief.trim()) {
-      setError("请先完成一次智能初始化对话，生成创作简报后再创建书籍。");
+      setError("请先完成一次智能初始化对话，生成长期创作约束后再创建书籍。");
       return;
     }
     setError(null);
@@ -584,6 +585,7 @@ export function InkosConsole() {
                         <Form.Item label="书名" name="title" rules={[{ required: true }]}><Input /></Form.Item>
                         <Form.Item label="题材" name="genre" rules={[{ required: true }]}>
                           <Select options={[
+                            { value: "chuanyue", label: "穿越（chuanyue）" },
                             { value: "xuanhuan", label: "玄幻（xuanhuan）" },
                             { value: "xianxia", label: "仙侠（xianxia）" },
                             { value: "urban", label: "都市（urban）" },
@@ -621,38 +623,27 @@ export function InkosConsole() {
                           >
                             <Space direction="vertical" size={12} style={{ width: "100%" }}>
                               <Typography.Text type="secondary">
-                                先和初始化助手聊清楚主题、主线、结局、人物和平台方向，再用整理后的创作简报进入完整初始化。
+                                先和初始化助手聊清楚主题、主线、结局、人物和平台方向，再用整理后的长期创作约束进入完整初始化。
                               </Typography.Text>
-                              <div style={{ maxHeight: 240, overflow: "auto", padding: 12, border: "1px solid #f0f0f0", borderRadius: 8, background: "#fff" }}>
-                                {initAssistantMessages.length === 0 ? (
-                                  <Typography.Text type="secondary">先输入你的题材、故事走向或结局想法，助手会帮你整理成开书简报。</Typography.Text>
-                                ) : (
-                                  <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                                    {initAssistantMessages.map((message, index) => (
-                                      <div key={`${message.role}-${index}`}>
-                                        <Typography.Text strong>{message.role === "user" ? "你" : "初始化助手"}</Typography.Text>
-                                        <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{message.content}</div>
-                                      </div>
-                                    ))}
-                                  </Space>
-                                )}
-                              </div>
-                              <Input.TextArea
-                                rows={4}
+                              <ChatPanel
+                                messages={initAssistantMessages}
                                 value={initAssistantDraft}
-                                onChange={(event) => setInitAssistantDraft(event.target.value)}
+                                onChange={setInitAssistantDraft}
+                                onSend={sendInitAssistantMessage}
+                                sending={isChattingInitAssistant}
                                 placeholder="例如：我想写一本都市修仙，主角前期苟着发育，中期开始反杀，结局是建立新秩序。"
+                                emptyText="先输入你的题材、故事走向或结局想法，助手会帮你整理成长期创作约束。"
+                                minHeight={240}
+                                maxHeight={360}
+                                sendText="发送给初始化助手"
                               />
-                              <Button onClick={sendInitAssistantMessage} loading={isChattingInitAssistant}>
-                                发送给初始化助手
-                              </Button>
                               <div>
-                                <Typography.Text strong>创作简报</Typography.Text>
+                                <Typography.Text strong>长期创作约束</Typography.Text>
                                 <Input.TextArea
                                   rows={10}
                                   value={initAssistantBrief}
                                   onChange={(event) => setInitAssistantBrief(event.target.value)}
-                                  placeholder="智能初始化整理出的创作简报会显示在这里，创建后也可以继续修改。"
+                                  placeholder="智能初始化整理出的长期创作约束会显示在这里，创建后也可以继续修改。"
                                   style={{ marginTop: 8 }}
                                 />
                               </div>

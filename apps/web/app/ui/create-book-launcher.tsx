@@ -1,7 +1,8 @@
 "use client";
 
-import { App, Button, Card, Form, Input, InputNumber, Modal, Radio, Select, Space, Typography } from "antd";
+import { App, Button, Card, Col, Divider, Form, Input, InputNumber, Modal, Radio, Row, Select, Space, Tag, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
+import { ChatPanel } from "./chat-panel";
 
 interface CreateBookValues {
   readonly title: string;
@@ -46,7 +47,7 @@ export function CreateBookLauncher(props: Readonly<{
   useEffect(() => {
     form.setFieldsValue({
       title: "",
-      genre: "xuanhuan",
+      genre: "chuanyue",
       platform: "tomato",
       targetChapters: 200,
       chapterWords: 3000,
@@ -115,7 +116,7 @@ export function CreateBookLauncher(props: Readonly<{
   function submitCreateBook(values: CreateBookValues): void {
     if (isCreating) return;
     if (values.initMode === "smart" && !assistantBrief.trim()) {
-      void message.error("请先完成一次智能初始化对话，生成创作简报后再创建。");
+      void message.error("请先完成一次智能初始化对话，生成长期创作约束后再创建。");
       return;
     }
 
@@ -164,7 +165,7 @@ export function CreateBookLauncher(props: Readonly<{
                 await props.onCreated?.();
                 setOpen(false);
                 form.resetFields();
-                form.setFieldsValue({ genre: "xuanhuan", platform: "tomato", targetChapters: 200, chapterWords: 3000, initMode: "full", context: "" });
+                form.setFieldsValue({ genre: "chuanyue", platform: "tomato", targetChapters: 200, chapterWords: 3000, initMode: "full", context: "" });
                 resetAssistant();
               } else {
                 void message.error(job.error ?? "创建书籍失败");
@@ -192,97 +193,111 @@ export function CreateBookLauncher(props: Readonly<{
         open={open}
         onCancel={closeModal}
         footer={null}
-        width={860}
+        width={selectedCreateMode === "smart" ? 1240 : 860}
         destroyOnHidden
       >
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
           <Typography.Text type="secondary">
-            先定义这本书的基础参数。高阶的创作方向可以用“智能初始化”慢慢聊清楚。
+            创建流程分成两部分：左侧确定基础参数，右侧通过多轮对话把书名、主线、角色和结局方向聊清楚。
           </Typography.Text>
           <Form layout="vertical" form={form} onFinish={submitCreateBook}>
-            <Form.Item label="书名" name="title" rules={[{ required: true }]}>
-              <Input />
-            </Form.Item>
-            <Form.Item label="题材" name="genre" rules={[{ required: true }]}>
-              <Select options={[
-                { value: "xuanhuan", label: "玄幻" },
-                { value: "xianxia", label: "仙侠" },
-                { value: "urban", label: "都市" },
-                { value: "horror", label: "恐怖" },
-                { value: "other", label: "其他" },
-              ]} />
-            </Form.Item>
-            <Form.Item label="平台" name="platform" rules={[{ required: true }]}>
-              <Select options={[
-                { value: "tomato", label: "番茄" },
-                { value: "feilu", label: "飞卢" },
-                { value: "qidian", label: "起点" },
-                { value: "other", label: "其他" },
-              ]} />
-            </Form.Item>
-            <Space style={{ width: "100%" }} size={12}>
-              <Form.Item label="目标章节数" name="targetChapters" rules={[{ required: true }]} style={{ flex: 1 }}>
-                <InputNumber min={1} style={{ width: "100%" }} />
-              </Form.Item>
-              <Form.Item label="每章字数" name="chapterWords" rules={[{ required: true }]} style={{ flex: 1 }}>
-                <InputNumber min={500} style={{ width: "100%" }} />
-              </Form.Item>
-            </Space>
-            <Form.Item label="长期创作约束" name="context">
-              <Input.TextArea rows={4} />
-            </Form.Item>
-            <Form.Item label="初始化方式" name="initMode" rules={[{ required: true }]}>
-              <Radio.Group
-                optionType="button"
-                buttonStyle="solid"
-                options={[
-                  { value: "fast", label: "快速初始化" },
-                  { value: "full", label: "完整初始化" },
-                  { value: "smart", label: "智能初始化" },
-                ]}
-              />
-            </Form.Item>
-            {selectedCreateMode === "smart" ? (
-              <Card size="small" title="智能初始化">
-                <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                  <div style={{ maxHeight: 220, overflow: "auto", padding: 12, border: "1px solid #f0f0f0", borderRadius: 8 }}>
-                    {assistantMessages.length === 0 ? (
-                      <Typography.Text type="secondary">先说说主题、主线、人物或结局，系统会整理成创作简报。</Typography.Text>
-                    ) : (
-                      <Space direction="vertical" size={10} style={{ width: "100%" }}>
-                        {assistantMessages.map((message, index) => (
-                          <div key={`${message.role}-${index}`}>
-                            <Typography.Text strong>{message.role === "user" ? "你" : "初始化助手"}</Typography.Text>
-                            <div style={{ whiteSpace: "pre-wrap", marginTop: 4 }}>{message.content}</div>
-                          </div>
-                        ))}
-                      </Space>
-                    )}
-                  </div>
-                  <Input.TextArea
-                    rows={4}
-                    value={assistantDraft}
-                    onChange={(event) => setAssistantDraft(event.target.value)}
-                    placeholder="例如：我想写一本都市修仙，前期压抑，中期反杀，结局建立新秩序。"
-                  />
-                  <Button onClick={sendInitAssistantMessage} loading={chatting}>发送给初始化助手</Button>
-                  <div>
-                    <Typography.Text strong>创作简报</Typography.Text>
-                    <Input.TextArea
-                      rows={8}
-                      value={assistantBrief}
-                      onChange={(event) => setAssistantBrief(event.target.value)}
-                      placeholder="对话整理出的创作简报会显示在这里，创建后也可以继续修改。"
-                      style={{ marginTop: 8 }}
+            <Row gutter={[16, 16]}>
+              <Col xs={24} lg={selectedCreateMode === "smart" ? 10 : 24}>
+                <Card
+                  size="small"
+                  title="基本信息"
+                  extra={<Tag color={selectedCreateMode === "smart" ? "blue" : "default"}>{selectedCreateMode === "smart" ? "智能初始化" : "标准模式"}</Tag>}
+                >
+                  <Form.Item label="书名" name="title" rules={[{ required: true }]}>
+                    <Input placeholder="先写一个暂定名，也可以在右侧对话里慢慢确认" />
+                  </Form.Item>
+                  <Form.Item label="题材" name="genre" rules={[{ required: true }]}>
+                    <Select options={[
+                      { value: "chuanyue", label: "穿越" },
+                      { value: "xuanhuan", label: "玄幻" },
+                      { value: "xianxia", label: "仙侠" },
+                      { value: "urban", label: "都市" },
+                      { value: "horror", label: "恐怖" },
+                      { value: "other", label: "其他" },
+                    ]} />
+                  </Form.Item>
+                  <Form.Item label="平台" name="platform" rules={[{ required: true }]}>
+                    <Select options={[
+                      { value: "tomato", label: "番茄" },
+                      { value: "feilu", label: "飞卢" },
+                      { value: "qidian", label: "起点" },
+                      { value: "other", label: "其他" },
+                    ]} />
+                  </Form.Item>
+                  <Row gutter={12}>
+                    <Col span={12}>
+                      <Form.Item label="目标章节数" name="targetChapters" rules={[{ required: true }]}>
+                        <InputNumber min={1} style={{ width: "100%" }} />
+                      </Form.Item>
+                    </Col>
+                    <Col span={12}>
+                      <Form.Item label="每章字数" name="chapterWords" rules={[{ required: true }]}>
+                        <InputNumber min={500} style={{ width: "100%" }} />
+                      </Form.Item>
+                    </Col>
+                  </Row>
+                  <Form.Item label="长期创作约束" name="context">
+                    <Input.TextArea rows={5} placeholder="这里写长期有效的创作要求。创建后会并入这本书的长期创作约束，并在后续每次续写时被读取。" />
+                  </Form.Item>
+                  <Form.Item label="初始化方式" name="initMode" rules={[{ required: true }]}>
+                    <Radio.Group
+                      optionType="button"
+                      buttonStyle="solid"
+                      options={[
+                        { value: "fast", label: "快速初始化" },
+                        { value: "full", label: "完整初始化" },
+                        { value: "smart", label: "智能初始化" },
+                      ]}
                     />
-                  </div>
-                </Space>
-              </Card>
-            ) : null}
-            <Space>
-              <Button type="primary" htmlType="submit" loading={isCreating}>创建书籍</Button>
-              {createStep ? <Typography.Text type="secondary">{createStep}</Typography.Text> : null}
-            </Space>
+                  </Form.Item>
+                  <Divider style={{ margin: "12px 0" }} />
+                  <Space>
+                    <Button type="primary" htmlType="submit" loading={isCreating}>创建书籍</Button>
+                    {createStep ? <Typography.Text type="secondary">{createStep}</Typography.Text> : null}
+                  </Space>
+                </Card>
+              </Col>
+
+              {selectedCreateMode === "smart" ? (
+                <Col xs={24} lg={14}>
+                  <Card size="small" title="智能初始化对话">
+                    <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                      <Typography.Text type="secondary">
+                        这里用来多轮确认书名、卖点、主线、角色关系、阶段高潮和结局方向。左边的基础参数会作为上下文一起参与对话。
+                      </Typography.Text>
+                      <ChatPanel
+                        messages={assistantMessages}
+                        value={assistantDraft}
+                        onChange={setAssistantDraft}
+                        onSend={sendInitAssistantMessage}
+                        sending={chatting}
+                        placeholder="例如：我想写一本短篇穿越爽文，地点在武大图书馆，人物和案件全部架空，男主重生后要一步步翻盘，结局必须痛快。"
+                        emptyText="先说说你想写什么，比如主题、人物、冲突、结局倾向。助手会一边追问，一边整理成长期创作约束；左侧填写的要求也会并进去。"
+                        minHeight={300}
+                        maxHeight={420}
+                        footerLeft={<Typography.Text type="secondary">建议连续聊 3 到 5 轮，再创建。</Typography.Text>}
+                        sendText="发送给初始化助手"
+                      />
+                      <div>
+                        <Typography.Text strong>长期创作约束</Typography.Text>
+                        <Input.TextArea
+                          rows={10}
+                          value={assistantBrief}
+                          onChange={(event) => setAssistantBrief(event.target.value)}
+                          placeholder="对话整理出的长期创作约束会显示在这里。创建时会与左侧填写内容合并保存，创建后也可以继续修改。"
+                          style={{ marginTop: 8 }}
+                        />
+                      </div>
+                    </Space>
+                  </Card>
+                </Col>
+              ) : null}
+            </Row>
           </Form>
           {createResult ? (
             <Card size="small" title="结果">

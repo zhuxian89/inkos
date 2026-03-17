@@ -5,6 +5,7 @@ import {
   Alert,
   Button,
   Card,
+  Checkbox,
   Col,
   Form,
   Input,
@@ -17,17 +18,27 @@ import {
   Statistic,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from "antd";
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useState } from "react";
+import { ChatPanel } from "./chat-panel";
 
-interface SetupValues {
-  readonly name: string;
-  readonly provider: string;
-  readonly baseUrl: string;
-  readonly apiKey: string;
-  readonly model: string;
-}
+const PROFILE_CHAT_STORAGE_PREFIX = "inkos.profile-chat.";
+const PROFILE_CHAT_GENRE_OPTIONS = [
+  { label: "穿越", value: "chuanyue" },
+  { label: "玄幻", value: "xuanhuan" },
+  { label: "仙侠", value: "xianxia" },
+  { label: "都市", value: "urban" },
+  { label: "恐怖", value: "horror" },
+  { label: "其他", value: "other" },
+];
+const PROFILE_CHAT_PLATFORM_OPTIONS = [
+  { label: "番茄", value: "tomato" },
+  { label: "起点", value: "qidian" },
+  { label: "飞卢", value: "feilu" },
+  { label: "其他", value: "other" },
+];
 
 interface ProfileFormValues {
   readonly name: string;
@@ -47,6 +58,9 @@ interface SetupSummaryResponse {
       readonly provider?: string;
       readonly baseUrl?: string;
       readonly model?: string;
+    };
+    readonly modelOverrides?: {
+      readonly dialogue?: string;
     };
   } | null;
   readonly globalLlm?: {
@@ -81,10 +95,23 @@ interface LlmProfilesResponse {
   readonly activeProfileId: string | null;
 }
 
+interface ProfileChatMessage {
+  readonly role: "user" | "assistant";
+  readonly content: string;
+  readonly reasoning?: string;
+}
+
+interface StoredProfileChatSession {
+  readonly messages: ReadonlyArray<ProfileChatMessage>;
+  readonly genre?: string;
+  readonly platform?: string;
+  readonly useStream?: boolean;
+  readonly includeReasoning?: boolean;
+}
+
 export function SetupWorkspace() {
   const { message } = App.useApp();
   const [initialized, setInitialized] = useState<boolean>(false);
-  const [apiKeyConfigured, setApiKeyConfigured] = useState<boolean>(false);
   const [summary, setSummary] = useState<SetupSummaryResponse | null>(null);
   const [daemon, setDaemon] = useState<CommandCatalogResponse["daemon"] | null>(null);
   const [doctorResult, setDoctorResult] = useState<unknown>(null);
@@ -94,13 +121,21 @@ export function SetupWorkspace() {
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileModalOpen, setProfileModalOpen] = useState(false);
   const [profileSaving, setProfileSaving] = useState(false);
+  const [dialogueModel, setDialogueModel] = useState<string>("");
+  const [savingDialogueModel, setSavingDialogueModel] = useState(false);
   const [editingProfile, setEditingProfile] = useState<LlmProfile | null>(null);
   const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
-  const [form] = Form.useForm<SetupValues>();
+  const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
+  const [profileTestResult, setProfileTestResult] = useState<unknown>(null);
+  const [chatProfile, setChatProfile] = useState<LlmProfile | null>(null);
+  const [profileChatInput, setProfileChatInput] = useState("");
+  const [profileChatMessages, setProfileChatMessages] = useState<ReadonlyArray<ProfileChatMessage>>([]);
+  const [profileChatGenre, setProfileChatGenre] = useState<string>("chuanyue");
+  const [profileChatPlatform, setProfileChatPlatform] = useState<string>("tomato");
+  const [profileChatUseStream, setProfileChatUseStream] = useState(true);
+  const [profileChatIncludeReasoning, setProfileChatIncludeReasoning] = useState(false);
+  const [chattingProfileId, setChattingProfileId] = useState<string | null>(null);
   const [profileForm] = Form.useForm<ProfileFormValues>();
-  const [result, setResult] = useState<unknown>(null);
-  const [resultType, setResultType] = useState<"success" | "error" | null>(null);
-  const [isPending, startTransition] = useTransition();
   const [isTesting, setIsTesting] = useState(false);
   const [daemonAction, setDaemonAction] = useState<"up" | "down" | null>(null);
 
@@ -118,61 +153,38 @@ export function SetupWorkspace() {
     setInitialized(Boolean(data.initialized));
     setProfiles(Array.isArray(profilePayload.profiles) ? profilePayload.profiles : []);
     setActiveProfileId(profilePayload.activeProfileId ?? null);
-
-    const activeProfile = profilePayload.profiles?.find((item) => item.id === profilePayload.activeProfileId);
-    const provider = activeProfile?.provider ?? data.globalLlm?.provider ?? data.config?.llm?.provider ?? "openai";
-    const baseUrl = activeProfile?.baseUrl ?? data.globalLlm?.baseUrl ?? data.config?.llm?.baseUrl ?? "https://api.openai.com/v1";
-    const model = activeProfile?.model ?? data.globalLlm?.model ?? data.config?.llm?.model ?? "gpt-4o";
-    const hasApiKey = Boolean(data.globalLlm?.apiKeyConfigured);
-    setApiKeyConfigured(hasApiKey);
-    form.setFieldsValue({
-      name: data.config?.name ?? "",
-      provider,
-      baseUrl,
-      model,
-      apiKey: "",
-    });
+    setDialogueModel(data.config?.modelOverrides?.dialogue ?? "");
   }
 
   useEffect(() => {
     void loadSettingsContext();
-  }, [form]);
+  }, []);
 
-  function submit(values: SetupValues): void {
-    startTransition(() => {
-      void fetch("/api/inkos/project/init", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          name: values.name || undefined,
-          provider: values.provider,
-          baseUrl: values.baseUrl,
-          apiKey: values.apiKey?.trim() ? values.apiKey : undefined,
-          model: values.model,
-        }),
-      })
-        .then((response) => response.json())
-        .then((data) => {
-          setResult(data);
-          if (data?.ok) {
-            setInitialized(true);
-            setApiKeyConfigured(true);
-            form.setFieldValue("apiKey", "");
-            setResultType("success");
-            void message.success("配置保存成功");
-            void loadSettingsContext();
-          } else {
-            setResultType("error");
-            void message.error(data?.error ?? "配置保存失败");
-          }
-        })
-        .catch((error: unknown) => {
-          const errorText = error instanceof Error ? error.message : String(error);
-          setResult({ ok: false, error: errorText });
-          setResultType("error");
-          void message.error(errorText);
-        });
-    });
+  function profileChatStorageKey(profileId: string): string {
+    return `${PROFILE_CHAT_STORAGE_PREFIX}${profileId}`;
+  }
+
+  function loadStoredProfileChat(profileId: string): StoredProfileChatSession | null {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem(profileChatStorageKey(profileId));
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as StoredProfileChatSession;
+      return {
+        messages: Array.isArray(parsed.messages) ? parsed.messages : [],
+        genre: typeof parsed.genre === "string" ? parsed.genre : undefined,
+        platform: typeof parsed.platform === "string" ? parsed.platform : undefined,
+        useStream: parsed.useStream !== false,
+        includeReasoning: parsed.includeReasoning === true,
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  function persistProfileChat(profileId: string, payload: StoredProfileChatSession): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(profileChatStorageKey(profileId), JSON.stringify(payload));
   }
 
   function runDoctor(): void {
@@ -189,13 +201,13 @@ export function SetupWorkspace() {
   }
 
   function openCreateProfile(): void {
-    const current = form.getFieldsValue();
+    const activeProfile = profiles.find((item) => item.id === activeProfileId);
     setEditingProfile(null);
     profileForm.setFieldsValue({
       name: "",
-      provider: current.provider ?? "openai",
-      baseUrl: current.baseUrl ?? "https://api.openai.com/v1",
-      model: current.model ?? "gpt-4o",
+      provider: activeProfile?.provider ?? summary?.globalLlm?.provider ?? summary?.config?.llm?.provider ?? "openai",
+      baseUrl: activeProfile?.baseUrl ?? summary?.globalLlm?.baseUrl ?? summary?.config?.llm?.baseUrl ?? "https://api.openai.com/v1",
+      model: activeProfile?.model ?? summary?.globalLlm?.model ?? summary?.config?.llm?.model ?? "gpt-4o",
       apiKey: "",
     });
     setProfileModalOpen(true);
@@ -227,7 +239,7 @@ export function SetupWorkspace() {
         baseUrl: values.baseUrl,
         model: values.model,
         apiKey: values.apiKey?.trim() || undefined,
-        activate: !editingProfile,
+        activate: false,
       }),
     })
       .then((response) => response.json())
@@ -238,7 +250,7 @@ export function SetupWorkspace() {
         setProfileModalOpen(false);
         profileForm.resetFields();
         await loadSettingsContext();
-        void message.success(editingProfile ? "配置已更新" : "配置已创建并激活");
+        void message.success(editingProfile ? "配置已更新" : "配置已创建");
       })
       .catch((error: unknown) => {
         void message.error(error instanceof Error ? error.message : String(error));
@@ -285,6 +297,115 @@ export function SetupWorkspace() {
       .finally(() => setDeletingProfileId(null));
   }
 
+  function testProfile(profileId: string): void {
+    if (testingProfileId) return;
+    setTestingProfileId(profileId);
+    setProfileTestResult(null);
+    void fetch(`/api/inkos/llm-profiles/${profileId}/test`, { method: "POST" })
+      .then((response) => response.json())
+      .then((data) => {
+        setProfileTestResult(data);
+        if (!data?.ok) {
+          throw new Error(data?.error ?? "测试失败");
+        }
+        void message.success("LLM 测试通过");
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setTestingProfileId(null));
+  }
+
+  function openProfileChat(profile: LlmProfile): void {
+    const stored = loadStoredProfileChat(profile.id);
+    setChatProfile(profile);
+    setProfileChatInput("");
+    setProfileChatMessages(stored?.messages ?? []);
+    setProfileChatGenre(stored?.genre ?? "chuanyue");
+    setProfileChatPlatform(stored?.platform ?? "tomato");
+    setProfileChatUseStream(stored?.useStream !== false);
+    setProfileChatIncludeReasoning(stored?.includeReasoning === true);
+  }
+
+  function sendProfileChat(): void {
+    if (!chatProfile || chattingProfileId) return;
+    const input = profileChatInput.trim();
+    if (!input) return;
+
+    const nextMessages: ReadonlyArray<ProfileChatMessage> = [
+      ...profileChatMessages,
+      { role: "user", content: input },
+    ];
+    setProfileChatMessages(nextMessages);
+    persistProfileChat(chatProfile.id, {
+      messages: nextMessages,
+      genre: profileChatGenre,
+      platform: profileChatPlatform,
+      useStream: profileChatUseStream,
+      includeReasoning: profileChatIncludeReasoning,
+    });
+    setProfileChatInput("");
+    setChattingProfileId(chatProfile.id);
+
+    void fetch(`/api/inkos/llm-profiles/${chatProfile.id}/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messages: nextMessages,
+        genre: profileChatGenre,
+        platform: profileChatPlatform,
+        useStream: profileChatUseStream,
+        includeReasoning: profileChatIncludeReasoning,
+      }),
+    })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data?.ok) {
+          throw new Error(data?.error ?? "对话失败");
+        }
+        setProfileChatMessages((current) => {
+          const updated = [
+            ...current,
+            {
+              role: "assistant" as const,
+              content: typeof data?.content === "string" ? data.content : "",
+              reasoning: typeof data?.reasoning === "string" ? data.reasoning : undefined,
+            },
+          ];
+          persistProfileChat(chatProfile.id, {
+            messages: updated,
+            genre: profileChatGenre,
+            platform: profileChatPlatform,
+            useStream: profileChatUseStream,
+            includeReasoning: profileChatIncludeReasoning,
+          });
+          return updated;
+        });
+      })
+      .catch((error: unknown) => {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        setProfileChatMessages((current) => {
+          const updated = [
+            ...current,
+            {
+              role: "assistant" as const,
+              content: `请求失败：${errorMessage}`,
+            },
+          ];
+          persistProfileChat(chatProfile.id, {
+            messages: updated,
+            genre: profileChatGenre,
+            platform: profileChatPlatform,
+            useStream: profileChatUseStream,
+            includeReasoning: profileChatIncludeReasoning,
+          });
+          return updated;
+        });
+        void message.error(errorMessage);
+      })
+      .finally(() => setChattingProfileId(null));
+  }
+
   function toggleDaemon(action: "up" | "down"): void {
     if (daemonAction) return;
     setDaemonAction(action);
@@ -299,6 +420,32 @@ export function SetupWorkspace() {
         await loadSettingsContext();
       })
       .finally(() => setDaemonAction(null));
+  }
+
+  function saveDialogueModel(): void {
+    if (savingDialogueModel) return;
+    setSavingDialogueModel(true);
+    void fetch("/api/inkos/project/config", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        modelOverrides: {
+          dialogue: dialogueModel.trim() || null,
+        },
+      }),
+    })
+      .then((response) => response.json())
+      .then(async (data) => {
+        if (!data?.ok) {
+          throw new Error(data?.error ?? "保存对话模型失败");
+        }
+        await loadSettingsContext();
+        void message.success("对话模型已保存");
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setSavingDialogueModel(false));
   }
 
   return (
@@ -316,43 +463,6 @@ export function SetupWorkspace() {
         <Col xs={24} sm={12} lg={6}><Card><Statistic title="自动写作" value={daemon?.running ? "运行中" : "未运行"} /></Card></Col>
         <Col xs={24} sm={12} lg={6}><Card><Statistic title="项目目录" value={summary?.projectRoot ? "已配置" : "未知"} /></Card></Col>
       </Row>
-
-      <Card
-        title="模型配置"
-        extra={<Tag color={initialized ? "green" : "orange"}>{initialized ? "已初始化" : "待初始化"}</Tag>}
-      >
-        <Typography.Paragraph type="secondary">
-          {initialized ? "已初始化，可重新提交更新全局 LLM 默认配置。" : "初始化项目并配置本次部署使用的 LLM。"}
-        </Typography.Paragraph>
-
-        <Form form={form} layout="vertical" onFinish={submit}>
-          <Form.Item label="项目名称" name="name">
-            <Input placeholder="可选，例如 wuxia-project" />
-          </Form.Item>
-          <Form.Item label="服务商" name="provider" rules={[{ required: true }]}>
-            <Radio.Group
-              options={[
-                { label: "openai", value: "openai" },
-                { label: "anthropic", value: "anthropic" },
-              ]}
-              optionType="button"
-              buttonStyle="solid"
-            />
-          </Form.Item>
-          <Form.Item label="Base URL（接口地址）" name="baseUrl" rules={[{ required: true }]}>
-            <Input />
-          </Form.Item>
-          <Form.Item label="API Key（密钥）" name="apiKey">
-            <Input.Password placeholder={apiKeyConfigured ? "已配置，留空则保持不变" : "首次配置必须填写"} />
-          </Form.Item>
-          <Form.Item label="模型" name="model" rules={[{ required: true }]}>
-            <Input placeholder="如 gpt-4o / gpt-5" />
-          </Form.Item>
-          <Button type="primary" htmlType="submit" loading={isPending}>
-            初始化 / 更新
-          </Button>
-        </Form>
-      </Card>
 
       <Card
         title="多套配置切换"
@@ -408,6 +518,14 @@ export function SetupWorkspace() {
                     >
                       激活
                     </Button>
+                    <Button size="small" loading={testingProfileId === record.id} onClick={() => testProfile(record.id)}>
+                      测试
+                    </Button>
+                    <Tooltip title="直接和这个配置绑定的模型对话，验证真实输出效果。">
+                      <Button size="small" onClick={() => openProfileChat(record)}>
+                        对话
+                      </Button>
+                    </Tooltip>
                     <Popconfirm
                       title="确认删除这个配置吗？"
                       description={record.isActive ? "当前激活配置不能删除。" : "删除后不可恢复。"}
@@ -427,6 +545,35 @@ export function SetupWorkspace() {
       </Card>
 
       <Row gutter={[16, 16]}>
+        <Col xs={24} xl={12}>
+          <Card title="模型分工">
+            <Typography.Paragraph type="secondary">
+              这里可以单独指定“对话”场景使用的模型。留空时默认使用当前激活配置的主模型。
+            </Typography.Paragraph>
+            <Space direction="vertical" style={{ width: "100%" }}>
+              <Select
+                showSearch
+                allowClear
+                placeholder="选择或输入一个对话模型"
+                value={dialogueModel || undefined}
+                onChange={(value) => setDialogueModel(String(value ?? ""))}
+                onClear={() => setDialogueModel("")}
+                options={Array.from(new Set(profiles.map((profile) => profile.model))).map((model) => ({
+                  value: model,
+                  label: model,
+                }))}
+              />
+              <Input
+                value={dialogueModel}
+                onChange={(event) => setDialogueModel(event.target.value)}
+                placeholder="也可以直接手填，例如 moonshotai/kimi-k2.5"
+              />
+              <Button type="primary" onClick={saveDialogueModel} loading={savingDialogueModel}>
+                保存对话模型
+              </Button>
+            </Space>
+          </Card>
+        </Col>
         <Col xs={24} xl={12}>
           <Card
             title="项目检测"
@@ -463,15 +610,15 @@ export function SetupWorkspace() {
         </Col>
       </Row>
 
-      <Card title="配置结果">
-        {!result ? (
-          <Typography.Text type="secondary">提交后这里显示响应结果。</Typography.Text>
+      <Card title="配置测试结果">
+        {!profileTestResult ? (
+          <Typography.Text type="secondary">点击“测试”后，这里显示对应配置的 LLM 连通结果。</Typography.Text>
         ) : (
           <Alert
-            type={resultType === "success" ? "success" : "error"}
+            type={(profileTestResult as { ok?: boolean }).ok ? "success" : "error"}
             showIcon
-            message={resultType === "success" ? "保存成功" : "保存失败"}
-            description={<pre style={{ margin: 0 }}>{JSON.stringify(result, null, 2)}</pre>}
+            message={(profileTestResult as { ok?: boolean }).ok ? "测试成功" : "测试失败"}
+            description={<pre style={{ margin: 0 }}>{JSON.stringify(profileTestResult, null, 2)}</pre>}
           />
         )}
       </Card>
@@ -513,6 +660,133 @@ export function SetupWorkspace() {
             <Button onClick={() => setProfileModalOpen(false)}>取消</Button>
           </Space>
         </Form>
+      </Modal>
+
+      <Modal
+        open={Boolean(chatProfile)}
+        onCancel={() => {
+          if (chattingProfileId) return;
+          setChatProfile(null);
+          setProfileChatInput("");
+          setProfileChatMessages([]);
+        }}
+        title={chatProfile ? `模型对话测试 · ${chatProfile.name}` : "模型对话测试"}
+        footer={null}
+        width={980}
+        style={{ top: 20 }}
+        styles={{ body: { paddingTop: 12, height: "90vh", overflow: "hidden" } }}
+        destroyOnClose
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
+          <Card bodyStyle={{ padding: 16 }}>
+            <Space wrap size={10}>
+              <Select
+                value={profileChatGenre}
+                options={PROFILE_CHAT_GENRE_OPTIONS}
+                onChange={(value) => {
+                  const next = String(value);
+                  setProfileChatGenre(next);
+                  if (chatProfile) {
+                    persistProfileChat(chatProfile.id, {
+                      messages: profileChatMessages,
+                      genre: next,
+                      platform: profileChatPlatform,
+                    });
+                  }
+                }}
+                style={{ minWidth: 180 }}
+                placeholder="测试题材"
+              />
+              <Select
+                value={profileChatPlatform}
+                options={PROFILE_CHAT_PLATFORM_OPTIONS}
+                onChange={(value) => {
+                  const next = String(value);
+                  setProfileChatPlatform(next);
+                  if (chatProfile) {
+                    persistProfileChat(chatProfile.id, {
+                      messages: profileChatMessages,
+                      genre: profileChatGenre,
+                      platform: next,
+                    });
+                  }
+                }}
+                style={{ minWidth: 180 }}
+                placeholder="测试平台"
+              />
+              <Checkbox
+                checked={profileChatUseStream}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setProfileChatUseStream(checked);
+                  if (chatProfile) {
+                    persistProfileChat(chatProfile.id, {
+                      messages: profileChatMessages,
+                      genre: profileChatGenre,
+                      platform: profileChatPlatform,
+                      useStream: checked,
+                      includeReasoning: profileChatIncludeReasoning,
+                    });
+                  }
+                }}
+              >
+                使用流式
+              </Checkbox>
+              <Checkbox
+                checked={profileChatIncludeReasoning}
+                onChange={(event) => {
+                  const checked = event.target.checked;
+                  setProfileChatIncludeReasoning(checked);
+                  if (chatProfile) {
+                    persistProfileChat(chatProfile.id, {
+                      messages: profileChatMessages,
+                      genre: profileChatGenre,
+                      platform: profileChatPlatform,
+                      useStream: profileChatUseStream,
+                      includeReasoning: checked,
+                    });
+                  }
+                }}
+              >
+                展示 reasoning
+              </Checkbox>
+            </Space>
+          </Card>
+
+          <ChatPanel
+            messages={profileChatMessages}
+            value={profileChatInput}
+            onChange={setProfileChatInput}
+            onSend={sendProfileChat}
+            sending={chattingProfileId === chatProfile?.id}
+            placeholder="输入一段话，直接测试这个模型在 InkOS 项目中的真实回复。"
+            emptyText={"这里可以直接测试这个模型在 InkOS 里的表现。\n比如让它生成爽文开篇、讨论穿越设定、给审计建议，或者模拟章节修订意见。"}
+            minHeight={260}
+            maxHeight="100%"
+            inputMinRows={3}
+            inputMaxRows={5}
+            footerLeft={<Typography.Text type="secondary">当前对话会保存在这个配置下。</Typography.Text>}
+            footerRight={(
+              <Button
+                onClick={() => {
+                  setProfileChatMessages([]);
+                  setProfileChatInput("");
+                  if (chatProfile) {
+                    persistProfileChat(chatProfile.id, {
+                      messages: [],
+                      genre: profileChatGenre,
+                      platform: profileChatPlatform,
+                    });
+                  }
+                }}
+                disabled={chattingProfileId === chatProfile?.id}
+              >
+                清空对话
+              </Button>
+            )}
+            containerStyle={{ flex: 1, minHeight: 0 }}
+          />
+        </div>
       </Modal>
     </Space>
   );
