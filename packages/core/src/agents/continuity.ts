@@ -18,6 +18,13 @@ export interface AuditIssue {
   readonly suggestion: string;
 }
 
+interface ResearchResult {
+  readonly findings: ReadonlyArray<string>;
+  readonly sources: ReadonlyArray<string>;
+  readonly openQuestions: ReadonlyArray<string>;
+  readonly error?: string;
+}
+
 // Dimension ID → name mapping
 const DIMENSION_MAP: Record<number, string> = {
   1: "OOC检查",
@@ -109,6 +116,17 @@ function isAuditResultPayload(value: unknown): value is Record<string, unknown> 
   return Object.hasOwn(record, "passed")
     || Object.hasOwn(record, "issues")
     || Object.hasOwn(record, "summary");
+}
+
+function isResearchResultPayload(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return Object.hasOwn(record, "findings")
+    || Object.hasOwn(record, "sources")
+    || Object.hasOwn(record, "openQuestions");
 }
 
 function buildDimensionList(
@@ -299,6 +317,23 @@ export class ContinuityAuditor extends BaseAgent {
       ? "\n\n你有联网搜索能力（search_web / fetch_url）。对于涉及真实年代、人物、事件、地理、政策的内容，你必须用search_web核实，不可凭记忆判断。至少对比2个来源交叉验证。"
       : "";
 
+    const researchPrompt = gp.eraResearch
+      ? `你是${gp.name}小说的事实核验研究员。你的任务是只做考据，不做最终审稿结论。${protagonistBlock}${searchNote}
+
+输出格式必须为 JSON：
+{
+  "findings": ["事实核验结论1", "事实核验结论2"],
+  "sources": ["来源摘要1", "来源摘要2"],
+  "openQuestions": ["仍不确定的问题1"]
+}
+
+要求：
+1. 只输出 JSON，不要输出搜索动作、工具痕迹、解释性前缀或额外说明
+2. findings 只写与本章审稿相关的事实结论
+3. sources 只写简短来源摘要，不要长段复制
+4. 若未发现需要核验的问题，也返回空数组 JSON`
+      : "";
+
     const systemPrompt = `你是一位严格的${gp.name}网络小说审稿编辑。你的任务是对章节进行连续性、一致性和质量审查。${protagonistBlock}${searchNote}
 
 审查维度：
@@ -354,6 +389,22 @@ ${styleGuide}
 
 ## 待审章节内容
 ${chapterContent}`;
+
+    const researchUserPrompt = gp.eraResearch
+      ? `请先对第${chapterNumber}章做事实核验研究，仅输出研究结论 JSON。
+
+## 当前状态卡
+${currentState}
+${ledgerBlock}
+## 伏笔池
+${hooks}
+${subplotBlock}${emotionalBlock}${matrixBlock}${summariesBlock}${canonBlock}
+## 文风指南
+${styleGuide}
+
+## 待核验章节内容
+${chapterContent}`
+      : "";
     process.stderr.write(`${new Date().toISOString()} INFO auditor.prompt.ready ${JSON.stringify({
       chapterNumber,
       systemPromptLength: systemPrompt.length,
@@ -363,24 +414,50 @@ ${chapterContent}`;
       usesSearch: gp.eraResearch,
     })}\n`);
 
-    const chatMessages = [
-      { role: "system" as const, content: systemPrompt },
-      { role: "user" as const, content: userPrompt },
-    ];
     const chatOptions = { temperature: options?.temperature ?? 0.3, maxTokens: 16000 };
+    let researchResult: ResearchResult | null = null;
 
-    // Use web search for fact verification when eraResearch is enabled
-    process.stderr.write(`${new Date().toISOString()} INFO auditor.llm.start ${JSON.stringify({
+    if (gp.eraResearch) {
+      process.stderr.write(`${new Date().toISOString()} INFO auditor.research.llm.start ${JSON.stringify({
+        chapterNumber,
+        model: this.ctx.model,
+        usesSearch: true,
+        temperature: chatOptions.temperature,
+        maxTokens: chatOptions.maxTokens,
+      })}\n`);
+      const researchResponse = await this.chatWithSearch([
+        { role: "system" as const, content: researchPrompt },
+        { role: "user" as const, content: researchUserPrompt },
+      ], chatOptions);
+      process.stderr.write(`${new Date().toISOString()} INFO auditor.research.llm.done ${JSON.stringify({
+        chapterNumber,
+        responseLength: researchResponse.content.length,
+        promptTokens: researchResponse.usage.promptTokens,
+        completionTokens: researchResponse.usage.completionTokens,
+        totalTokens: researchResponse.usage.totalTokens,
+      })}\n`);
+      researchResult = this.parseResearchResult(researchResponse.content);
+    }
+
+    const researchBlock = researchResult
+      ? `\n## 联网考据研究结果\n${JSON.stringify(researchResult, null, 2)}`
+      : "";
+    const finalMessages = [
+      { role: "system" as const, content: `${systemPrompt}\n\n你现在处于最终审稿阶段。禁止输出搜索动作、工具调用痕迹、解释性前缀；只能输出最终审稿 JSON。` },
+      { role: "user" as const, content: `${userPrompt}${researchBlock}` },
+    ];
+
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.final.llm.start ${JSON.stringify({
       chapterNumber,
       model: this.ctx.model,
-      usesSearch: gp.eraResearch,
+      usesSearch: false,
       temperature: chatOptions.temperature,
       maxTokens: chatOptions.maxTokens,
+      hasResearch: Boolean(researchResult),
+      researchError: researchResult?.error ?? null,
     })}\n`);
-    const response = gp.eraResearch
-      ? await this.chatWithSearch(chatMessages, chatOptions)
-      : await this.chat(chatMessages, chatOptions);
-    process.stderr.write(`${new Date().toISOString()} INFO auditor.llm.done ${JSON.stringify({
+    const response = await this.chat(finalMessages, chatOptions);
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.final.llm.done ${JSON.stringify({
       chapterNumber,
       responseLength: response.content.length,
       promptTokens: response.usage.promptTokens,
@@ -388,8 +465,11 @@ ${chapterContent}`;
       totalTokens: response.usage.totalTokens,
     })}\n`);
 
-    process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.start ${JSON.stringify({ chapterNumber })}\n`);
-    const parsed = this.parseAuditResult(response.content);
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.start ${JSON.stringify({
+      chapterNumber,
+      stage: "final",
+    })}\n`);
+    const parsed = this.parseAuditResult(response.content, "final");
     process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.done ${JSON.stringify({
       chapterNumber,
       passed: parsed.passed,
@@ -399,25 +479,83 @@ ${chapterContent}`;
     return parsed;
   }
 
-  private parseAuditResult(content: string): AuditResult {
+  private parseResearchResult(content: string): ResearchResult {
     process.stderr.write(`${new Date().toISOString()} INFO auditor.raw.preview ${JSON.stringify({
+      stage: "research",
       preview: content.slice(0, 1200),
       length: content.length,
     })}\n`);
     const jsonObjects = extractJsonObjects(content);
     if (jsonObjects.length === 0) {
-      process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.no_json_object\n`);
+      process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.json_error ${JSON.stringify({
+        stage: "research",
+        error: "未找到研究结果 JSON 对象",
+        extractedPreview: "",
+        extractedLength: 0,
+        candidateCount: 0,
+      })}\n`);
+      return {
+        findings: [],
+        sources: [],
+        openQuestions: [],
+        error: "研究阶段输出异常",
+      };
+    }
+
+    let lastError = "未找到符合研究结果结构的 JSON 对象";
+    for (let index = jsonObjects.length - 1; index >= 0; index -= 1) {
+      const candidate = jsonObjects[index];
+      try {
+        const parsed = JSON.parse(candidate);
+        if (!isResearchResultPayload(parsed)) {
+          continue;
+        }
+        return {
+          findings: Array.isArray(parsed.findings) ? parsed.findings.map(String) : [],
+          sources: Array.isArray(parsed.sources) ? parsed.sources.map(String) : [],
+          openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions.map(String) : [],
+        };
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+
+    const fallback = jsonObjects[jsonObjects.length - 1] ?? "";
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.json_error ${JSON.stringify({
+      stage: "research",
+      error: lastError,
+      extractedPreview: fallback.slice(0, 1200),
+      extractedLength: fallback.length,
+      candidateCount: jsonObjects.length,
+    })}\n`);
+    return {
+      findings: [],
+      sources: [],
+      openQuestions: [],
+      error: "研究阶段输出异常",
+    };
+  }
+
+  private parseAuditResult(content: string, stage: "final" | "single" = "single"): AuditResult {
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.raw.preview ${JSON.stringify({
+      stage,
+      preview: content.slice(0, 1200),
+      length: content.length,
+    })}\n`);
+    const jsonObjects = extractJsonObjects(content);
+    if (jsonObjects.length === 0) {
+      process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.no_json_object ${JSON.stringify({ stage })}\n`);
       return {
         passed: false,
         issues: [
           {
             severity: "critical",
             category: "系统错误",
-            description: "审稿输出格式异常，无法解析",
+            description: stage === "final" ? "最终审稿 JSON 缺失" : "审稿输出格式异常，无法解析",
             suggestion: "重新运行审稿",
           },
         ],
-        summary: "审稿输出解析失败",
+        summary: stage === "final" ? "最终审稿输出异常" : "审稿输出解析失败",
       };
     }
 
@@ -442,6 +580,7 @@ ${chapterContent}`;
 
     const fallback = jsonObjects[jsonObjects.length - 1] ?? "";
     process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.json_error ${JSON.stringify({
+      stage,
       error: lastError,
       extractedPreview: fallback.slice(0, 1200),
       extractedLength: fallback.length,
@@ -453,11 +592,11 @@ ${chapterContent}`;
         {
           severity: "critical",
           category: "系统错误",
-          description: "审稿 JSON 解析失败",
+          description: stage === "final" ? "最终审稿 JSON 结构非法" : "审稿 JSON 解析失败",
           suggestion: "重新运行审稿",
         },
       ],
-      summary: "审稿 JSON 解析失败",
+      summary: stage === "final" ? "最终审稿输出异常" : "审稿 JSON 解析失败",
     };
   }
 

@@ -6,6 +6,38 @@ const DEFAULT_LLM_HEADERS = {
   "User-Agent": "curl/8.0",
 } as const;
 
+function summarizeBaseUrl(value?: string): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return value;
+  }
+}
+
+function summarizeError(error: unknown): Record<string, unknown> {
+  const record: Record<string, unknown> = {
+    message: error instanceof Error ? error.message : String(error),
+  };
+  if (error && typeof error === "object") {
+    const maybe = error as Record<string, unknown>;
+    if ("status" in maybe) record.status = maybe.status;
+    if ("name" in maybe) record.name = maybe.name;
+    if ("type" in maybe) record.type = maybe.type;
+    if ("code" in maybe) record.code = maybe.code;
+    if ("error" in maybe) record.error = maybe.error;
+    if ("response" in maybe) record.response = maybe.response;
+    if ("headers" in maybe) record.headers = maybe.headers;
+    if ("request_id" in maybe) record.requestId = maybe.request_id;
+  }
+  return record;
+}
+
+function logLLMDiagnostic(event: string, meta: Record<string, unknown>): void {
+  process.stderr.write(`${new Date().toISOString()} INFO ${event} ${JSON.stringify(meta)}\n`);
+}
+
 // === Shared Types ===
 
 export interface LLMResponse {
@@ -180,11 +212,24 @@ export async function chatCompletion(
     readonly webSearch?: boolean;
   },
 ): Promise<LLMResponse> {
+  const resolved = {
+    temperature: options?.temperature ?? client.defaults.temperature,
+    maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+  };
+  logLLMDiagnostic("llm.request.start", {
+    kind: "chat_completion",
+    provider: client.provider,
+    apiFormat: client.apiFormat,
+    model,
+    messageCount: messages.length,
+    maxTokens: resolved.maxTokens,
+    temperature: resolved.temperature,
+    webSearch: options?.webSearch === true,
+    baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
+    hasAnthropicClient: Boolean(client._anthropic),
+    hasOpenAIClient: Boolean(client._openai),
+  });
   try {
-    const resolved = {
-      temperature: options?.temperature ?? client.defaults.temperature,
-      maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-    };
     if (client.provider === "anthropic") {
       return await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
     }
@@ -193,6 +238,18 @@ export async function chatCompletion(
     }
     return await chatCompletionOpenAIChat(client._openai!, model, messages, resolved, options?.webSearch);
   } catch (error) {
+    logLLMDiagnostic("llm.request.error", {
+      kind: "chat_completion",
+      provider: client.provider,
+      apiFormat: client.apiFormat,
+      model,
+      messageCount: messages.length,
+      maxTokens: resolved.maxTokens,
+      temperature: resolved.temperature,
+      webSearch: options?.webSearch === true,
+      baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
+      error: summarizeError(error),
+    });
     throw wrapLLMError(error);
   }
 }
@@ -211,13 +268,28 @@ export async function chatWithTools(
     readonly includeReasoning?: boolean;
   },
 ): Promise<ChatWithToolsResult> {
+  const resolved = {
+    temperature: options?.temperature ?? client.defaults.temperature,
+    maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+    useStream: options?.useStream ?? true,
+    includeReasoning: options?.includeReasoning ?? false,
+  };
+  logLLMDiagnostic("llm.request.start", {
+    kind: "chat_with_tools",
+    provider: client.provider,
+    apiFormat: client.apiFormat,
+    model,
+    messageCount: messages.length,
+    toolCount: tools.length,
+    maxTokens: resolved.maxTokens,
+    temperature: resolved.temperature,
+    useStream: resolved.useStream,
+    includeReasoning: resolved.includeReasoning,
+    baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
+    hasAnthropicClient: Boolean(client._anthropic),
+    hasOpenAIClient: Boolean(client._openai),
+  });
   try {
-    const resolved = {
-      temperature: options?.temperature ?? client.defaults.temperature,
-      maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-      useStream: options?.useStream ?? true,
-      includeReasoning: options?.includeReasoning ?? false,
-    };
     if (client.provider === "anthropic") {
       return await chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget);
     }
@@ -226,6 +298,20 @@ export async function chatWithTools(
     }
     return await chatWithToolsOpenAIChat(client._openai!, model, messages, tools, resolved);
   } catch (error) {
+    logLLMDiagnostic("llm.request.error", {
+      kind: "chat_with_tools",
+      provider: client.provider,
+      apiFormat: client.apiFormat,
+      model,
+      messageCount: messages.length,
+      toolCount: tools.length,
+      maxTokens: resolved.maxTokens,
+      temperature: resolved.temperature,
+      useStream: resolved.useStream,
+      includeReasoning: resolved.includeReasoning,
+      baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
+      error: summarizeError(error),
+    });
     throw wrapLLMError(error);
   }
 }
