@@ -5,6 +5,7 @@ import type { BookConfig } from "../models/book.js";
 import type { QualityGates, DetectionConfig } from "../models/project.js";
 import { dispatchWebhookEvent } from "../notify/dispatcher.js";
 import { detectChapter, detectAndRewrite } from "./detection-runner.js";
+import { extractChapterBody, resolveChapterFile } from "../utils/chapter-files.js";
 
 export interface SchedulerConfig extends PipelineConfig {
   readonly radarCron: string;
@@ -338,19 +339,12 @@ export class Scheduler {
   }
 
   private async readChapterContent(bookDir: string, chapterNumber: number): Promise<string> {
-    const { readFile, readdir } = await import("node:fs/promises");
+    const { readFile } = await import("node:fs/promises");
     const { join } = await import("node:path");
     const chaptersDir = join(bookDir, "chapters");
-    const files = await readdir(chaptersDir);
-    const paddedNum = String(chapterNumber).padStart(4, "0");
-    const chapterFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-    if (!chapterFile) {
-      throw new Error(`Chapter ${chapterNumber} file not found in ${chaptersDir}`);
-    }
-    const raw = await readFile(join(chaptersDir, chapterFile), "utf-8");
-    const lines = raw.split("\n");
-    const contentStart = lines.findIndex((l, i) => i > 0 && l.trim().length > 0);
-    return contentStart >= 0 ? lines.slice(contentStart).join("\n") : raw;
+    const resolved = await resolveChapterFile(chaptersDir, chapterNumber);
+    const raw = await readFile(resolved.selected.fullPath, "utf-8");
+    return extractChapterBody(raw);
   }
 
   private cronToMs(cron: string): number {

@@ -15,6 +15,14 @@ export const ChapterStatusSchema = z.enum([
 ]);
 export type ChapterStatus = z.infer<typeof ChapterStatusSchema>;
 
+export const StoredAuditIssueSchema = z.object({
+  severity: z.enum(["critical", "warning", "info"]),
+  category: z.string(),
+  description: z.string(),
+  suggestion: z.string(),
+});
+export type StoredAuditIssue = z.infer<typeof StoredAuditIssueSchema>;
+
 export const ChapterMetaSchema = z.object({
   number: z.number().int().min(1),
   title: z.string(),
@@ -23,6 +31,7 @@ export const ChapterMetaSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   auditIssues: z.array(z.string()).default([]),
+  auditDetails: z.array(StoredAuditIssueSchema).optional(),
   reviewNote: z.string().optional(),
   detectionScore: z.number().min(0).max(1).optional(),
   detectionProvider: z.string().optional(),

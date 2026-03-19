@@ -14,3 +14,21 @@ export async function GET(
   const data = await response.json();
   return NextResponse.json(data, { status: response.status });
 }
+
+export async function POST(
+  request: Request,
+  context: { params: Promise<{ bookId: string; chapter: string }> },
+): Promise<NextResponse> {
+  const { bookId, chapter } = await context.params;
+  const body = await request.text();
+  const response = await fetch(
+    `${serviceUrl}/api/books/${encodeURIComponent(bookId)}/chapters/${encodeURIComponent(chapter)}/replace`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    },
+  );
+  const data = await response.json();
+  return NextResponse.json(data, { status: response.status });
+}

@@ -23,6 +23,7 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 
 const PROFILE_CHAT_STORAGE_PREFIX = "inkos.profile-chat.";
 const PROFILE_CHAT_GENRE_OPTIONS = [
@@ -672,9 +673,9 @@ export function SetupWorkspace() {
         }}
         title={chatProfile ? `模型对话测试 · ${chatProfile.name}` : "模型对话测试"}
         footer={null}
-        width={980}
+        width={CHAT_MODAL_WIDTH}
         style={{ top: 20 }}
-        styles={{ body: { paddingTop: 12, height: "90vh", overflow: "hidden" } }}
+        styles={{ body: { paddingTop: 12, height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnClose
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>

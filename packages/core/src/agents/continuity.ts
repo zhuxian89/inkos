@@ -54,6 +54,63 @@ const DIMENSION_MAP: Record<number, string> = {
   32: "读者期待管理",
 };
 
+function extractJsonObjects(content: string): string[] {
+  const objects: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = 0; index < content.length; index += 1) {
+    const char = content[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+      } else if (char === "\\") {
+        escaped = true;
+      } else if (char === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (char === "\"") {
+      inString = true;
+      continue;
+    }
+
+    if (char === "{") {
+      if (depth === 0) {
+        start = index;
+      }
+      depth += 1;
+      continue;
+    }
+
+    if (char === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start !== -1) {
+        objects.push(content.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+
+  return objects;
+}
+
+function isAuditResultPayload(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return false;
+  }
+
+  const record = value as Record<string, unknown>;
+  return Object.hasOwn(record, "passed")
+    || Object.hasOwn(record, "issues")
+    || Object.hasOwn(record, "summary");
+}
+
 function buildDimensionList(
   gp: GenreProfile,
   bookRules: BookRules | null,
@@ -173,6 +230,12 @@ export class ContinuityAuditor extends BaseAgent {
     genre?: string,
     options?: { temperature?: number },
   ): Promise<AuditResult> {
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.load_story_files.start ${JSON.stringify({
+      bookDir,
+      chapterNumber,
+      genre: genre ?? "other",
+      temperature: options?.temperature ?? 0.3,
+    })}\n`);
     const [currentState, ledger, hooks, styleGuideRaw, subplotBoard, emotionalArcs, characterMatrix, chapterSummaries, parentCanon] =
       await Promise.all([
         this.readFileSafe(join(bookDir, "story/current_state.md")),
@@ -185,14 +248,38 @@ export class ContinuityAuditor extends BaseAgent {
         this.readFileSafe(join(bookDir, "story/chapter_summaries.md")),
         this.readFileSafe(join(bookDir, "story/parent_canon.md")),
       ]);
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.load_story_files.done ${JSON.stringify({
+      chapterNumber,
+      currentStateLength: currentState.length,
+      ledgerLength: ledger.length,
+      hooksLength: hooks.length,
+      styleGuideLength: styleGuideRaw.length,
+      subplotBoardLength: subplotBoard.length,
+      emotionalArcsLength: emotionalArcs.length,
+      characterMatrixLength: characterMatrix.length,
+      chapterSummariesLength: chapterSummaries.length,
+      parentCanonLength: parentCanon.length,
+    })}\n`);
 
     const hasParentCanon = parentCanon !== "(文件不存在)";
 
     // Load genre profile and book rules
     const genreId = genre ?? "other";
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.load_rules.start ${JSON.stringify({
+      chapterNumber,
+      genreId,
+    })}\n`);
     const { profile: gp } = await readGenreProfile(this.ctx.projectRoot, genreId);
     const parsedRules = await readBookRules(bookDir);
     const bookRules = parsedRules?.rules ?? null;
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.load_rules.done ${JSON.stringify({
+      chapterNumber,
+      genreName: gp.name,
+      numericalSystem: gp.numericalSystem,
+      eraResearch: gp.eraResearch,
+      hasBookRules: Boolean(bookRules),
+      hasParentCanon,
+    })}\n`);
 
     // Fallback: use book_rules body when style_guide.md doesn't exist
     const styleGuide = styleGuideRaw !== "(文件不存在)"
@@ -267,24 +354,59 @@ ${styleGuide}
 
 ## 待审章节内容
 ${chapterContent}`;
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.prompt.ready ${JSON.stringify({
+      chapterNumber,
+      systemPromptLength: systemPrompt.length,
+      userPromptLength: userPrompt.length,
+      dimensionCount: dimensions.length,
+      chapterContentLength: chapterContent.length,
+      usesSearch: gp.eraResearch,
+    })}\n`);
 
     const chatMessages = [
       { role: "system" as const, content: systemPrompt },
       { role: "user" as const, content: userPrompt },
     ];
-    const chatOptions = { temperature: options?.temperature ?? 0.3, maxTokens: 4096 };
+    const chatOptions = { temperature: options?.temperature ?? 0.3, maxTokens: 16000 };
 
     // Use web search for fact verification when eraResearch is enabled
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.llm.start ${JSON.stringify({
+      chapterNumber,
+      model: this.ctx.model,
+      usesSearch: gp.eraResearch,
+      temperature: chatOptions.temperature,
+      maxTokens: chatOptions.maxTokens,
+    })}\n`);
     const response = gp.eraResearch
       ? await this.chatWithSearch(chatMessages, chatOptions)
       : await this.chat(chatMessages, chatOptions);
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.llm.done ${JSON.stringify({
+      chapterNumber,
+      responseLength: response.content.length,
+      promptTokens: response.usage.promptTokens,
+      completionTokens: response.usage.completionTokens,
+      totalTokens: response.usage.totalTokens,
+    })}\n`);
 
-    return this.parseAuditResult(response.content);
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.start ${JSON.stringify({ chapterNumber })}\n`);
+    const parsed = this.parseAuditResult(response.content);
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.done ${JSON.stringify({
+      chapterNumber,
+      passed: parsed.passed,
+      issueCount: parsed.issues.length,
+      summary: parsed.summary,
+    })}\n`);
+    return parsed;
   }
 
   private parseAuditResult(content: string): AuditResult {
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.raw.preview ${JSON.stringify({
+      preview: content.slice(0, 1200),
+      length: content.length,
+    })}\n`);
+    const jsonObjects = extractJsonObjects(content);
+    if (jsonObjects.length === 0) {
+      process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.no_json_object\n`);
       return {
         passed: false,
         issues: [
@@ -299,27 +421,44 @@ ${chapterContent}`;
       };
     }
 
-    try {
-      const parsed = JSON.parse(jsonMatch[0]);
-      return {
-        passed: Boolean(parsed.passed),
-        issues: Array.isArray(parsed.issues) ? parsed.issues : [],
-        summary: String(parsed.summary ?? ""),
-      };
-    } catch {
-      return {
-        passed: false,
-        issues: [
-          {
-            severity: "critical",
-            category: "系统错误",
-            description: "审稿 JSON 解析失败",
-            suggestion: "重新运行审稿",
-          },
-        ],
-        summary: "审稿 JSON 解析失败",
-      };
+    let lastError = "未找到符合审稿结果结构的 JSON 对象";
+    for (let index = jsonObjects.length - 1; index >= 0; index -= 1) {
+      const candidate = jsonObjects[index];
+      try {
+        const parsed = JSON.parse(candidate);
+        if (!isAuditResultPayload(parsed)) {
+          continue;
+        }
+
+        return {
+          passed: Boolean(parsed.passed),
+          issues: Array.isArray(parsed.issues) ? parsed.issues : [],
+          summary: String(parsed.summary ?? ""),
+        };
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
     }
+
+    const fallback = jsonObjects[jsonObjects.length - 1] ?? "";
+    process.stderr.write(`${new Date().toISOString()} INFO auditor.parse.json_error ${JSON.stringify({
+      error: lastError,
+      extractedPreview: fallback.slice(0, 1200),
+      extractedLength: fallback.length,
+      candidateCount: jsonObjects.length,
+    })}\n`);
+    return {
+      passed: false,
+      issues: [
+        {
+          severity: "critical",
+          category: "系统错误",
+          description: "审稿 JSON 解析失败",
+          suggestion: "重新运行审稿",
+        },
+      ],
+      summary: "审稿 JSON 解析失败",
+    };
   }
 
   private async readFileSafe(path: string): Promise<string> {

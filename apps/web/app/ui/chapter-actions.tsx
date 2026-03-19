@@ -3,15 +3,14 @@
 import { App, Button, Dropdown, Input, Modal, Space, Typography } from "antd";
 import type { MenuProps } from "antd";
 import { useState } from "react";
+import {
+  buildReviseMenuItems,
+  getReviseModeLabel,
+  ReviseModeGuide,
+  type ReviseMode,
+} from "./revise-mode-guide";
 
-type ReviseMode = "spot-fix" | "rewrite" | "polish" | "rework";
-
-const REVISE_ITEMS: MenuProps["items"] = [
-  { key: "spot-fix", label: "定点修复（spot-fix）" },
-  { key: "polish", label: "润色（polish）" },
-  { key: "rewrite", label: "重写（rewrite）" },
-  { key: "rework", label: "重构（rework）" },
-];
+const REVISE_ITEMS: MenuProps["items"] = buildReviseMenuItems();
 
 export function ChapterActions(props: Readonly<{
   bookId: string;
@@ -25,27 +24,45 @@ export function ChapterActions(props: Readonly<{
   const [pendingMode, setPendingMode] = useState<ReviseMode | null>(null);
   const [instruction, setInstruction] = useState("");
 
-  const MODE_LABELS: Record<ReviseMode, string> = {
-    "spot-fix": "定点修复",
-    polish: "润色",
-    rewrite: "重写",
-    rework: "重构",
-  };
+  async function pollJob(jobId: string): Promise<unknown> {
+    return await new Promise((resolve, reject) => {
+      const timer = setInterval(async () => {
+        try {
+          const response = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+          const job = await response.json();
+          if (job.status === "done") {
+            clearInterval(timer);
+            resolve(job.result);
+            return;
+          }
+          if (job.status === "error") {
+            clearInterval(timer);
+            reject(new Error(job.error ?? "任务执行失败"));
+          }
+        } catch (error) {
+          clearInterval(timer);
+          reject(error);
+        }
+      }, 3000);
+    });
+  }
 
   function audit(): void {
     setIsAuditing(true);
     void fetch("/api/inkos/audit", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bookId: props.bookId, chapter: props.chapter }),
+      body: JSON.stringify({ bookId: props.bookId, chapter: props.chapter, async: true }),
     })
       .then(async (response) => {
         const data = await response.json();
-        props.onResult?.(data);
-        if (!response.ok || !data?.ok) {
+        if (!response.ok || !data?.ok || !data?.jobId) {
+          props.onResult?.(data);
           void message.error(data?.error ?? "审计失败");
           return;
         }
+        const result = await pollJob(String(data.jobId));
+        props.onResult?.(result);
         void message.success("审计完成");
         await props.onDone?.();
       })
@@ -66,15 +83,18 @@ export function ChapterActions(props: Readonly<{
         chapter: props.chapter,
         mode,
         instruction: nextInstruction?.trim() || undefined,
+        async: true,
       }),
     })
       .then(async (response) => {
         const data = await response.json();
-        props.onResult?.(data);
-        if (!response.ok || !data?.ok) {
+        if (!response.ok || !data?.ok || !data?.jobId) {
+          props.onResult?.(data);
           void message.error(data?.error ?? "修订失败");
           return;
         }
+        const result = await pollJob(String(data.jobId));
+        props.onResult?.(result);
         void message.success("修订完成");
         await props.onDone?.();
       })
@@ -111,7 +131,7 @@ export function ChapterActions(props: Readonly<{
         <Button size="small" loading={isRevising} disabled={isBusy}>修订</Button>
       </Dropdown>
       <Modal
-        title={pendingMode ? `${MODE_LABELS[pendingMode]} · 第 ${props.chapter} 章` : "修订"}
+        title={pendingMode ? `${getReviseModeLabel(pendingMode)} · 第 ${props.chapter} 章` : "修订"}
         open={pendingMode !== null}
         onCancel={() => {
           if (isRevising) return;
@@ -128,6 +148,7 @@ export function ChapterActions(props: Readonly<{
         destroyOnHidden
       >
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
+          {pendingMode ? <ReviseModeGuide mode={pendingMode} /> : null}
           <Typography.Text type="secondary">
             可选填写这次修订的额外要求。不填也会按当前模式和审计结果自动处理。
           </Typography.Text>

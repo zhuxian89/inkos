@@ -30,6 +30,7 @@ export { validatePostWrite, type PostWriteViolation } from "./agents/post-write-
 
 // Utils
 export { fetchUrl } from "./utils/web-search.js";
+export { buildChapterFilename, extractChapterBody, resolveChapterFile, sanitizeChapterTitle, writeCanonicalChapterFile, type ChapterFileCandidate, type ResolvedChapterFile } from "./utils/chapter-files.js";
 
 // Pipeline
 export { PipelineRunner, type PipelineConfig, type ChapterPipelineResult, type DraftResult, type ReviseResult, type TruthFiles, type BookStatusInfo } from "./pipeline/runner.js";

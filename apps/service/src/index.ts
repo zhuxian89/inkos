@@ -1,11 +1,23 @@
-import { StateManager, chatCompletion, createLLMClient, readGenreProfile, type ChapterMeta, type LLMMessage } from "@actalk/inkos-core";
+import {
+  StateManager,
+  buildChapterFilename,
+  chatCompletion,
+  chatWithTools,
+  createLLMClient,
+  readGenreProfile,
+  resolveChapterFile,
+  type AgentMessage,
+  type ChapterMeta,
+  type ToolDefinition,
+  writeCanonicalChapterFile,
+} from "@actalk/inkos-core";
 import cors from "cors";
 import express from "express";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { access, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
@@ -17,16 +29,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(__dirname, "../../..");
 const projectRoot = resolve(process.env.INKOS_PROJECT_ROOT ?? repoRoot);
 const port = parseInt(process.env.PORT ?? "4010", 10);
-const webCommandTimeoutMs = 60_000;
+const webCommandTimeoutMs = parseInt(process.env.INKOS_WEB_COMMAND_TIMEOUT_MS ?? "600000", 10);
 
 const app = express();
+const LOG_STRING_PREVIEW_LIMIT = 120;
 
 // ---------------------------------------------------------------------------
 // In-memory job store
 // ---------------------------------------------------------------------------
 interface Job {
   readonly id: string;
-  readonly type: "write-next" | "create-book";
+  readonly type: "write-next" | "create-book" | "command" | "audit" | "revise";
   status: "running" | "done" | "error";
   step: string;
   bookId?: string;
@@ -108,11 +121,20 @@ function logError(event: string, meta?: Record<string, unknown>): void {
 
 function formatMeta(meta?: Record<string, unknown>): string {
   if (!meta || Object.keys(meta).length === 0) return "";
-  return ` ${JSON.stringify(meta)}`;
+  return ` ${JSON.stringify(sanitizeForLog(meta))}`;
 }
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function forwardCliChunk(event: "cli.stdout" | "cli.stderr", chunk: Buffer, meta: Record<string, unknown>): void {
+  const text = chunk.toString("utf-8");
+  for (const line of text.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    logInfo(event, { ...meta, line: trimmed });
+  }
 }
 
 function sanitizeFilename(filename: string): string {
@@ -124,6 +146,10 @@ function sanitizeFilename(filename: string): string {
 }
 
 function sanitizeForLog(value: unknown): unknown {
+  if (typeof value === "string") {
+    if (value.length <= LOG_STRING_PREVIEW_LIMIT) return value;
+    return `${value.slice(0, LOG_STRING_PREVIEW_LIMIT)}…[truncated ${value.length - LOG_STRING_PREVIEW_LIMIT} chars]`;
+  }
   if (Array.isArray(value)) return value.map((item) => sanitizeForLog(item));
   if (!value || typeof value !== "object") return value;
 
@@ -171,6 +197,23 @@ function failJob(job: Job, error: unknown): void {
   });
 }
 
+function createJob(params: {
+  readonly type: Job["type"];
+  readonly step: string;
+  readonly bookId?: string;
+}): Job {
+  const job: Job = {
+    id: generateJobId(),
+    type: params.type,
+    status: "running",
+    step: params.step,
+    bookId: params.bookId,
+    createdAt: Date.now(),
+  };
+  jobs.set(job.id, job);
+  return job;
+}
+
 function daemonPidPath(): string {
   return resolve(projectRoot, "inkos.pid");
 }
@@ -188,74 +231,156 @@ async function cliEntry(): Promise<{ command: string; args: string[] }> {
 
 async function spawnCli(
   args: string[],
-  options?: { readonly expectJson?: boolean; readonly detached?: boolean; readonly timeoutMs?: number },
+  options?: {
+    readonly expectJson?: boolean;
+    readonly detached?: boolean;
+    readonly timeoutMs?: number;
+    readonly retries?: number;
+    readonly retryDelayMs?: number;
+  },
 ): Promise<{ stdout: string; stderr: string; code: number | null; parsed?: unknown }> {
   const launch = await cliEntry();
-  const startedAt = Date.now();
-  logInfo("cli.start", {
-    command: launch.command,
-    args: [...launch.args, ...args],
-    detached: options?.detached ?? false,
-    timeoutMs: options?.timeoutMs ?? 0,
-  });
-  const child = spawn(launch.command, [...launch.args, ...args], {
-    cwd: projectRoot,
-    env: process.env,
-    detached: options?.detached ?? false,
-    stdio: options?.detached ? "ignore" : "pipe",
-  });
+  const latestGlobalLlmEnv = await readGlobalLlmEnv();
+  const env = {
+    ...process.env,
+    ...(latestGlobalLlmEnv.provider ? { INKOS_LLM_PROVIDER: latestGlobalLlmEnv.provider } : {}),
+    ...(latestGlobalLlmEnv.baseUrl ? { INKOS_LLM_BASE_URL: latestGlobalLlmEnv.baseUrl } : {}),
+    ...(latestGlobalLlmEnv.apiKey ? { INKOS_LLM_API_KEY: latestGlobalLlmEnv.apiKey } : {}),
+    ...(latestGlobalLlmEnv.model ? { INKOS_LLM_MODEL: latestGlobalLlmEnv.model } : {}),
+  };
+  const retries = Math.max(1, options?.retries ?? (parseInt(process.env.INKOS_WEB_COMMAND_RETRIES ?? "3", 10) || 3));
+  const retryDelayMs = Math.max(0, options?.retryDelayMs ?? (parseInt(process.env.INKOS_WEB_COMMAND_RETRY_DELAY_MS ?? "1500", 10) || 1500));
 
-  if (options?.detached) {
-    child.unref();
-    logInfo("cli.detached", {
-      pid: child.pid ?? null,
+  async function runOnce(attempt: number): Promise<{ stdout: string; stderr: string; code: number | null; parsed?: unknown }> {
+    const startedAt = Date.now();
+    logInfo("cli.start", {
       command: launch.command,
       args: [...launch.args, ...args],
+      detached: options?.detached ?? false,
+      timeoutMs: options?.timeoutMs ?? 0,
+      attempt,
+      retries,
+      llmProvider: env.INKOS_LLM_PROVIDER ?? null,
+      llmBaseUrl: env.INKOS_LLM_BASE_URL ?? null,
+      llmModel: env.INKOS_LLM_MODEL ?? null,
+      llmApiKeyConfigured: Boolean(env.INKOS_LLM_API_KEY),
     });
-    return { stdout: "", stderr: "", code: 0 };
+    const child = spawn(launch.command, [...launch.args, ...args], {
+      cwd: projectRoot,
+      env,
+      detached: options?.detached ?? false,
+      stdio: options?.detached ? "ignore" : ["ignore", "pipe", "pipe"],
+    });
+
+    if (options?.detached) {
+      child.unref();
+      logInfo("cli.detached", {
+        pid: child.pid ?? null,
+        command: launch.command,
+        args: [...launch.args, ...args],
+        attempt,
+      });
+      return { stdout: "", stderr: "", code: 0 };
+    }
+
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
+    let killedByTimeout = false;
+    let forceKilledByTimeout = false;
+    const timeoutMs = options?.timeoutMs ?? 0;
+    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+    const timer = timeoutMs > 0
+      ? setTimeout(() => {
+          killedByTimeout = true;
+          child.kill("SIGTERM");
+          forceKillTimer = setTimeout(() => {
+            forceKilledByTimeout = true;
+            child.kill("SIGKILL");
+          }, 5_000);
+        }, timeoutMs)
+      : null;
+
+    child.stdout?.on("data", (chunk) => {
+      const buffer = Buffer.from(chunk);
+      stdoutChunks.push(buffer);
+      if (!options?.expectJson) {
+        forwardCliChunk("cli.stdout", buffer, { args, attempt });
+      }
+    });
+    child.stderr?.on("data", (chunk) => {
+      const buffer = Buffer.from(chunk);
+      stderrChunks.push(buffer);
+      forwardCliChunk("cli.stderr", buffer, { args, attempt });
+    });
+
+    const code = await new Promise<number | null>((resolveCode, reject) => {
+      child.once("error", reject);
+      child.once("close", resolveCode);
+    });
+    if (timer) clearTimeout(timer);
+    if (forceKillTimer) clearTimeout(forceKillTimer);
+
+    const stdout = Buffer.concat(stdoutChunks).toString("utf-8").trim();
+    const stderr = Buffer.concat(stderrChunks).toString("utf-8").trim();
+    const finalStderr = killedByTimeout
+      ? `${stderr ? `${stderr}\n` : ""}Command timed out after ${timeoutMs}ms and was terminated${forceKilledByTimeout ? " with SIGKILL" : ""}.`
+      : stderr;
+    const parsed = options?.expectJson && stdout ? safeParseJson(stdout) : undefined;
+
+    const cliMeta = {
+      pid: child.pid ?? null,
+      code: killedByTimeout ? 124 : code,
+      durationMs: Date.now() - startedAt,
+      stdoutBytes: stdout.length,
+      stderrBytes: finalStderr.length,
+      attempt,
+      retries,
+    };
+    if (killedByTimeout || code !== 0) {
+      logError("cli.finish", cliMeta);
+    } else {
+      logInfo("cli.finish", cliMeta);
+    }
+
+    return { stdout, stderr: finalStderr, code: killedByTimeout ? 124 : code, parsed };
   }
 
-  const stdoutChunks: Buffer[] = [];
-  const stderrChunks: Buffer[] = [];
-  let killedByTimeout = false;
-  const timeoutMs = options?.timeoutMs ?? 0;
-  const timer = timeoutMs > 0
-    ? setTimeout(() => {
-        killedByTimeout = true;
-        child.kill("SIGTERM");
-      }, timeoutMs)
-    : null;
-
-  child.stdout?.on("data", (chunk) => stdoutChunks.push(Buffer.from(chunk)));
-  child.stderr?.on("data", (chunk) => stderrChunks.push(Buffer.from(chunk)));
-
-  const code = await new Promise<number | null>((resolveCode, reject) => {
-    child.once("error", reject);
-    child.once("close", resolveCode);
-  });
-  if (timer) clearTimeout(timer);
-
-  const stdout = Buffer.concat(stdoutChunks).toString("utf-8").trim();
-  const stderr = Buffer.concat(stderrChunks).toString("utf-8").trim();
-  const finalStderr = killedByTimeout
-    ? `${stderr ? `${stderr}\n` : ""}Command timed out after ${timeoutMs}ms and was terminated.`
-    : stderr;
-  const parsed = options?.expectJson && stdout ? safeParseJson(stdout) : undefined;
-
-  const cliMeta = {
-    pid: child.pid ?? null,
-    code: killedByTimeout ? 124 : code,
-    durationMs: Date.now() - startedAt,
-    stdoutBytes: stdout.length,
-    stderrBytes: finalStderr.length,
-  };
-  if (killedByTimeout || code !== 0) {
-    logError("cli.finish", cliMeta);
-  } else {
-    logInfo("cli.finish", cliMeta);
+  let lastResult: { stdout: string; stderr: string; code: number | null; parsed?: unknown } | null = null;
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const result = await runOnce(attempt);
+      lastResult = result;
+      if ((result.code ?? 1) === 0) {
+        return result;
+      }
+      if (attempt < retries) {
+        logInfo("cli.retry.scheduled", {
+          args,
+          attempt,
+          nextAttempt: attempt + 1,
+          retryDelayMs,
+          code: result.code,
+        });
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, retryDelayMs));
+      }
+    } catch (error) {
+      lastError = error;
+      logError("cli.retry.error", {
+        args,
+        attempt,
+        retries,
+        error: describeError(error),
+      });
+      if (attempt < retries) {
+        await new Promise((resolveDelay) => setTimeout(resolveDelay, retryDelayMs));
+        continue;
+      }
+    }
   }
 
-  return { stdout, stderr: finalStderr, code: killedByTimeout ? 124 : code, parsed };
+  if (lastResult) return lastResult;
+  throw lastError instanceof Error ? lastError : new Error(describeError(lastError));
 }
 
 function safeParseJson(text: string): unknown {
@@ -462,7 +587,7 @@ async function testLlmProfile(profileId: string): Promise<{
     apiKey: payload.apiKey,
     model: payload.model,
     temperature: payload.temperature ?? 0.7,
-    maxTokens: payload.maxTokens ?? 8192,
+    maxTokens: payload.maxTokens ?? 16000,
     thinkingBudget: payload.thinkingBudget ?? 0,
     apiFormat: payload.apiFormat ?? "chat",
   });
@@ -478,7 +603,7 @@ async function testLlmProfile(profileId: string): Promise<{
     },
   ], {
     temperature: 0,
-    maxTokens: 32,
+    maxTokens: 16000,
   });
 
   return {
@@ -531,7 +656,7 @@ async function chatWithLlmProfile(
     apiKey: payload.apiKey,
     model: payload.model,
     temperature: payload.temperature ?? 0.7,
-    maxTokens: payload.maxTokens ?? 8192,
+    maxTokens: payload.maxTokens ?? 16000,
     thinkingBudget: payload.thinkingBudget ?? 0,
     apiFormat: payload.apiFormat ?? "chat",
   });
@@ -561,7 +686,7 @@ async function chatWithLlmProfile(
 
   const response = await chatCompletion(client, payload.model, messages, {
     temperature: 0.7,
-    maxTokens: 1000,
+    maxTokens: 16000,
   });
 
   return {
@@ -574,6 +699,50 @@ async function chatWithLlmProfile(
       includeReasoning: false,
     },
     usage: response.usage,
+  };
+}
+
+async function createClientFromOptionalProfile(
+  profileId?: string,
+): Promise<{
+  readonly client: ReturnType<typeof createLLMClient>;
+  readonly model: string;
+  readonly profileId?: string;
+}> {
+  if (!profileId?.trim()) {
+    const config = await loadProjectConfig(projectRoot);
+    return {
+      client: createLLMClient(config.llm),
+      model: config.llm.model,
+    };
+  }
+
+  const db = openProfilesDb();
+  let profile: LlmProfileRow | null = null;
+  try {
+    profile = getProfileById(db, profileId.trim());
+  } finally {
+    db.close();
+  }
+
+  if (!profile) {
+    throw new Error(`LLM profile not found: ${profileId}`);
+  }
+
+  const payload = profileRowToPayload(profile);
+  return {
+    client: createLLMClient({
+      provider: payload.provider,
+      baseUrl: payload.baseUrl,
+      apiKey: payload.apiKey,
+      model: payload.model,
+      temperature: payload.temperature ?? 0.7,
+      maxTokens: payload.maxTokens ?? 16000,
+      thinkingBudget: payload.thinkingBudget ?? 0,
+      apiFormat: payload.apiFormat ?? "chat",
+    }),
+    model: payload.model,
+    profileId: profile.id,
   };
 }
 
@@ -626,7 +795,7 @@ async function chatWithOpenAiCompatibleProfile(
       content: message.content,
     })),
     temperature: 0.7,
-    max_tokens: 1000,
+    max_tokens: 16000,
   };
 
   if (options.useStream) {
@@ -725,16 +894,473 @@ async function buildProfileChatSystemPrompt(input?: {
   const genre = input?.genre?.trim() || "other";
   const platform = input?.platform?.trim() || "other";
   const systemContext = await buildInitAssistantSystemContext({ genre, platform });
+  const inkosHome = process.env.INKOS_HOME?.trim() || join(process.env.HOME ?? "/root", ".inkos");
+  const inkosProjectRoot = process.env.INKOS_PROJECT_ROOT?.trim() || projectRoot;
 
   return [
-    "以下内容是当前项目的业务背景资料，仅用于帮助你理解 InkOS 的使用场景。",
+    "以下内容是当前项目的业务背景资料，供你在 InkOS 使用场景下回答问题时参考。",
     `当前测试面板绑定的模型配置：provider=${input?.provider ?? "unknown"}，model=${input?.model ?? "unknown"}。`,
-    "这些背景信息不会改变你的真实模型能力，也不要求你扮演任何项目内角色。",
-    "当问题与小说生产、题材、平台、写作流程、审计流程有关时，可以结合这些背景信息提高回答相关性。",
-    "当问题与这些背景无关时，按你本身的正常能力回答即可。",
+    `当前 InkOS 全局配置目录（INKOS_HOME）：${inkosHome}`,
+    `当前 InkOS 项目目录（INKOS_PROJECT_ROOT）：${inkosProjectRoot}`,
+    "已知的关键文件与目录：",
+    `- 模型配置目录：${inkosHome}`,
+    `- 全局环境文件：${join(inkosHome, ".env")}`,
+    `- 多套模型配置数据库：${join(inkosHome, "profiles.db")}`,
+    `- 书籍根目录：${join(inkosProjectRoot, "books")}`,
+    `- 单本书章节目录模式：${join(inkosProjectRoot, "books", "<bookId>", "chapters")}`,
+    `- 项目配置文件：${join(inkosProjectRoot, "inkos.json")}`,
+    "书籍目录下包含书籍配置、story 长期记忆文件、chapters 章节文件等内容。",
+    "当问题与小说生产、题材、平台、写作流程、审计流程、项目文件路径有关时，可以结合这些背景信息提高回答相关性。",
     "",
     systemContext,
   ].join("\n");
+}
+
+const PROFILE_CHAT_TOOLS: ReadonlyArray<ToolDefinition> = [
+  {
+    name: "list_directory",
+    description: "列出目录内容。可用于查看 INKOS_HOME 或 INKOS_PROJECT_ROOT 下的文件和目录。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "目录路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "read_text_file",
+    description: "读取文本文件内容。适合 .env、.json、.md、.txt 等文本文件。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "write_text_file",
+    description: "覆盖写入文本文件。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+        content: { type: "string", description: "要写入的完整文本内容" },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    name: "make_directory",
+    description: "创建目录。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "目录路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "move_path",
+    description: "移动或重命名文件/目录。",
+    parameters: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "源路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+        to: { type: "string", description: "目标路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["from", "to"],
+    },
+  },
+  {
+    name: "delete_path",
+    description: "删除文件或目录。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "要删除的路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "list_books",
+    description: "列出当前项目下的所有书籍及其状态。",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "list_llm_profiles",
+    description: "列出当前多套 LLM 配置。",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "activate_llm_profile",
+    description: "激活指定的 LLM 配置，并写回当前全局 .env。",
+    parameters: {
+      type: "object",
+      properties: {
+        profileId: { type: "string", description: "要激活的 profile id" },
+      },
+      required: ["profileId"],
+    },
+  },
+];
+
+function normalizeProfileToolPath(inputPath: string): string {
+  const inkosHome = resolveInkosHomeDir();
+  const raw = inputPath.trim()
+    .replace(/^INKOS_HOME(?=\/|$)/, inkosHome)
+    .replace(/^INKOS_PROJECT_ROOT(?=\/|$)/, projectRoot);
+  const resolvedPath = resolve(raw);
+  const allowedRoots = [resolve(inkosHome), resolve(projectRoot)];
+  const inAllowedRoot = allowedRoots.some((root) => resolvedPath === root || resolvedPath.startsWith(`${root}/`));
+  if (!inAllowedRoot) {
+    throw new Error(`Path not allowed: ${inputPath}`);
+  }
+  return resolvedPath;
+}
+
+async function executeProfileChatTool(name: string, args: Record<string, unknown>): Promise<string> {
+  switch (name) {
+    case "list_directory": {
+      const dirPath = normalizeProfileToolPath(String(args.path ?? ""));
+      const entries = await readdir(dirPath, { withFileTypes: true });
+      const payload = await Promise.all(entries.slice(0, 200).map(async (entry) => {
+        const fullPath = join(dirPath, entry.name);
+        const info = await stat(fullPath);
+        return {
+          name: entry.name,
+          path: fullPath,
+          type: entry.isDirectory() ? "dir" : "file",
+          size: info.size,
+          mtime: info.mtime.toISOString(),
+        };
+      }));
+      return JSON.stringify({ path: dirPath, entries: payload }, null, 2);
+    }
+
+    case "read_text_file": {
+      const filePath = normalizeProfileToolPath(String(args.path ?? ""));
+      const allowedTextExt = new Set([".env", ".json", ".md", ".txt", ".yaml", ".yml", ".log"]);
+      const extension = extname(filePath).toLowerCase();
+      if (!allowedTextExt.has(extension) && basename(filePath) !== ".env") {
+        throw new Error(`Only text-like files are supported: ${filePath}`);
+      }
+      const content = await readFile(filePath, "utf-8");
+      return JSON.stringify({ path: filePath, content }, null, 2);
+    }
+
+    case "write_text_file": {
+      const filePath = normalizeProfileToolPath(String(args.path ?? ""));
+      const content = String(args.content ?? "");
+      await mkdir(dirname(filePath), { recursive: true });
+      await writeFile(filePath, content, "utf-8");
+      return JSON.stringify({ ok: true, path: filePath, size: content.length }, null, 2);
+    }
+
+    case "make_directory": {
+      const dirPath = normalizeProfileToolPath(String(args.path ?? ""));
+      await mkdir(dirPath, { recursive: true });
+      return JSON.stringify({ ok: true, path: dirPath }, null, 2);
+    }
+
+    case "move_path": {
+      const fromPath = normalizeProfileToolPath(String(args.from ?? ""));
+      const toPath = normalizeProfileToolPath(String(args.to ?? ""));
+      await mkdir(dirname(toPath), { recursive: true });
+      await rename(fromPath, toPath);
+      return JSON.stringify({ ok: true, from: fromPath, to: toPath }, null, 2);
+    }
+
+    case "delete_path": {
+      const path = normalizeProfileToolPath(String(args.path ?? ""));
+      await rm(path, { recursive: true, force: true });
+      return JSON.stringify({ ok: true, path }, null, 2);
+    }
+
+    case "list_books": {
+      const state = new StateManager(projectRoot);
+      const books = await state.listBooks();
+      const summaries = await Promise.all(books.map(async (bookId) => {
+        try {
+          const book = await state.loadBookConfig(bookId);
+          const chapters = await state.loadChapterIndex(bookId);
+          return {
+            id: book.id,
+            title: book.title,
+            status: book.status,
+            chapters: chapters.length,
+          };
+        } catch {
+          return { id: bookId, error: "failed to load" };
+        }
+      }));
+      return JSON.stringify(summaries, null, 2);
+    }
+
+    case "list_llm_profiles": {
+      const db = openProfilesDb();
+      try {
+        const rows = db.prepare("SELECT * FROM llm_profiles ORDER BY is_active DESC, updated_at DESC").all() as unknown as LlmProfileRow[];
+        return JSON.stringify(rows.map((row) => mapProfileRow(row)), null, 2);
+      } finally {
+        db.close();
+      }
+    }
+
+    case "activate_llm_profile": {
+      const profileId = String(args.profileId ?? "");
+      const profile = await activateLlmProfile(profileId);
+      return JSON.stringify({ ok: true, profile }, null, 2);
+    }
+
+    default:
+      return JSON.stringify({ error: `Unknown tool: ${name}` });
+  }
+}
+
+async function runProfileChatWithTools(
+  profileId: string,
+  client: ReturnType<typeof createLLMClient>,
+  model: string,
+  messages: ReadonlyArray<{ readonly role: "system" | "user" | "assistant"; readonly content: string }>,
+  options?: {
+    readonly useStream?: boolean;
+    readonly includeReasoning?: boolean;
+  },
+): Promise<{
+  readonly content: string;
+  readonly reasoning?: string;
+  readonly toolTrace: ReadonlyArray<{ readonly name: string; readonly args: Record<string, unknown> }>;
+}> {
+  return runToolEnabledConversation(client, model, messages, {
+    maxTurns: 8,
+    useStream: options?.useStream,
+    includeReasoning: options?.includeReasoning,
+    logToolCall: (name, args) => {
+      logInfo("llm_profiles.chat.tool", { profileId, tool: name, args: sanitizeForLog(args) as Record<string, unknown> });
+    },
+  });
+}
+
+async function runToolEnabledConversation(
+  client: ReturnType<typeof createLLMClient>,
+  model: string,
+  messages: ReadonlyArray<{ readonly role: "system" | "user" | "assistant"; readonly content: string }>,
+  options?: {
+    readonly maxTurns?: number;
+    readonly useStream?: boolean;
+    readonly includeReasoning?: boolean;
+    readonly logToolCall?: (name: string, args: Record<string, unknown>) => void;
+    readonly tools?: ReadonlyArray<ToolDefinition>;
+    readonly executeTool?: (name: string, args: Record<string, unknown>) => Promise<string>;
+  },
+): Promise<{
+  readonly content: string;
+  readonly reasoning?: string;
+  readonly toolTrace: ReadonlyArray<{ readonly name: string; readonly args: Record<string, unknown> }>;
+}> {
+  const tools = options?.tools ?? PROFILE_CHAT_TOOLS;
+  const executeTool = options?.executeTool ?? executeProfileChatTool;
+  const toolTrace: Array<{ readonly name: string; readonly args: Record<string, unknown> }> = [];
+  const conversation: AgentMessage[] = messages.map((message) => ({
+    role: message.role,
+    content: message.content,
+  })) as AgentMessage[];
+
+  let lastAssistantMessage = "";
+  let lastAssistantReasoning = "";
+  for (let turn = 0; turn < (options?.maxTurns ?? 8); turn++) {
+    const result = await chatWithTools(client, model, conversation, tools, {
+      useStream: options?.useStream,
+      includeReasoning: options?.includeReasoning,
+    });
+    conversation.push({
+      role: "assistant",
+      content: result.content || null,
+      ...(result.toolCalls.length > 0 ? { toolCalls: result.toolCalls } : {}),
+    });
+
+    if (result.content) {
+      lastAssistantMessage = result.content;
+    }
+    if (result.reasoning) {
+      lastAssistantReasoning = result.reasoning;
+    }
+    if (result.toolCalls.length === 0) {
+      break;
+    }
+
+    for (const toolCall of result.toolCalls) {
+      const args = parseToolArguments(toolCall.arguments);
+      toolTrace.push({ name: toolCall.name, args });
+      options?.logToolCall?.(toolCall.name, args);
+      const toolResult = await executeTool(toolCall.name, args);
+      conversation.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
+    }
+  }
+
+  return { content: lastAssistantMessage, reasoning: lastAssistantReasoning || undefined, toolTrace };
+}
+
+function parseToolArguments(raw: string): Record<string, unknown> {
+  const trimmed = raw.trim();
+  if (!trimmed) return {};
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`Tool arguments must be a JSON object: ${raw}`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+const CHAPTER_CHAT_TOOLS: ReadonlyArray<ToolDefinition> = [
+  {
+    name: "get_current_chapter_paths",
+    description: "获取当前章节的真实文件路径与相关目录。凡是提到路径、文件位置、要读哪个文件，都应先调用这个工具，不允许凭空猜测。",
+    parameters: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "read_text_file",
+    description: "读取当前项目中的文本文件。适合查看章节、story 文件、.env、json、markdown 等。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "list_directory",
+    description: "列出目录内容。可用于查看章节目录、story 目录等。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "目录路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "write_text_file",
+    description: "覆盖写入一个文本文件。你在 INKOS_PROJECT_ROOT 范围内可以自由使用它直接修改项目文件。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "文件路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+        content: { type: "string", description: "写入后的完整文本内容" },
+      },
+      required: ["path", "content"],
+    },
+  },
+  {
+    name: "make_directory",
+    description: "创建目录。你在 INKOS_PROJECT_ROOT 范围内可以自由创建需要的目录结构。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "目录路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    name: "move_path",
+    description: "移动或重命名项目目录内的文件/目录。",
+    parameters: {
+      type: "object",
+      properties: {
+        from: { type: "string", description: "源路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+        to: { type: "string", description: "目标路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["from", "to"],
+    },
+  },
+  {
+    name: "delete_path",
+    description: "删除项目目录内的文件或目录。请仅在用户明确要求删除时使用。",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "要删除的路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+      },
+      required: ["path"],
+    },
+  },
+];
+
+function formatChapterAuditDetails(chapterMeta?: ChapterMeta, limit = 8): string {
+  if (!chapterMeta?.auditDetails?.length) {
+    return "结构化审计详情：（暂无）";
+  }
+  return [
+    "结构化审计详情：",
+    ...chapterMeta.auditDetails.slice(0, limit).map((issue, index) =>
+      `${index + 1}. [${issue.severity}] ${issue.category}: ${issue.description}｜建议：${issue.suggestion}`),
+  ].join("\n");
+}
+
+async function executeChapterChatTool(
+  input: { readonly bookId: string; readonly chapterNumber: number },
+  name: string,
+  args: Record<string, unknown>,
+): Promise<string> {
+  if (
+    name === "read_text_file"
+    || name === "list_directory"
+    || name === "write_text_file"
+    || name === "make_directory"
+    || name === "move_path"
+    || name === "delete_path"
+  ) {
+    return executeProfileChatTool(name, args);
+  }
+
+  const state = new StateManager(projectRoot);
+  const bookId = input.bookId;
+  const chapterNumber = input.chapterNumber;
+
+  switch (name) {
+    case "get_current_chapter_paths": {
+      const book = await state.loadBookConfig(bookId);
+      const index = await state.loadChapterIndex(bookId);
+      const chapterMeta = index.find((item) => item.number === chapterNumber);
+      const bookDir = state.bookDir(bookId);
+      const chapterFile = await findChapterFile(bookDir, chapterNumber, chapterMeta?.title);
+      const chaptersDir = join(bookDir, "chapters");
+      const storyDir = storyDirPath(bookId);
+      return JSON.stringify({
+        ok: true,
+        bookId,
+        bookTitle: book.title,
+        chapter: chapterNumber,
+        chapterTitle: chapterMeta?.title ?? null,
+        projectRoot,
+        bookDir,
+        chaptersDir,
+        storyDir,
+        chapterFile,
+        authorBriefPath: authorBriefPath(bookId),
+        currentStatePath: storyFilePath(bookId, "current_state.md"),
+        pendingHooksPath: storyFilePath(bookId, "pending_hooks.md"),
+        chapterSummariesPath: storyFilePath(bookId, "chapter_summaries.md"),
+      }, null, 2);
+    }
+
+    default:
+      throw new Error(`Unknown chapter chat tool: ${name}`);
+  }
 }
 
 async function upsertActiveLlmProfileFromInit(payload: LlmProfilePayload): Promise<void> {
@@ -848,15 +1474,24 @@ function computeAnalytics(
   };
 }
 
-async function findChapterFile(bookDir: string, chapterNumber: number): Promise<string> {
+async function findChapterFile(bookDir: string, chapterNumber: number, preferredTitle?: string): Promise<string> {
   const chaptersDir = join(bookDir, "chapters");
-  const files = await readdir(chaptersDir);
-  const paddedNum = String(chapterNumber).padStart(4, "0");
-  const match = files.find((file) => file.startsWith(paddedNum) && file.endsWith(".md"));
-  if (!match) {
-    throw new Error(`Chapter file not found for chapter ${chapterNumber}`);
+  const resolved = await resolveChapterFile(chaptersDir, chapterNumber, preferredTitle);
+  if (resolved.duplicates.length > 0) {
+    logInfo("chapter.file.multiple_matches", {
+      chapterNumber,
+      bookDir,
+      preferredTitle: preferredTitle ?? null,
+      selected: resolved.selected.file,
+      candidates: resolved.candidates.map((item) => ({
+        file: item.file,
+        size: item.size,
+        mtimeMs: item.mtimeMs,
+        headingTitle: item.headingTitle,
+      })),
+    });
   }
-  return join(chaptersDir, match);
+  return resolved.selected.fullPath;
 }
 
 async function daemonStatus(): Promise<{ running: boolean; pid: number | null }> {
@@ -911,8 +1546,16 @@ async function initializeBookSkeleton(bookId: string): Promise<void> {
   ]);
 }
 
+function storyDirPath(bookId: string): string {
+  return join(projectRoot, "books", bookId, "story");
+}
+
+function storyFilePath(bookId: string, filename: string): string {
+  return join(storyDirPath(bookId), filename);
+}
+
 function authorBriefPath(bookId: string): string {
-  return join(projectRoot, "books", bookId, "story", "author_brief.md");
+  return storyFilePath(bookId, "author_brief.md");
 }
 
 async function readAuthorBrief(bookId: string): Promise<string> {
@@ -925,7 +1568,7 @@ async function readAuthorBrief(bookId: string): Promise<string> {
 
 async function readStoryFile(bookId: string, filename: string): Promise<string> {
   try {
-    return await readFile(join(projectRoot, "books", bookId, "story", filename), "utf-8");
+    return await readFile(storyFilePath(bookId, filename), "utf-8");
   } catch {
     return "";
   }
@@ -953,6 +1596,57 @@ function mergeAuthorBrief(context?: string, authorBrief?: string): string | unde
   ].filter(Boolean);
 
   return sections.length > 0 ? sections.join("\n\n") : undefined;
+}
+
+async function buildExistingBookContext(bookId: string): Promise<{
+  readonly pathBlock: string;
+  readonly memoryBlock: string;
+}> {
+  const state = new StateManager(projectRoot);
+  const bookDir = state.bookDir(bookId);
+  const chapterIndex = await state.loadChapterIndex(bookId);
+  const latestChapter = [...chapterIndex].sort((left, right) => right.number - left.number)[0];
+  const latestChapterFile = latestChapter
+    ? await findChapterFile(bookDir, latestChapter.number, latestChapter.title).catch(() => "")
+    : "";
+
+  const [authorBrief, currentState, pendingHooks, chapterSummaries] = await Promise.all([
+    readAuthorBrief(bookId),
+    readStoryFile(bookId, "current_state.md"),
+    readStoryFile(bookId, "pending_hooks.md"),
+    readStoryFile(bookId, "chapter_summaries.md"),
+  ]);
+
+  const pathBlock = [
+    "## 当前书籍项目路径",
+    `- bookId：${bookId}`,
+    `- 书籍目录：${bookDir}`,
+    `- story 目录：${storyDirPath(bookId)}`,
+    `- 作者简报：${authorBriefPath(bookId)}`,
+    `- 状态卡：${storyFilePath(bookId, "current_state.md")}`,
+    `- 伏笔池：${storyFilePath(bookId, "pending_hooks.md")}`,
+    `- 章节摘要：${storyFilePath(bookId, "chapter_summaries.md")}`,
+    `- 支线进度板：${storyFilePath(bookId, "subplot_board.md")}`,
+    `- 情感弧线：${storyFilePath(bookId, "emotional_arcs.md")}`,
+    `- 角色矩阵：${storyFilePath(bookId, "character_matrix.md")}`,
+    latestChapter
+      ? `- 最新章节文件：${latestChapterFile || `第${latestChapter.number}章文件解析失败`}`
+      : "- 最新章节文件：（暂无）",
+    `- 已有章节数：${chapterIndex.length}`,
+    latestChapter ? `- 最近章节：第${latestChapter.number}章 ${latestChapter.title}` : "- 最近章节：（暂无）",
+    "这是一本已经存在的书，请优先在这些已有资料基础上补强，不要把它当成全新开书。",
+  ].join("\n");
+
+  const memoryBlock = [
+    authorBrief.trim() ? `## 已有作者简报（${authorBriefPath(bookId)}）\n${authorBrief.trim()}` : "",
+    currentState.trim() ? `## 当前状态卡（${storyFilePath(bookId, "current_state.md")}）\n${currentState.trim()}` : "",
+    pendingHooks.trim() ? `## 当前伏笔池（${storyFilePath(bookId, "pending_hooks.md")}）\n${pendingHooks.trim().slice(-2500)}` : "",
+    chapterSummaries.trim() ? `## 章节摘要（${storyFilePath(bookId, "chapter_summaries.md")}）\n${chapterSummaries.trim().slice(-3500)}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return { pathBlock, memoryBlock };
 }
 
 function extractJsonBlock(text: string): string {
@@ -1024,6 +1718,7 @@ async function buildInitAssistantSystemContext(input: {
 }
 
 async function runInitAssistant(input: {
+  readonly bookId?: string;
   readonly title: string;
   readonly genre: string;
   readonly platform: string;
@@ -1032,13 +1727,26 @@ async function runInitAssistant(input: {
   readonly context?: string;
   readonly currentBrief?: string;
   readonly messages: ReadonlyArray<InitAssistantMessage>;
-}): Promise<{ reply: string; brief: string }> {
-  const config = await loadProjectConfig(projectRoot);
-  const client = createLLMClient(config.llm);
+  readonly useStream?: boolean;
+  readonly includeReasoning?: boolean;
+  readonly profileId?: string;
+}): Promise<{ reply: string; brief: string; reasoning?: string; model: string; profileId?: string }> {
+  const llm = await createClientFromOptionalProfile(input.profileId);
+  logInfo("init_assistant.llm.start", {
+    bookId: input.bookId ?? null,
+    profileId: llm.profileId ?? null,
+    model: llm.model,
+  });
+  const resolvedBookId = input.bookId?.trim()
+    ? await resolveBookId(projectRoot, input.bookId.trim())
+    : undefined;
   const systemContext = await buildInitAssistantSystemContext({
     genre: input.genre,
     platform: input.platform,
   });
+  const existingBookContext = resolvedBookId
+    ? await buildExistingBookContext(resolvedBookId)
+    : null;
 
   const systemPrompt = [
     "你是 InkOS 的智能初始化助手，负责在作者开书前通过对话梳理小说方案。",
@@ -1046,11 +1754,13 @@ async function runInitAssistant(input: {
     "请使用简体中文，语气像资深网文编辑，直接、具体、可执行。",
     "如果信息还不完整，可以继续追问，但一次最多问 3 个关键问题。",
     "你必须显式利用系统给你的平台信息、题材规则和 InkOS 架构上下文，不要把自己当成普通写作助手。",
+    "如果我提供了某本已存在书籍的目录、story 文件路径和已有长期记忆，说明这次是在旧书基础上继续补强，你必须优先尊重这些已有资料。",
     "遇到书名还不稳、主线不清、结局含糊、主角动机发虚时，优先追问这些关键点。",
     "每次都要同步维护一份可直接用于初始化的“创作简报”。",
+    "reply 字段可以使用 Markdown，便于用标题、列表等方式提高可读性；brief 字段继续输出完整创作简报 Markdown。",
     "输出必须是 JSON，对象结构如下：",
     "{\"reply\":\"给作者的话\",\"brief\":\"完整创作简报Markdown\"}",
-    "不要输出 Markdown 代码块，不要输出额外解释。",
+    "不要用 Markdown 代码块包裹整个 JSON，不要输出额外解释。",
     "",
     systemContext,
   ].join("\n");
@@ -1066,6 +1776,8 @@ async function runInitAssistant(input: {
     "",
     "当前创作简报：",
     input.currentBrief?.trim() ? input.currentBrief.trim() : "（暂无，请你根据对话逐步整理）",
+    existingBookContext?.pathBlock ?? "",
+    existingBookContext?.memoryBlock ?? "",
     "",
     "创作简报建议至少包含这些部分：",
     "## 书名候选与题眼",
@@ -1081,18 +1793,27 @@ async function runInitAssistant(input: {
     "## 明确禁忌与边界",
   ].join("\n");
 
-  const messages: LLMMessage[] = [
+  const messages: Array<{ readonly role: "system" | "user" | "assistant"; readonly content: string }> = [
     { role: "system", content: systemPrompt },
     { role: "user", content: metaPrompt },
     ...input.messages.map((message) => ({ role: message.role, content: message.content })),
   ];
 
-  const response = await chatCompletion(client, config.llm.model, messages, {
-    temperature: 0.8,
-    maxTokens: 4096,
+  const response = await runToolEnabledConversation(llm.client, llm.model, messages, {
+    maxTurns: 8,
+    useStream: input.useStream,
+    includeReasoning: input.includeReasoning,
+    logToolCall: (name, args) => {
+      logInfo("init_assistant.chat.tool", { tool: name, args: sanitizeForLog(args) as Record<string, unknown> });
+    },
   });
 
-  return parseInitAssistantPayload(response.content, input.currentBrief);
+  return {
+    ...parseInitAssistantPayload(response.content, input.currentBrief),
+    reasoning: response.reasoning,
+    model: llm.model,
+    profileId: llm.profileId,
+  };
 }
 
 async function updateProjectModelOverrides(updates: Record<string, string | null | undefined>): Promise<Record<string, unknown>> {
@@ -1125,26 +1846,47 @@ async function runChapterAssistant(input: {
   readonly bookId: string;
   readonly chapterNumber: number;
   readonly messages: ReadonlyArray<ChapterAssistantMessage>;
-}): Promise<{ reply: string }> {
+  readonly useStream?: boolean;
+  readonly includeReasoning?: boolean;
+  readonly profileId?: string;
+}): Promise<{ reply: string; reasoning?: string; model: string; profileId?: string }> {
   const config = await loadProjectConfig(projectRoot);
   const state = new StateManager(projectRoot);
   const book = await state.loadBookConfig(input.bookId);
   const chapterMeta = (await state.loadChapterIndex(input.bookId)).find((item) => item.number === input.chapterNumber);
-  const chapterFile = await findChapterFile(state.bookDir(input.bookId), input.chapterNumber);
+  const chapterFile = await findChapterFile(state.bookDir(input.bookId), input.chapterNumber, chapterMeta?.title);
   const chapterRaw = await readFile(chapterFile, "utf-8");
   const chapterContent = chapterRaw.split("\n").slice(2).join("\n").trim();
   const authorBrief = await readAuthorBrief(input.bookId);
   const currentState = await readStoryFile(input.bookId, "current_state.md");
+  const pendingHooks = await readStoryFile(input.bookId, "pending_hooks.md");
   const chapterSummaries = await readStoryFile(input.bookId, "chapter_summaries.md");
+  const bookDir = state.bookDir(input.bookId);
   const dialogueModel = (config.modelOverrides?.dialogue ?? config.llm.model).trim();
-  const client = createLLMClient(config.llm);
+  const llm = input.profileId?.trim()
+    ? await createClientFromOptionalProfile(input.profileId)
+    : {
+        client: createLLMClient(config.llm),
+        model: dialogueModel,
+      };
+  logInfo("chapter.chat.llm.start", {
+    bookId: input.bookId,
+    chapterNumber: input.chapterNumber,
+    profileId: input.profileId ?? null,
+    model: llm.model,
+  });
 
   const systemPrompt = [
     "你是 InkOS 的章节级写作编辑助手。",
-    "你的任务是围绕当前章节提供具体、可执行的讨论意见：这一章哪里强、哪里弱、怎么改、下一步怎么写。",
-    "你不是泛泛聊天，要优先输出适合直接喂给修订或续写的建议。",
-    "如果用户在讨论修改意见，你要结合当前章节正文、长期创作约束、审计问题一起回答。",
-    "请使用简体中文，结论要直接，尽量给出分点建议。",
+    "你的任务是围绕当前章节直接干活：读文件、改文件、解释修改。",
+    "在 INKOS_PROJECT_ROOT 范围内，你可以自由读取、写入、创建、移动、删除项目文件；优先自己完成，不要空谈方案。",
+    "章节对话框不是工作流执行器，不要自动触发审计、修订、再审计这类整章流程；这些继续由章节区按钮手动操作。",
+    "凡是涉及路径、文件位置、读取哪个文件、修改哪个文件，必须先调用 get_current_chapter_paths 工具获取真实路径，然后再继续。",
+    "禁止凭经验猜测目录结构，禁止自行拼接路径，禁止把 books/<bookId>/ 这一层省略掉。",
+    "如果没有先调用工具确认路径，就不要在回答中写任何具体文件路径或执行任何文件操作。",
+    "你可以使用 Markdown 组织回复，优先用短标题、列表、表格或代码块提高可读性。",
+    "请使用自然简体中文，结论要直接，尽量给出分点建议。",
+    "除文件路径、模型名、命令名这类必须保留的内容外，不要夹杂英文单词或中英混写表达。",
   ].join("\n");
 
   const contextPrompt = [
@@ -1154,29 +1896,51 @@ async function runChapterAssistant(input: {
     `章节：第${input.chapterNumber}章 ${chapterMeta?.title ?? ""}`.trim(),
     chapterMeta?.status ? `当前状态：${chapterMeta.status}` : "",
     chapterMeta?.auditIssues?.length ? `审计问题：\n- ${chapterMeta.auditIssues.join("\n- ")}` : "审计问题：（暂无）",
-    authorBrief.trim() ? `长期创作约束：\n${authorBrief.trim()}` : "长期创作约束：（暂无）",
-    currentState.trim() ? `当前状态卡：\n${currentState.trim()}` : "",
-    chapterSummaries.trim() ? `章节摘要：\n${chapterSummaries.trim().slice(-3000)}` : "",
+    formatChapterAuditDetails(chapterMeta),
+    authorBrief.trim() ? `长期创作约束（${authorBriefPath(input.bookId)}）：\n${authorBrief.trim()}` : "长期创作约束：（暂无）",
+    currentState.trim() ? `当前状态卡（${storyFilePath(input.bookId, "current_state.md")}）：\n${currentState.trim()}` : "",
+    pendingHooks.trim() ? `伏笔池（${storyFilePath(input.bookId, "pending_hooks.md")}）：\n${pendingHooks.trim().slice(-2500)}` : "",
+    chapterSummaries.trim() ? `章节摘要（${storyFilePath(input.bookId, "chapter_summaries.md")}）：\n${chapterSummaries.trim().slice(-3000)}` : "",
     `当前章节正文：\n${chapterContent.slice(0, 12000)}`,
   ]
     .filter(Boolean)
     .join("\n\n");
 
-  const response = await chatCompletion(
-    client,
-    dialogueModel,
+  const response = await runToolEnabledConversation(
+    llm.client,
+    llm.model,
     [
       { role: "system", content: systemPrompt },
       { role: "user", content: contextPrompt },
       ...input.messages.map((message) => ({ role: message.role, content: message.content })),
     ],
     {
-      temperature: 0.7,
-      maxTokens: 4096,
+      maxTurns: 8,
+      useStream: input.useStream,
+      includeReasoning: input.includeReasoning,
+      tools: CHAPTER_CHAT_TOOLS,
+      executeTool: (name, args) => executeChapterChatTool(
+        { bookId: input.bookId, chapterNumber: input.chapterNumber },
+        name,
+        args,
+      ),
+      logToolCall: (name, args) => {
+        logInfo("chapter.chat.tool", {
+          bookId: input.bookId,
+          chapterNumber: input.chapterNumber,
+          tool: name,
+          args: sanitizeForLog(args) as Record<string, unknown>,
+        });
+      },
     },
   );
 
-  return { reply: response.content.trim() };
+  return {
+    reply: response.content.trim(),
+    reasoning: response.reasoning,
+    model: llm.model,
+    profileId: llm.profileId,
+  };
 }
 
 app.get("/api/health", async (_req, res) => {
@@ -1377,7 +2141,7 @@ app.get("/api/books/:bookId/chapters/:chapter", async (req, res) => {
     }
     const bookDir = state.bookDir(bookId);
     const chapterMeta = (await state.loadChapterIndex(bookId)).find((item) => item.number === chapterNumber);
-    const chapterFile = await findChapterFile(bookDir, chapterNumber);
+    const chapterFile = await findChapterFile(bookDir, chapterNumber, chapterMeta?.title);
     const raw = await readFile(chapterFile, "utf-8");
     const lines = raw.split("\n");
     const title = lines[0]?.replace(/^#\s*/, "") ?? `第${chapterNumber}章`;
@@ -1396,12 +2160,96 @@ app.get("/api/books/:bookId/chapters/:chapter", async (req, res) => {
   }
 });
 
+app.post("/api/books/:bookId/chapters/:chapter/replace", async (req, res) => {
+  const schema = z.object({
+    content: z.string().min(1),
+    title: z.string().optional(),
+  });
+
+  try {
+    const state = new StateManager(projectRoot);
+    const bookId = await resolveBookId(projectRoot, req.params.bookId);
+    const chapterNumber = parseInt(req.params.chapter, 10);
+    if (!Number.isFinite(chapterNumber) || chapterNumber < 1) {
+      throw new Error(`Invalid chapter number: ${req.params.chapter}`);
+    }
+    const input = schema.parse(req.body ?? {});
+    const bookDir = state.bookDir(bookId);
+    const chapterIndex = await state.loadChapterIndex(bookId);
+    const chapterMeta = chapterIndex.find((item) => item.number === chapterNumber);
+    if (!chapterMeta) {
+      throw new Error(`Chapter ${chapterNumber} not found in index`);
+    }
+    const chapterFile = await findChapterFile(bookDir, chapterNumber, chapterMeta.title);
+
+    const normalized = input.content.replace(/\r\n/g, "\n").trim();
+    const withoutFence = normalized
+      .replace(/^```[a-zA-Z0-9_-]*\n/, "")
+      .replace(/\n```$/, "")
+      .trim();
+    const lines = withoutFence.split("\n");
+    const heading = lines[0]?.trim() ?? "";
+    const inferredTitle = heading.startsWith("#")
+      ? heading.replace(/^#\s*/, "").replace(/^第\d+章\s*/, "").trim()
+      : "";
+    const nextTitle = input.title?.trim() || inferredTitle || chapterMeta.title;
+    const nextBody = heading.startsWith("#")
+      ? lines.slice(1).join("\n").trim()
+      : withoutFence;
+
+    const writeResult = await writeCanonicalChapterFile({
+      chaptersDir: join(bookDir, "chapters"),
+      chapterNumber,
+      title: nextTitle,
+      body: nextBody,
+      trailingNewline: true,
+    });
+
+    const updatedAt = new Date().toISOString();
+    const updatedIndex = chapterIndex.map((item) =>
+      item.number === chapterNumber
+        ? {
+            ...item,
+            title: nextTitle,
+            wordCount: nextBody.length,
+            status: "drafted" as ChapterMeta["status"],
+            updatedAt,
+            auditIssues: [],
+          }
+        : item,
+    );
+    await state.saveChapterIndex(bookId, updatedIndex);
+
+    logInfo("chapter.replace.done", {
+      bookId,
+      chapter: chapterNumber,
+      filePath: writeResult.fullPath,
+      previousFilePath: chapterFile,
+      removedDuplicates: writeResult.removedDuplicates,
+      canonicalFile: buildChapterFilename(chapterNumber, nextTitle),
+      title: nextTitle,
+      wordCount: nextBody.length,
+    });
+    res.json({ ok: true, bookId, chapter: chapterNumber, filePath: writeResult.fullPath, title: nextTitle, wordCount: nextBody.length });
+  } catch (error) {
+    logError("chapter.replace.error", {
+      bookId: req.params.bookId,
+      chapter: req.params.chapter,
+      error: describeError(error),
+    });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
 app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
   const schema = z.object({
     messages: z.array(z.object({
       role: z.enum(["user", "assistant"]),
       content: z.string().min(1),
     })).min(1),
+    useStream: z.boolean().optional(),
+    includeReasoning: z.boolean().optional(),
+    profileId: z.string().optional(),
   });
 
   try {
@@ -1411,13 +2259,28 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
       throw new Error(`Invalid chapter number: ${req.params.chapter}`);
     }
     const input = schema.parse(req.body ?? {});
-    logInfo("chapter.chat.start", { bookId, chapterNumber, messageCount: input.messages.length });
+    logInfo("chapter.chat.start", {
+      bookId,
+      chapterNumber,
+      messageCount: input.messages.length,
+      useStream: input.useStream !== false,
+      includeReasoning: input.includeReasoning === true,
+      profileId: input.profileId ?? null,
+    });
     const result = await runChapterAssistant({
       bookId,
       chapterNumber,
       messages: input.messages,
+      useStream: input.useStream,
+      includeReasoning: input.includeReasoning,
+      profileId: input.profileId,
     });
-    logInfo("chapter.chat.done", { bookId, chapterNumber });
+    logInfo("chapter.chat.done", {
+      bookId,
+      chapterNumber,
+      profileId: result.profileId ?? input.profileId ?? null,
+      model: result.model,
+    });
     res.json({ ok: true, ...result });
   } catch (error) {
     logError("chapter.chat.error", {
@@ -1659,15 +2522,35 @@ app.post("/api/llm-profiles/:id/chat", async (req, res) => {
       ...messages.filter((item) => item.role !== "system"),
     ];
 
-    logInfo("llm_profiles.chat.start", { profileId, messageCount: normalizedMessages.length, genre, platform });
-    const result = await chatWithLlmProfile(profileId, normalizedMessages, { useStream, includeReasoning });
+    if (!profile) {
+      throw new Error(`LLM profile not found: ${profileId}`);
+    }
+    logInfo("llm_profiles.chat.start", {
+      profileId,
+      messageCount: normalizedMessages.length,
+      genre,
+      platform,
+      provider: profile.provider,
+      model: profile.model,
+      baseUrl: profile.base_url,
+      apiKeyConfigured: Boolean(profile.api_key),
+    });
+    const client = createLLMClient({
+      provider: profile.provider,
+      baseUrl: profile.base_url,
+      apiKey: profile.api_key,
+      model: profile.model,
+      temperature: profile.temperature ?? 0.7,
+      maxTokens: profile.max_tokens ?? 16000,
+      thinkingBudget: profile.thinking_budget ?? 0,
+      apiFormat: profile.api_format ?? "chat",
+    });
+    const result = await runProfileChatWithTools(profileId, client, profile.model, normalizedMessages);
     logInfo("llm_profiles.chat.done", {
       profileId,
-      provider: result.provider,
-      model: result.model,
-      useStream: result.applied.useStream,
-      includeReasoning: result.applied.includeReasoning,
-      totalTokens: result.usage.totalTokens,
+      provider: profile.provider,
+      model: profile.model,
+      toolCalls: result.toolTrace.length,
     });
     res.json({ ok: true, ...result });
   } catch (error) {
@@ -1837,6 +2720,7 @@ app.get("/api/review/pending", async (req, res) => {
 
 app.post("/api/init-assistant/chat", async (req, res) => {
   const schema = z.object({
+    bookId: z.string().optional(),
     title: z.string().min(1).default("未命名作品"),
     genre: z.enum(["xuanhuan", "xianxia", "chuanyue", "urban", "horror", "other"]).default("other"),
     platform: z.enum(["tomato", "feilu", "qidian", "other"]).default("tomato"),
@@ -1844,6 +2728,9 @@ app.post("/api/init-assistant/chat", async (req, res) => {
     chapterWords: z.number().int().min(1000).default(3000),
     context: z.string().optional(),
     currentBrief: z.string().optional(),
+    useStream: z.boolean().optional(),
+    includeReasoning: z.boolean().optional(),
+    profileId: z.string().optional(),
     messages: z.array(z.object({
       role: z.enum(["user", "assistant"]),
       content: z.string().min(1),
@@ -1853,16 +2740,23 @@ app.post("/api/init-assistant/chat", async (req, res) => {
   try {
     const input = schema.parse(req.body ?? {});
     logInfo("init_assistant.chat.start", {
+      bookId: input.bookId ?? null,
       title: input.title,
       genre: input.genre,
       platform: input.platform,
       messageCount: input.messages.length,
+      useStream: input.useStream !== false,
+      includeReasoning: input.includeReasoning === true,
+      profileId: input.profileId ?? null,
     });
     const result = await runInitAssistant(input);
     logInfo("init_assistant.chat.done", {
+      bookId: input.bookId ?? null,
       title: input.title,
       genre: input.genre,
       briefLength: result.brief.length,
+      profileId: result.profileId ?? input.profileId ?? null,
+      model: result.model,
     });
     res.json({ ok: true, ...result });
   } catch (error) {
@@ -2035,7 +2929,9 @@ app.post("/api/writing/next", async (req, res) => {
     res.json({ ok: true, jobId: job.id, bookId });
 
     // Run pipeline in background
-    const pipeline = createPipeline(projectRoot, config, input.context);
+    const pipeline = createPipeline(projectRoot, config, input.context, (event, meta) => {
+      logInfo(event, { bookId, jobId: job.id, ...(meta ?? {}) });
+    });
     const results: unknown[] = [];
     (async () => {
       try {
@@ -2085,14 +2981,44 @@ app.post("/api/audit", async (req, res) => {
   const schema = z.object({
     bookId: z.string().optional(),
     chapter: z.number().int().min(1).optional(),
+    async: z.boolean().optional(),
   });
 
   try {
     const input = schema.parse(req.body ?? {});
     const config = await loadProjectConfig(projectRoot);
     const bookId = await resolveBookId(projectRoot, input.bookId);
+    if (input.async) {
+      const job = createJob({
+        type: "audit",
+        step: `ch${input.chapter ?? "latest"}:audit:queued`,
+        bookId,
+      });
+      startJob(job, { chapter: input.chapter ?? null });
+      void (async () => {
+        try {
+          updateJobStep(job, `ch${input.chapter ?? "latest"}:audit:start`, { chapter: input.chapter ?? null });
+          logInfo("audit.start", { bookId, chapter: input.chapter ?? null, jobId: job.id });
+          const pipeline = createPipeline(projectRoot, config, undefined, (event, meta) => {
+            logInfo(event, { bookId, chapter: input.chapter ?? null, jobId: job.id, ...(meta ?? {}) });
+          });
+          const result = await pipeline.auditDraft(bookId, input.chapter);
+          job.result = { ok: true, bookId, result };
+          updateJobStep(job, `ch${result.chapterNumber}:audit:done`, { chapter: result.chapterNumber, passed: result.passed });
+          logInfo("audit.done", { bookId, chapter: input.chapter ?? result.chapterNumber, passed: result.passed, jobId: job.id });
+          finishJob(job, { chapter: result.chapterNumber });
+        } catch (error) {
+          failJob(job, error);
+          logError("audit.error", { bookId, chapter: input.chapter ?? null, jobId: job.id, error: describeError(error) });
+        }
+      })();
+      res.json({ ok: true, jobId: job.id, queued: true });
+      return;
+    }
     logInfo("audit.start", { bookId, chapter: input.chapter ?? null });
-    const pipeline = createPipeline(projectRoot, config);
+    const pipeline = createPipeline(projectRoot, config, undefined, (event, meta) => {
+      logInfo(event, { bookId, chapter: input.chapter ?? null, ...(meta ?? {}) });
+    });
     const result = await pipeline.auditDraft(bookId, input.chapter);
     logInfo("audit.done", { bookId, chapter: input.chapter ?? result.chapterNumber, passed: result.passed });
     res.json({ ok: true, bookId, result });
@@ -2108,19 +3034,64 @@ app.post("/api/revise", async (req, res) => {
     chapter: z.number().int().min(1).optional(),
     mode: z.enum(["polish", "rewrite", "rework", "spot-fix"]).default("rewrite"),
     instruction: z.string().optional(),
+    async: z.boolean().optional(),
   });
 
   try {
     const input = schema.parse(req.body ?? {});
     const config = await loadProjectConfig(projectRoot);
     const bookId = await resolveBookId(projectRoot, input.bookId);
+    if (input.async) {
+      const job = createJob({
+        type: "revise",
+        step: `ch${input.chapter ?? "latest"}:revise:queued`,
+        bookId,
+      });
+      startJob(job, { chapter: input.chapter ?? null, mode: input.mode });
+      void (async () => {
+        try {
+          updateJobStep(job, `ch${input.chapter ?? "latest"}:revise:start`, { chapter: input.chapter ?? null, mode: input.mode });
+          logInfo("revise.start", {
+            bookId,
+            chapter: input.chapter ?? null,
+            mode: input.mode,
+            jobId: job.id,
+            hasInstruction: Boolean(input.instruction?.trim()),
+            instructionPreview: input.instruction?.slice(0, 1000) ?? null,
+          });
+          const pipeline = createPipeline(projectRoot, config, undefined, (event, meta) => {
+            logInfo(event, { bookId, chapter: input.chapter ?? null, mode: input.mode, jobId: job.id, ...(meta ?? {}) });
+          });
+          const result = await pipeline.reviseDraft(bookId, input.chapter, input.mode, input.instruction);
+          job.result = { ok: true, bookId, result };
+          updateJobStep(job, `ch${result.chapterNumber}:revise:done`, { chapter: result.chapterNumber, mode: input.mode });
+          logInfo("revise.done", { bookId, chapter: result.chapterNumber, mode: input.mode, jobId: job.id });
+          finishJob(job, { chapter: result.chapterNumber });
+        } catch (error) {
+          failJob(job, error);
+          logError("revise.error", {
+            bookId,
+            chapter: input.chapter ?? null,
+            mode: input.mode,
+            jobId: job.id,
+            hasInstruction: Boolean(input.instruction),
+            error: describeError(error),
+          });
+        }
+      })();
+      res.json({ ok: true, jobId: job.id, queued: true });
+      return;
+    }
     logInfo("revise.start", {
       bookId,
       chapter: input.chapter ?? null,
       mode: input.mode,
       hasInstruction: Boolean(input.instruction?.trim()),
+      instructionPreview: input.instruction?.slice(0, 1000) ?? null,
     });
-    const pipeline = createPipeline(projectRoot, config);
+    const pipeline = createPipeline(projectRoot, config, undefined, (event, meta) => {
+      logInfo(event, { bookId, chapter: input.chapter ?? null, mode: input.mode, ...(meta ?? {}) });
+    });
     const result = await pipeline.reviseDraft(bookId, input.chapter, input.mode, input.instruction);
     logInfo("revise.done", { bookId, chapter: result.chapterNumber, mode: input.mode });
     res.json({ ok: true, bookId, result });
@@ -2237,6 +3208,7 @@ app.get("/api/commands", async (_req, res) => {
 app.post("/api/commands/:id/run", async (req, res) => {
   const paramsSchema = z.object({
     values: z.record(z.string(), z.unknown()).default({}),
+    async: z.boolean().optional(),
   });
 
   try {
@@ -2246,7 +3218,7 @@ app.post("/api/commands/:id/run", async (req, res) => {
       return;
     }
 
-    const { values } = paramsSchema.parse(req.body ?? {});
+    const { values, async: runAsync } = paramsSchema.parse(req.body ?? {});
     logInfo("command.run.start", { command: command.id, values: sanitizeForLog(values) });
 
     if (command.specialHandler === "daemon-up") {
@@ -2271,6 +3243,44 @@ app.post("/api/commands/:id/run", async (req, res) => {
 
     const args = command.buildArgs(values);
     if (command.supportsJson) args.push("--json");
+    if (runAsync) {
+      const asyncBookId = typeof values.bookId === "string" ? values.bookId : undefined;
+      const job = createJob({
+        type: "command",
+        step: `${command.id}:queued`,
+        bookId: asyncBookId,
+      });
+      startJob(job, { command: command.id });
+      void (async () => {
+        try {
+          updateJobStep(job, `${command.id}:start`, { command: command.id });
+          const result = await spawnCli(args, { expectJson: command.supportsJson, timeoutMs: webCommandTimeoutMs });
+          if (result.code !== 0) {
+            const timeoutError = result.code === 124 ? `Command timed out after ${webCommandTimeoutMs}ms.` : undefined;
+            throw new Error(
+              timeoutError ?? (typeof result.parsed === "object" && result.parsed && "error" in result.parsed
+                ? String((result.parsed as { error?: unknown }).error ?? "")
+                : result.stderr || result.stdout || `Command failed with code ${result.code}`),
+            );
+          }
+          job.result = {
+            ok: true,
+            command: command.id,
+            args,
+            stdout: result.stdout,
+            stderr: result.stderr,
+            parsed: result.parsed,
+          };
+          updateJobStep(job, `${command.id}:done`, { command: command.id });
+          finishJob(job, { command: command.id });
+        } catch (error) {
+          failJob(job, error);
+          logError("command.run.error", { command: command.id, jobId: job.id, error: describeError(error) });
+        }
+      })();
+      res.json({ ok: true, jobId: job.id, queued: true });
+      return;
+    }
     const result = await spawnCli(args, { expectJson: command.supportsJson, timeoutMs: webCommandTimeoutMs });
 
     if (result.code !== 0) {

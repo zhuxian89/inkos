@@ -60,10 +60,41 @@ export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: str
         )}
       </Card>
 
-      <Card title="正文">
-        <Typography.Paragraph style={{ whiteSpace: "pre-wrap", marginBottom: 0 }}>
-          {data?.content ?? data?.error ?? "正在加载正文..."}
-        </Typography.Paragraph>
+      <Card
+        title="正文"
+        bodyStyle={{
+          padding: 0,
+          background:
+            "radial-gradient(circle at top, rgba(255,249,230,0.96), rgba(244,232,204,0.96) 58%, rgba(233,219,188,0.96))",
+        }}
+      >
+        <div
+          style={{
+            maxWidth: 880,
+            margin: "0 auto",
+            padding: "40px 36px 48px",
+            minHeight: 520,
+            background:
+              "linear-gradient(180deg, rgba(255,251,236,0.88), rgba(245,235,208,0.92))",
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.75), 0 18px 40px rgba(96,74,40,0.08)",
+            borderLeft: "1px solid rgba(125,92,48,0.12)",
+            borderRight: "1px solid rgba(125,92,48,0.12)",
+          }}
+        >
+          <Typography.Paragraph
+            style={{
+              whiteSpace: "pre-wrap",
+              marginBottom: 0,
+              fontSize: 19,
+              lineHeight: 2.05,
+              color: "#3b2f22",
+              letterSpacing: "0.02em",
+              fontFamily: "\"Songti SC\", \"STSong\", \"Noto Serif SC\", serif",
+            }}
+          >
+            {data?.content ?? data?.error ?? "正在加载正文..."}
+          </Typography.Paragraph>
+        </div>
       </Card>
     </Space>
   );

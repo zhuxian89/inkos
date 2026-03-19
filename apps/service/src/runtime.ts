@@ -7,21 +7,37 @@ import {
   type BookConfig,
   type ProjectConfig,
 } from "@actalk/inkos-core";
-import { config as loadEnv } from "dotenv";
+import { parse as parseEnv } from "dotenv";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const GLOBAL_CONFIG_DIR = process.env.INKOS_HOME?.trim() || join(process.env.HOME ?? "/root", ".inkos");
 export const GLOBAL_ENV_PATH = join(GLOBAL_CONFIG_DIR, ".env");
+const STARTUP_ENV = { ...process.env };
+
+async function readEnvFile(filePath: string): Promise<Record<string, string>> {
+  try {
+    return parseEnv(await readFile(filePath, "utf-8"));
+  } catch {
+    return {};
+  }
+}
 
 export async function loadProjectConfig(projectRoot: string): Promise<ProjectConfig> {
-  loadEnv({ path: GLOBAL_ENV_PATH });
-  loadEnv({ path: join(projectRoot, ".env"), override: true });
-
   const configPath = join(projectRoot, "inkos.json");
-  const raw = await readFile(configPath, "utf-8");
+  const [raw, globalEnv, projectEnv] = await Promise.all([
+    readFile(configPath, "utf-8"),
+    readEnvFile(GLOBAL_ENV_PATH),
+    readEnvFile(join(projectRoot, ".env")),
+  ]);
   const config = JSON.parse(raw) as Record<string, any>;
-  const env = process.env;
+  const env = {
+    ...globalEnv,
+    ...projectEnv,
+    ...Object.fromEntries(
+      Object.entries(STARTUP_ENV).filter(([key, value]) => key.startsWith("INKOS_LLM_") && value !== undefined),
+    ),
+  };
 
   if (env.INKOS_LLM_PROVIDER) config.llm.provider = env.INKOS_LLM_PROVIDER;
   if (env.INKOS_LLM_BASE_URL) config.llm.baseUrl = env.INKOS_LLM_BASE_URL;
@@ -40,13 +56,19 @@ export async function loadProjectConfig(projectRoot: string): Promise<ProjectCon
   return ProjectConfigSchema.parse(config);
 }
 
-export function createPipeline(projectRoot: string, config: ProjectConfig, externalContext?: string): PipelineRunner {
+export function createPipeline(
+  projectRoot: string,
+  config: ProjectConfig,
+  externalContext?: string,
+  logger?: (event: string, payload?: Record<string, unknown>) => void,
+): PipelineRunner {
   return new PipelineRunner({
     client: createLLMClient(config.llm),
     model: config.llm.model,
     projectRoot,
     notifyChannels: config.notify,
     modelOverrides: config.modelOverrides,
+    ...(logger ? { logger } : {}),
     ...(externalContext ? { externalContext } : {}),
   });
 }

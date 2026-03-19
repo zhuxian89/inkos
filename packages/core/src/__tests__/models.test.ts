@@ -209,6 +209,23 @@ describe("ChapterMetaSchema", () => {
     expect(result.reviewNote).toBe("Looks good");
   });
 
+  it("accepts optional structured auditDetails", () => {
+    const withAuditDetails = {
+      ...validChapter,
+      auditDetails: [
+        {
+          severity: "warning",
+          category: "设定冲突",
+          description: "订单规模不一致",
+          suggestion: "同步正文和资料库",
+        },
+      ],
+    };
+    const result = ChapterMetaSchema.parse(withAuditDetails);
+    expect(result.auditDetails).toHaveLength(1);
+    expect(result.auditDetails?.[0]?.category).toBe("设定冲突");
+  });
+
   it("omits reviewNote when not provided", () => {
     const result = ChapterMetaSchema.parse(validChapter);
     expect(result.reviewNote).toBeUndefined();

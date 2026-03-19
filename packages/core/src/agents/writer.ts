@@ -6,6 +6,7 @@ import { buildWriterSystemPrompt } from "./writer-prompts.js";
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
 import { validatePostWrite, type PostWriteViolation } from "./post-write-validator.js";
 import { analyzeAITells } from "./ai-tells.js";
+import { buildChapterFilename } from "../utils/chapter-files.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -44,6 +45,15 @@ export class WriterAgent extends BaseAgent {
   async writeChapter(input: WriteChapterInput): Promise<WriteChapterOutput> {
     const { book, bookDir, chapterNumber } = input;
 
+    process.stderr.write(`${new Date().toISOString()} INFO writer.load_story_files.start ${JSON.stringify({
+      bookId: book.id,
+      bookDir,
+      chapterNumber,
+      genre: book.genre,
+      platform: book.platform,
+      wordCountOverride: input.wordCountOverride ?? null,
+      hasExternalContext: Boolean(input.externalContext?.trim()),
+    })}\n`);
     const [
       storyBible, volumeOutline, styleGuide, currentState, ledger, hooks,
       chapterSummaries, subplotBoard, emotionalArcs, characterMatrix, styleProfileRaw,
@@ -63,15 +73,50 @@ export class WriterAgent extends BaseAgent {
         this.readFileOrDefault(join(bookDir, "story/parent_canon.md")),
         this.readFileOrDefault(join(bookDir, "story/author_brief.md")),
       ]);
+    process.stderr.write(`${new Date().toISOString()} INFO writer.load_story_files.done ${JSON.stringify({
+      chapterNumber,
+      storyBibleLength: storyBible.length,
+      volumeOutlineLength: volumeOutline.length,
+      styleGuideLength: styleGuide.length,
+      currentStateLength: currentState.length,
+      ledgerLength: ledger.length,
+      hooksLength: hooks.length,
+      chapterSummariesLength: chapterSummaries.length,
+      subplotBoardLength: subplotBoard.length,
+      emotionalArcsLength: emotionalArcs.length,
+      characterMatrixLength: characterMatrix.length,
+      styleProfileLength: styleProfileRaw.length,
+      parentCanonLength: parentCanon.length,
+      authorBriefLength: authorBrief.length,
+    })}\n`);
 
+    process.stderr.write(`${new Date().toISOString()} INFO writer.load_recent_chapters.start ${JSON.stringify({
+      chapterNumber,
+    })}\n`);
     const recentChapters = await this.loadRecentChapters(bookDir, chapterNumber);
+    process.stderr.write(`${new Date().toISOString()} INFO writer.load_recent_chapters.done ${JSON.stringify({
+      chapterNumber,
+      recentChaptersLength: recentChapters.length,
+    })}\n`);
 
     // Load genre profile + book rules
+    process.stderr.write(`${new Date().toISOString()} INFO writer.load_rules.start ${JSON.stringify({
+      chapterNumber,
+      genre: book.genre,
+    })}\n`);
     const { profile: genreProfile, body: genreBody } =
       await readGenreProfile(this.ctx.projectRoot, book.genre);
     const parsedBookRules = await readBookRules(bookDir);
     const bookRules = parsedBookRules?.rules ?? null;
     const bookRulesBody = parsedBookRules?.body ?? "";
+    process.stderr.write(`${new Date().toISOString()} INFO writer.load_rules.done ${JSON.stringify({
+      chapterNumber,
+      genreName: genreProfile.name,
+      numericalSystem: genreProfile.numericalSystem,
+      hasBookRules: Boolean(bookRules),
+      genreBodyLength: genreBody.length,
+      bookRulesBodyLength: bookRulesBody.length,
+    })}\n`);
 
     const styleFingerprint = this.buildStyleFingerprint(styleProfileRaw);
 
@@ -104,20 +149,60 @@ export class WriterAgent extends BaseAgent {
       authorBrief: authorBrief !== "(文件尚未创建)" ? authorBrief : undefined,
       parentCanon: hasParentCanon ? parentCanon : undefined,
     });
+    process.stderr.write(`${new Date().toISOString()} INFO writer.prompt.ready ${JSON.stringify({
+      chapterNumber,
+      systemPromptLength: systemPrompt.length,
+      userPromptLength: userPrompt.length,
+      recentChaptersLength: recentChapters.length,
+      relevantSummariesLength: relevantSummaries.length,
+      hasParentCanon,
+    })}\n`);
 
     const temperature = input.temperatureOverride ?? 0.7;
+    process.stderr.write(`${new Date().toISOString()} INFO writer.llm.start ${JSON.stringify({
+      chapterNumber,
+      model: this.ctx.model,
+      temperature,
+      maxTokens: 16000,
+    })}\n`);
 
     const response = await this.chat(
       [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
       ],
-      { maxTokens: 16384, temperature },
+      { maxTokens: 16000, temperature },
     );
+    process.stderr.write(`${new Date().toISOString()} INFO writer.llm.done ${JSON.stringify({
+      chapterNumber,
+      responseLength: response.content.length,
+      promptTokens: response.usage.promptTokens,
+      completionTokens: response.usage.completionTokens,
+      totalTokens: response.usage.totalTokens,
+    })}\n`);
 
+    process.stderr.write(`${new Date().toISOString()} INFO writer.parse.start ${JSON.stringify({ chapterNumber })}\n`);
     const output = this.parseOutput(chapterNumber, response.content, genreProfile);
+    process.stderr.write(`${new Date().toISOString()} INFO writer.parse.done ${JSON.stringify({
+      chapterNumber,
+      title: output.title,
+      contentLength: output.content.length,
+      wordCount: output.wordCount,
+      updatedStateLength: output.updatedState.length,
+      updatedLedgerLength: output.updatedLedger.length,
+      updatedHooksLength: output.updatedHooks.length,
+      chapterSummaryLength: output.chapterSummary.length,
+      updatedSubplotsLength: output.updatedSubplots.length,
+      updatedEmotionalArcsLength: output.updatedEmotionalArcs.length,
+      updatedCharacterMatrixLength: output.updatedCharacterMatrix.length,
+    })}\n`);
 
     // #4: Post-write validation (regex + rule-based, zero LLM cost)
+    process.stderr.write(`${new Date().toISOString()} INFO writer.post_write.start ${JSON.stringify({
+      chapterNumber,
+      genreName: genreProfile.name,
+      hasBookRules: Boolean(bookRules),
+    })}\n`);
     const ruleViolations = validatePostWrite(output.content, genreProfile, bookRules);
     const aiTellIssues = analyzeAITells(output.content).issues;
 
@@ -140,6 +225,12 @@ export class WriterAgent extends BaseAgent {
         process.stderr.write(`  [${issue.severity}] ${issue.category}: ${issue.description}\n`);
       }
     }
+    process.stderr.write(`${new Date().toISOString()} INFO writer.post_write.done ${JSON.stringify({
+      chapterNumber,
+      postWriteErrors: postWriteErrors.length,
+      postWriteWarnings: postWriteWarnings.length,
+      aiTellIssues: aiTellIssues.length,
+    })}\n`);
 
     return { ...output, postWriteErrors, postWriteWarnings };
   }
@@ -153,8 +244,7 @@ export class WriterAgent extends BaseAgent {
     const storyDir = join(bookDir, "story");
     await mkdir(chaptersDir, { recursive: true });
 
-    const paddedNum = String(output.chapterNumber).padStart(4, "0");
-    const filename = `${paddedNum}_${this.sanitizeFilename(output.title)}.md`;
+    const filename = buildChapterFilename(output.chapterNumber, output.title);
 
     const chapterContent = [
       `# 第${output.chapterNumber}章 ${output.title}`,
@@ -516,12 +606,5 @@ ${params.volumeOutline}
     });
 
     return filteredRows.length > 0 ? filteredRows.join("\n") : "";
-  }
-
-  private sanitizeFilename(title: string): string {
-    return title
-      .replace(/[/\\?%*:|"<>]/g, "")
-      .replace(/\s+/g, "_")
-      .slice(0, 50);
   }
 }

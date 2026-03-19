@@ -1,10 +1,11 @@
 "use client";
 
-import { App, Alert, Button, Card, Descriptions, Input, Modal, Space, Table, Typography } from "antd";
+import { App, Alert, Button, Card, Checkbox, Descriptions, Input, Modal, Select, Space, Table, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 import { IssueTags } from "./issue-tags";
 import { ChapterActions } from "./chapter-actions";
 
@@ -28,6 +29,33 @@ interface ChapterDetail {
 interface ChapterChatMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
+  readonly reasoning?: string;
+}
+
+interface LlmProfile {
+  readonly id: string;
+  readonly name: string;
+  readonly model: string;
+  readonly isActive: boolean;
+}
+
+interface LlmProfilesResponse {
+  readonly ok: boolean;
+  readonly profiles: ReadonlyArray<LlmProfile>;
+  readonly activeProfileId: string | null;
+}
+
+const CHAPTER_CHAT_STORAGE_PREFIX = "inkos.chapter-chat.";
+const CHAPTER_CHAT_OPTIONS_STORAGE_PREFIX = "inkos.chapter-chat-options.";
+const CHAPTER_CHAT_PROFILE_STORAGE_PREFIX = "inkos.chapter-chat-profile.";
+
+function compactLines(input: string, limit = 8): string[] {
+  return input
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .filter((line) => /^(?:[-*•]\s|\d+[.、)]\s*)/.test(line) || line.includes("问题") || line.includes("策略") || line.includes("修正"))
+    .slice(0, limit);
 }
 
 export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: string; embedded?: boolean }>) {
@@ -42,6 +70,117 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [chatMessages, setChatMessages] = useState<ReadonlyArray<ChapterChatMessage>>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [chatting, setChatting] = useState(false);
+  const [chatUseStream, setChatUseStream] = useState(true);
+  const [chatIncludeReasoning, setChatIncludeReasoning] = useState(false);
+  const [chatProfiles, setChatProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
+  const [chatProfileId, setChatProfileId] = useState<string | undefined>(undefined);
+  const [applyingChatRevision, setApplyingChatRevision] = useState(false);
+  const [replacingChapter, setReplacingChapter] = useState(false);
+  const [replacePreviewOpen, setReplacePreviewOpen] = useState(false);
+  const [replacePreviewLoading, setReplacePreviewLoading] = useState(false);
+  const [replaceOriginalContent, setReplaceOriginalContent] = useState("");
+  const [replaceCandidateContent, setReplaceCandidateContent] = useState("");
+
+  function chapterChatStorageKey(chapter: number): string {
+    return `${CHAPTER_CHAT_STORAGE_PREFIX}${bookId}.${chapter}`;
+  }
+
+  function loadStoredChapterChat(chapter: number): ReadonlyArray<ChapterChatMessage> {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(chapterChatStorageKey(chapter));
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as ReadonlyArray<ChapterChatMessage>;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function persistChapterChat(chapter: number, messages: ReadonlyArray<ChapterChatMessage>): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(chapterChatStorageKey(chapter), JSON.stringify(messages));
+  }
+
+  function chapterChatOptionsStorageKey(chapter: number): string {
+    return `${CHAPTER_CHAT_OPTIONS_STORAGE_PREFIX}${bookId}.${chapter}`;
+  }
+
+  function loadStoredChapterChatOptions(chapter: number): { readonly useStream: boolean; readonly includeReasoning: boolean } {
+    if (typeof window === "undefined") {
+      return { useStream: true, includeReasoning: false };
+    }
+    try {
+      const raw = window.localStorage.getItem(chapterChatOptionsStorageKey(chapter));
+      if (!raw) return { useStream: true, includeReasoning: false };
+      const parsed = JSON.parse(raw) as { useStream?: boolean; includeReasoning?: boolean };
+      return {
+        useStream: parsed.useStream !== false,
+        includeReasoning: parsed.includeReasoning === true,
+      };
+    } catch {
+      return { useStream: true, includeReasoning: false };
+    }
+  }
+
+  function persistChapterChatOptions(chapter: number, options: { readonly useStream: boolean; readonly includeReasoning: boolean }): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(chapterChatOptionsStorageKey(chapter), JSON.stringify(options));
+  }
+
+  function chapterChatProfileStorageKey(chapter: number): string {
+    return `${CHAPTER_CHAT_PROFILE_STORAGE_PREFIX}${bookId}.${chapter}`;
+  }
+
+  function loadStoredChapterChatProfileId(chapter: number): string | undefined {
+    if (typeof window === "undefined") return undefined;
+    const value = window.localStorage.getItem(chapterChatProfileStorageKey(chapter));
+    return value?.trim() ? value : undefined;
+  }
+
+  function persistChapterChatProfileId(chapter: number, profileId?: string): void {
+    if (typeof window === "undefined") return;
+    if (profileId?.trim()) {
+      window.localStorage.setItem(chapterChatProfileStorageKey(chapter), profileId.trim());
+      return;
+    }
+    window.localStorage.removeItem(chapterChatProfileStorageKey(chapter));
+  }
+
+  async function loadChatProfiles(chapter: number): Promise<void> {
+    const response = await fetch("/api/inkos/llm-profiles", { cache: "no-store" });
+    const data = (await response.json()) as LlmProfilesResponse;
+    const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+    setChatProfiles(profiles);
+    const stored = loadStoredChapterChatProfileId(chapter);
+    const fallback = data.activeProfileId ?? profiles.find((item) => item.isActive)?.id;
+    const selected = stored && profiles.some((item) => item.id === stored) ? stored : fallback ?? undefined;
+    setChatProfileId(selected);
+    persistChapterChatProfileId(chapter, selected);
+  }
+
+  async function pollJob(jobId: string): Promise<unknown> {
+    return await new Promise((resolve, reject) => {
+      const timer = setInterval(async () => {
+        try {
+          const response = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+          const job = await response.json();
+          if (job.status === "done") {
+            clearInterval(timer);
+            resolve(job.result);
+            return;
+          }
+          if (job.status === "error") {
+            clearInterval(timer);
+            reject(new Error(job.error ?? "任务执行失败"));
+          }
+        } catch (error) {
+          clearInterval(timer);
+          reject(error);
+        }
+      }, 3000);
+    });
+  }
 
   async function loadChapters(): Promise<void> {
     setIsRefreshing(true);
@@ -93,32 +232,184 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
 
   function openChapterChat(row: ChapterMeta): void {
     setChatChapter(row);
-    setChatMessages([]);
+    setChatMessages(loadStoredChapterChat(row.number));
+    const storedOptions = loadStoredChapterChatOptions(row.number);
+    setChatUseStream(storedOptions.useStream);
+    setChatIncludeReasoning(storedOptions.includeReasoning);
     setChatDraft("");
+    void loadChatProfiles(row.number);
   }
 
   function sendChapterChat(): void {
     if (!chatChapter || !chatDraft.trim() || chatting) return;
     const nextMessages = [...chatMessages, { role: "user" as const, content: chatDraft.trim() }];
     setChatMessages(nextMessages);
+    persistChapterChat(chatChapter.number, nextMessages);
     setChatDraft("");
     setChatting(true);
     void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chatChapter.number}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messages: nextMessages }),
+      body: JSON.stringify({
+        messages: nextMessages,
+        useStream: chatUseStream,
+        includeReasoning: chatIncludeReasoning,
+        profileId: chatProfileId,
+      }),
     })
       .then(async (response) => {
         const data = await response.json();
         if (!response.ok || !data?.ok) {
           throw new Error(data?.error ?? "章节对话失败");
         }
-        setChatMessages((prev) => [...prev, { role: "assistant", content: String(data.reply ?? "") }]);
+        setChatMessages((prev) => {
+          const updated = [...prev, {
+            role: "assistant" as const,
+            content: String(data.reply ?? ""),
+            reasoning: typeof data.reasoning === "string" ? data.reasoning : undefined,
+          }];
+          persistChapterChat(chatChapter.number, updated);
+          return updated;
+        });
       })
       .catch((error: unknown) => {
         void message.error(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setChatting(false));
+  }
+
+  function applyChatRevision(): void {
+    if (!chatChapter || chatMessages.length === 0 || applyingChatRevision) return;
+    setApplyingChatRevision(true);
+
+    const authorMessages = chatMessages
+      .filter((item) => item.role === "user")
+      .map((item) => item.content.trim())
+      .filter(Boolean);
+
+    const latestAssistantMessage = [...chatMessages]
+      .reverse()
+      .find((item) => item.role === "assistant" && item.content.trim().length > 0)?.content.trim() ?? "";
+
+    const latestAuthorRequest = authorMessages.at(-1) ?? "";
+    const authorRequirements = authorMessages.map((content, index) => `- 作者要求${index + 1}：${content}`).join("\n");
+    const assistantSuggestionLines = compactLines(latestAssistantMessage, 10);
+    const assistantSuggestions = assistantSuggestionLines.length > 0
+      ? assistantSuggestionLines.map((content, index) => `- 助手要点${index + 1}：${content}`).join("\n")
+      : "- （无）";
+
+    const instruction = [
+      "请直接按以下修改单重构本章，并输出修改后的完整章节。",
+      "优先级：作者明确要求 > 助手建议 > 原稿。",
+      "不要解释，不要分析，不要给方案，只做正文重构。",
+      "如果作者要求与原稿冲突，以作者要求为准。",
+      "",
+      "## 本次直接修改目标",
+      latestAuthorRequest ? latestAuthorRequest : "按下面的作者要求与助手建议综合修改本章。",
+      "",
+      "## 作者明确要求",
+      authorRequirements || "- （无）",
+      "",
+      "## 助手要点摘要",
+      assistantSuggestions,
+    ].join("\n");
+
+    void fetch("/api/inkos/revise", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        bookId,
+        chapter: chatChapter.number,
+        mode: "rework",
+        instruction,
+        async: true,
+      }),
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || !data?.ok || !data?.jobId) {
+          setActionResult({
+            request: {
+              bookId,
+              chapter: chatChapter.number,
+              mode: "rework",
+              instruction,
+            },
+            response: data,
+          });
+          throw new Error(data?.error ?? "按对话修改失败");
+        }
+        const result = await pollJob(String(data.jobId));
+        setActionResult({
+          request: {
+            bookId,
+            chapter: chatChapter.number,
+            mode: "rework",
+            instruction,
+          },
+          response: result,
+        });
+        void message.success("已按当前对话修改本章");
+        await loadChapters();
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setApplyingChatRevision(false));
+  }
+
+  function latestAssistantReply(): string {
+    const reversed = [...chatMessages].reverse();
+    return reversed.find((item) => item.role === "assistant")?.content?.trim() ?? "";
+  }
+
+  async function confirmReplaceChapter(content: string): Promise<void> {
+    if (!chatChapter) return;
+    setReplacingChapter(true);
+    try {
+      const response = await fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chatChapter.number}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content }),
+      });
+      const data = await response.json();
+      setActionResult(data);
+      if (!response.ok || !data?.ok) {
+        throw new Error(data?.error ?? "整章替换失败");
+      }
+      void message.success("已用最后一条助手回复替换全文");
+      setReplacePreviewOpen(false);
+      await loadChapters();
+      loadChapterDetail(chatChapter.number);
+    } catch (error: unknown) {
+      void message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setReplacingChapter(false);
+    }
+  }
+
+  function replaceChapterWithLatestReply(): void {
+    if (!chatChapter || replacingChapter || replacePreviewLoading) return;
+    const content = latestAssistantReply();
+    if (!content) {
+      void message.error("没有可替换的助手回复");
+      return;
+    }
+    setReplacePreviewLoading(true);
+    setReplaceCandidateContent(content);
+    void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chatChapter.number}`, { cache: "no-store" })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || !data?.ok) {
+          throw new Error(data?.error ?? "读取原章节失败");
+        }
+        setReplaceOriginalContent(String(data.content ?? ""));
+        setReplacePreviewOpen(true);
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => setReplacePreviewLoading(false));
   }
 
   const columns: ColumnsType<ChapterMeta> = [
@@ -199,13 +490,15 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           if (!chatting) setChatChapter(null);
         }}
         footer={null}
-        width={860}
+        width={CHAT_MODAL_WIDTH}
+        style={{ top: 20 }}
+        styles={{ body: { paddingTop: 12, height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnClose
         title={chatChapter ? `章节对话 · Ch.${chatChapter.number} ${chatChapter.title}` : "章节对话"}
       >
-        <Space direction="vertical" size={12} style={{ width: "100%" }}>
-          <Typography.Text type="secondary">
-            这里可以直接讨论这一章怎么改、哪里不够强、下一章怎么接。系统会自动读取本章正文、审计问题、书籍设定和长期创作约束。
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", height: "100%", minHeight: 0 }}>
+          <Typography.Text type="secondary" style={{ flexShrink: 0 }}>
+            这里用于快速讨论和小范围修改。系统会自动读取本章正文、审计问题、书籍设定和长期创作约束；整章审计/修订请继续用章节区按钮手动操作。
           </Typography.Text>
           <ChatPanel
             messages={chatMessages}
@@ -213,12 +506,128 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
             onChange={setChatDraft}
             onSend={sendChapterChat}
             sending={chatting}
-            placeholder="例如：这一章的冲突太平了，帮我指出最该重写的三处，并给出具体修改方向。"
-            emptyText="先说一句你想讨论什么，例如“这一章结尾不够炸，帮我给出三种改法”。"
-            minHeight={320}
-            maxHeight={480}
-            footerRight={<Button onClick={() => setChatChapter(null)} disabled={chatting}>关闭</Button>}
+            placeholder="例如：把第三段里‘八十九天’改成‘八十八天’，并同步修正 current_state.md 里的对应表述。"
+            emptyText="先说一句你想改什么，例如“把这一句改顺一点”“修一下 current_state.md 里的倒计时表述”。"
+            minHeight={220}
+            maxHeight="100%"
+            topBar={(
+              <Space wrap>
+                <Select
+                  style={{ minWidth: 280 }}
+                  value={chatProfileId}
+                  onChange={(value) => {
+                    if (!chatChapter) return;
+                    const next = value || undefined;
+                    setChatProfileId(next);
+                    persistChapterChatProfileId(chatChapter.number, next);
+                  }}
+                  placeholder="使用当前激活配置"
+                  options={chatProfiles.map((item) => ({
+                    value: item.id,
+                    label: item.isActive ? `${item.name} · ${item.model}（当前激活）` : `${item.name} · ${item.model}`,
+                  }))}
+                />
+                <Checkbox
+                  checked={chatUseStream}
+                  onChange={(event) => {
+                    if (!chatChapter) return;
+                    const next = event.target.checked;
+                    setChatUseStream(next);
+                    persistChapterChatOptions(chatChapter.number, {
+                      useStream: next,
+                      includeReasoning: chatIncludeReasoning,
+                    });
+                  }}
+                >
+                  使用流式
+                </Checkbox>
+                <Checkbox
+                  checked={chatIncludeReasoning}
+                  onChange={(event) => {
+                    if (!chatChapter) return;
+                    const next = event.target.checked;
+                    setChatIncludeReasoning(next);
+                    persistChapterChatOptions(chatChapter.number, {
+                      useStream: chatUseStream,
+                      includeReasoning: next,
+                    });
+                  }}
+                >
+                  展示 reasoning
+                </Checkbox>
+              </Space>
+            )}
+            footerRight={(
+              <>
+                <Button
+                  onClick={() => {
+                    if (!chatChapter) return;
+                    setChatMessages([]);
+                    setChatDraft("");
+                    persistChapterChat(chatChapter.number, []);
+                  }}
+                  disabled={chatting || applyingChatRevision}
+                >
+                  清空对话
+                </Button>
+                <Button onClick={applyChatRevision} loading={applyingChatRevision} disabled={chatting || chatMessages.length === 0}>
+                  按当前对话修改本章
+                </Button>
+                <Button onClick={replaceChapterWithLatestReply} loading={replacingChapter} disabled={chatting || applyingChatRevision || !latestAssistantReply()}>
+                  用最后回复替换全文
+                </Button>
+                <Button onClick={() => setChatChapter(null)} disabled={chatting || applyingChatRevision || replacingChapter}>关闭</Button>
+              </>
+            )}
+            containerStyle={{ flex: 1, minHeight: 0 }}
           />
+        </div>
+      </Modal>
+
+      <Modal
+        open={replacePreviewOpen}
+        onCancel={() => {
+          if (!replacingChapter) setReplacePreviewOpen(false);
+        }}
+        title={chatChapter ? `替换预览 · Ch.${chatChapter.number} ${chatChapter.title}` : "替换预览"}
+        width={CHAT_MODAL_WIDTH}
+        style={{ top: 20 }}
+        styles={{ body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
+        destroyOnClose
+        okText="确认替换"
+        cancelText="取消"
+        confirmLoading={replacingChapter}
+        onOk={() => void confirmReplaceChapter(replaceCandidateContent)}
+      >
+        <Space direction="vertical" size={12} style={{ width: "100%", height: "100%" }}>
+          <Typography.Text type="secondary">左边是当前章节原文，右边是最后一条助手回复。确认后才会覆盖全文。</Typography.Text>
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "1fr 1fr",
+              gap: 16,
+              width: "100%",
+            }}
+          >
+            <div>
+              <Typography.Title level={5}>当前原文</Typography.Title>
+              <Input.TextArea
+                readOnly
+                value={replaceOriginalContent}
+                autoSize={false}
+                style={{ height: "72vh" }}
+              />
+            </div>
+            <div>
+              <Typography.Title level={5}>将要替换的新全文</Typography.Title>
+              <Input.TextArea
+                value={replaceCandidateContent}
+                onChange={(event) => setReplaceCandidateContent(event.target.value)}
+                autoSize={false}
+                style={{ height: "72vh" }}
+              />
+            </div>
+          </div>
         </Space>
       </Modal>
     </Space>

@@ -157,7 +157,7 @@ ${eraBlock}
         role: "user",
         content: `请为标题为"${book.title}"的${gp.name}小说生成完整基础设定。`,
       },
-    ], { maxTokens: 16384, temperature: 0.8 });
+    ], { maxTokens: 16000, temperature: 0.8 });
 
     return this.parseSections(response.content);
   }

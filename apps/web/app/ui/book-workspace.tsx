@@ -10,6 +10,7 @@ import {
   Form,
   Input,
   InputNumber,
+  Modal,
   Row,
   Select,
   Space,
@@ -24,6 +25,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { BookChapters } from "./book-chapters";
 import { ChatPanel } from "./chat-panel";
+import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 import { labelBookStatus, labelGenre, labelPlatform } from "./labels";
 
 interface ChapterStatus {
@@ -95,14 +97,34 @@ interface CanonValues {
 interface InitAssistantMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
+  readonly reasoning?: string;
 }
 
 interface InitAssistantResult {
   readonly ok: boolean;
   readonly reply?: string;
   readonly brief?: string;
+  readonly reasoning?: string;
   readonly error?: string;
 }
+
+interface LlmProfile {
+  readonly id: string;
+  readonly name: string;
+  readonly model: string;
+  readonly isActive: boolean;
+}
+
+interface LlmProfilesResponse {
+  readonly ok: boolean;
+  readonly profiles: ReadonlyArray<LlmProfile>;
+  readonly activeProfileId: string | null;
+}
+
+const BOOK_ASSISTANT_CHAT_STORAGE_PREFIX = "inkos.book-init-chat.";
+const BOOK_ASSISTANT_BRIEF_STORAGE_PREFIX = "inkos.book-init-brief.";
+const BOOK_ASSISTANT_OPTIONS_STORAGE_PREFIX = "inkos.book-init-options.";
+const BOOK_ASSISTANT_PROFILE_STORAGE_PREFIX = "inkos.book-init-profile.";
 
 export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const { message } = App.useApp();
@@ -119,6 +141,11 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const [assistantMessages, setAssistantMessages] = useState<ReadonlyArray<InitAssistantMessage>>([]);
   const [assistantDraft, setAssistantDraft] = useState("");
   const [chatting, setChatting] = useState(false);
+  const [assistantModalOpen, setAssistantModalOpen] = useState(false);
+  const [assistantUseStream, setAssistantUseStream] = useState(true);
+  const [assistantIncludeReasoning, setAssistantIncludeReasoning] = useState(false);
+  const [assistantProfiles, setAssistantProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
+  const [assistantProfileId, setAssistantProfileId] = useState<string | undefined>(undefined);
   const [styleFile, setStyleFile] = useState<File | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [writeForm] = Form.useForm<WriteValues>();
@@ -126,6 +153,101 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const [exportForm] = Form.useForm<ExportValues>();
   const [styleForm] = Form.useForm<StyleImportValues>();
   const [canonForm] = Form.useForm<CanonValues>();
+
+  function assistantChatStorageKey(): string {
+    return `${BOOK_ASSISTANT_CHAT_STORAGE_PREFIX}${bookId}`;
+  }
+
+  function assistantBriefStorageKey(): string {
+    return `${BOOK_ASSISTANT_BRIEF_STORAGE_PREFIX}${bookId}`;
+  }
+
+  function assistantOptionsStorageKey(): string {
+    return `${BOOK_ASSISTANT_OPTIONS_STORAGE_PREFIX}${bookId}`;
+  }
+
+  function assistantProfileStorageKey(): string {
+    return `${BOOK_ASSISTANT_PROFILE_STORAGE_PREFIX}${bookId}`;
+  }
+
+  function loadStoredAssistantMessages(): ReadonlyArray<InitAssistantMessage> {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(assistantChatStorageKey());
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as ReadonlyArray<InitAssistantMessage>;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function persistAssistantMessages(messages: ReadonlyArray<InitAssistantMessage>): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(assistantChatStorageKey(), JSON.stringify(messages));
+  }
+
+  function persistAssistantBrief(brief: string): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(assistantBriefStorageKey(), brief);
+  }
+
+  function loadStoredAssistantOptions(): { readonly useStream: boolean; readonly includeReasoning: boolean } {
+    if (typeof window === "undefined") {
+      return { useStream: true, includeReasoning: false };
+    }
+    try {
+      const raw = window.localStorage.getItem(assistantOptionsStorageKey());
+      if (!raw) return { useStream: true, includeReasoning: false };
+      const parsed = JSON.parse(raw) as { useStream?: boolean; includeReasoning?: boolean };
+      return {
+        useStream: parsed.useStream !== false,
+        includeReasoning: parsed.includeReasoning === true,
+      };
+    } catch {
+      return { useStream: true, includeReasoning: false };
+    }
+  }
+
+  function persistAssistantOptions(options: { readonly useStream: boolean; readonly includeReasoning: boolean }): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(assistantOptionsStorageKey(), JSON.stringify(options));
+  }
+
+  function loadStoredAssistantProfileId(): string | undefined {
+    if (typeof window === "undefined") return undefined;
+    const value = window.localStorage.getItem(assistantProfileStorageKey());
+    return value?.trim() ? value : undefined;
+  }
+
+  function persistAssistantProfileId(profileId?: string): void {
+    if (typeof window === "undefined") return;
+    if (profileId?.trim()) {
+      window.localStorage.setItem(assistantProfileStorageKey(), profileId.trim());
+      return;
+    }
+    window.localStorage.removeItem(assistantProfileStorageKey());
+  }
+
+  async function loadAssistantProfiles(): Promise<void> {
+    const response = await fetch("/api/inkos/llm-profiles", { cache: "no-store" });
+    const data = (await response.json()) as LlmProfilesResponse;
+    const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+    setAssistantProfiles(profiles);
+    const stored = loadStoredAssistantProfileId();
+    const fallback = data.activeProfileId ?? profiles.find((item) => item.isActive)?.id;
+    const selected = stored && profiles.some((item) => item.id === stored) ? stored : fallback ?? undefined;
+    setAssistantProfileId(selected);
+    persistAssistantProfileId(selected);
+  }
+
+  function clearAssistantConversation(): void {
+    setAssistantMessages([]);
+    setAssistantDraft("");
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(assistantChatStorageKey());
+    }
+  }
 
   async function loadBookPanels(): Promise<void> {
     setIsRefreshing(true);
@@ -136,7 +258,14 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/config`, { cache: "no-store" }).then((response) => response.json()),
       ]);
       setStatusData(statusResponse as BookStatusResponse);
-      setAuthorBrief(typeof briefResponse?.content === "string" ? briefResponse.content : "");
+      const nextBrief = typeof briefResponse?.content === "string" ? briefResponse.content : "";
+      setAuthorBrief(nextBrief);
+      persistAssistantBrief(nextBrief);
+      setAssistantMessages(loadStoredAssistantMessages());
+      const storedOptions = loadStoredAssistantOptions();
+      setAssistantUseStream(storedOptions.useStream);
+      setAssistantIncludeReasoning(storedOptions.includeReasoning);
+      await loadAssistantProfiles();
 
       const configData = configResponse as BookConfigResponse;
       setBookConfigData(configData);
@@ -256,6 +385,62 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
       });
   }
 
+  function draftOnly(values: WriteValues): void {
+    if (toolAction || isWriting) return;
+    setToolAction("draft");
+    setResult(null);
+    setWriteStep("草稿生成中...");
+    void fetch("/api/inkos/commands/draft", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        async: true,
+        values: {
+          bookId,
+          words: values.words || undefined,
+          context: values.context || undefined,
+        },
+      }),
+    })
+      .then((response) => response.json())
+      .then(async (data: { ok?: boolean; jobId?: string; error?: string }) => {
+        if (!data?.ok || !data.jobId) {
+          setResult(data);
+          void message.error(data?.error ?? "草稿生成失败");
+          return;
+        }
+
+        const jobId = data.jobId;
+        const timer = setInterval(async () => {
+          try {
+            const pollRes = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+            const job = await pollRes.json();
+            setWriteStep(job.step ?? "草稿生成中...");
+            if (job.status === "done" || job.status === "error") {
+              clearInterval(timer);
+              setResult(job.status === "done" ? job.result : { ok: false, error: job.error });
+              if (job.status === "done") {
+                void message.success("草稿已生成");
+                await loadBookPanels();
+              } else {
+                void message.error(job.error ?? "草稿生成失败");
+              }
+              setToolAction(null);
+              setWriteStep(null);
+            }
+          } catch {
+            // keep polling
+          }
+        }, 3000);
+      })
+      .catch((error: unknown) => {
+        setResult({ ok: false, error: error instanceof Error ? error.message : String(error) });
+        void message.error(error instanceof Error ? error.message : String(error));
+        setToolAction(null);
+        setWriteStep(null);
+      });
+  }
+
   function runBookCommand(commandId: string, values: Record<string, unknown>): void {
     if (toolAction) return;
     setToolAction(commandId);
@@ -323,6 +508,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     ];
 
     setAssistantMessages(nextMessages);
+    persistAssistantMessages(nextMessages);
     setAssistantDraft("");
     setChatting(true);
 
@@ -330,6 +516,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
+        bookId,
         title: bookConfigData.book.title,
         genre: currentSettings.genre ?? bookConfigData.book.genre,
         platform: currentSettings.platform ?? bookConfigData.book.platform,
@@ -337,6 +524,9 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         chapterWords: currentSettings.chapterWordCount ?? bookConfigData.book.chapterWordCount,
         context: contextLines.join("\n"),
         currentBrief: authorBrief || undefined,
+        useStream: assistantUseStream,
+        includeReasoning: assistantIncludeReasoning,
+        profileId: assistantProfileId,
         messages: nextMessages,
       }),
     })
@@ -345,15 +535,19 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         if (!response.ok || !data.ok) {
           throw new Error(data.error ?? "智能初始化对话失败");
         }
-        setAssistantMessages((prev) => [
-          ...prev,
+        const updatedMessages = [
+          ...nextMessages,
           {
-            role: "assistant",
+            role: "assistant" as const,
             content: data.reply?.trim() || "我已经根据当前书籍设定整理了修改方向。",
+            reasoning: typeof data.reasoning === "string" ? data.reasoning : undefined,
           },
-        ]);
+        ];
+        setAssistantMessages(updatedMessages);
+        persistAssistantMessages(updatedMessages);
         if (typeof data.brief === "string") {
           setAuthorBrief(data.brief);
+          persistAssistantBrief(data.brief);
         }
       })
       .catch((error: unknown) => {
@@ -408,6 +602,9 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               </Form.Item>
               <Space align="center" size={12}>
                 <Button type="primary" htmlType="submit" size="large" loading={isWriting}>开始续写</Button>
+                <Button size="large" loading={toolAction === "draft"} onClick={() => draftOnly(writeForm.getFieldsValue())}>
+                  只写草稿
+                </Button>
                 {writeStep ? <Typography.Text type="secondary">{writeStep}</Typography.Text> : null}
               </Space>
             </Form>
@@ -550,30 +747,28 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
             <Card title="智能初始化对话">
               <Space direction="vertical" size={12} style={{ width: "100%" }}>
                 <Typography.Text type="secondary">
-                  这里可以继续像编辑一样和系统对话，补强书名、主线、角色、阶段高潮和结局。助手会自动读取当前书籍设定和已保存的长期创作约束，并把它们当作这本书的长期上下文。
+                  这里可以继续像编辑一样和系统对话，补强书名、主线、角色、阶段高潮和结局。对话会自动读取当前书籍设定和已保存的长期创作约束。
                 </Typography.Text>
-                <ChatPanel
-                  messages={assistantMessages}
-                  value={assistantDraft}
-                  onChange={setAssistantDraft}
-                  onSend={sendInitAssistantMessage}
-                  sending={chatting}
-                  placeholder="例如：现在这本书的开篇还不够狠，帮我把前三章改成更强冲突的穿越翻盘局，同时给出两个更抓人的书名。"
-                  emptyText="先说一句你要怎么改这本书，比如“把男主目标改得更强”“给我三个更狠的书名”“结局想更爽一点”。"
-                  minHeight={360}
-                  maxHeight={480}
-                  footerRight={(
-                    <Button onClick={saveAuthorBrief} loading={isSavingBrief}>
-                      保存长期创作约束
-                    </Button>
-                  )}
-                />
+                <Space>
+                  <Button type="primary" onClick={() => setAssistantModalOpen(true)}>
+                    打开智能初始化对话
+                  </Button>
+                  <Button onClick={saveAuthorBrief} loading={isSavingBrief}>
+                    保存长期创作约束
+                  </Button>
+                  <Button onClick={clearAssistantConversation} disabled={chatting}>
+                    清空对话
+                  </Button>
+                </Space>
                 <div>
                   <Typography.Text strong>当前长期创作约束</Typography.Text>
                   <Input.TextArea
                     rows={10}
                     value={authorBrief}
-                    onChange={(event) => setAuthorBrief(event.target.value)}
+                    onChange={(event) => {
+                      setAuthorBrief(event.target.value);
+                      persistAssistantBrief(event.target.value);
+                    }}
                     placeholder="这里保存的是这本书长期生效的创作约束。创建时填写的长期约束也会保存在这里，后续每次续写都会读取。"
                     style={{ marginTop: 8 }}
                   />
@@ -614,6 +809,88 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
           <Alert type="info" showIcon message={<pre style={{ margin: 0 }}>{JSON.stringify(result, null, 2)}</pre>} />
         )}
       </Card>
+
+      <Modal
+        title="智能初始化对话"
+        open={assistantModalOpen}
+        onCancel={() => setAssistantModalOpen(false)}
+        footer={null}
+        width={CHAT_MODAL_WIDTH}
+        styles={{ body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
+        destroyOnHidden={false}
+      >
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", height: "100%", minHeight: 0 }}>
+          <Typography.Text type="secondary" style={{ flexShrink: 0 }}>
+            这里继续补强书名、主线、角色、阶段高潮和结局。助手会自动读取当前书籍的 `story` 路径、已保存简报、状态卡、伏笔池和章节摘要。
+          </Typography.Text>
+          <ChatPanel
+            messages={assistantMessages}
+            value={assistantDraft}
+            onChange={setAssistantDraft}
+            onSend={sendInitAssistantMessage}
+            sending={chatting}
+            placeholder="例如：现在这本书的开篇还不够狠，帮我把前三章改成更强冲突的穿越翻盘局，同时给出两个更抓人的书名。"
+            emptyText="先说一句你要怎么改这本书，比如“把男主目标改得更强”“给我三个更狠的书名”“结局想更爽一点”。"
+            minHeight={260}
+            maxHeight="100%"
+            topBar={(
+              <Space wrap>
+                <Select
+                  style={{ minWidth: 280 }}
+                  value={assistantProfileId}
+                  onChange={(value) => {
+                    const next = value || undefined;
+                    setAssistantProfileId(next);
+                    persistAssistantProfileId(next);
+                  }}
+                  placeholder="使用当前激活配置"
+                  options={assistantProfiles.map((item) => ({
+                    value: item.id,
+                    label: item.isActive ? `${item.name} · ${item.model}（当前激活）` : `${item.name} · ${item.model}`,
+                  }))}
+                />
+                <Checkbox
+                  checked={assistantUseStream}
+                  onChange={(event) => {
+                    const next = event.target.checked;
+                    setAssistantUseStream(next);
+                    persistAssistantOptions({
+                      useStream: next,
+                      includeReasoning: assistantIncludeReasoning,
+                    });
+                  }}
+                >
+                  使用流式
+                </Checkbox>
+                <Checkbox
+                  checked={assistantIncludeReasoning}
+                  onChange={(event) => {
+                    const next = event.target.checked;
+                    setAssistantIncludeReasoning(next);
+                    persistAssistantOptions({
+                      useStream: assistantUseStream,
+                      includeReasoning: next,
+                    });
+                  }}
+                >
+                  展示 reasoning
+                </Checkbox>
+              </Space>
+            )}
+            footerRight={(
+              <>
+                <Button onClick={clearAssistantConversation} disabled={chatting || isSavingBrief}>
+                  清空对话
+                </Button>
+                <Button onClick={saveAuthorBrief} loading={isSavingBrief}>
+                  保存长期创作约束
+                </Button>
+              </>
+            )}
+            containerStyle={{ flex: 1, minHeight: 0 }}
+          />
+        </div>
+      </Modal>
     </Space>
   );
 }

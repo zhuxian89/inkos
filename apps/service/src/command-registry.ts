@@ -75,7 +75,7 @@ export const commandRegistry: ReadonlyArray<CommandDefinition> = [
       { name: "apiKey", label: "API Key", type: "text", required: true },
       { name: "model", label: "Model", type: "text", required: true, defaultValue: "gpt-4o" },
       { name: "temperature", label: "Temperature", type: "number", placeholder: "0.7" },
-      { name: "maxTokens", label: "Max Tokens", type: "number", placeholder: "8192" },
+      { name: "maxTokens", label: "Max Tokens", type: "number", placeholder: "16000" },
       { name: "thinkingBudget", label: "Thinking Budget", type: "number" },
       { name: "apiFormat", label: "API Format", type: "select", options: [{ label: "chat", value: "chat" }, { label: "responses", value: "responses" }] },
     ],

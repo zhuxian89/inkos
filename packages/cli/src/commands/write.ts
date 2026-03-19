@@ -19,29 +19,75 @@ writeCommand
   .option("--json", "Output JSON")
   .action(async (bookIdArg: string | undefined, opts) => {
     try {
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.load_config.start\n`);
       const config = await loadConfig();
-      const client = createClient(config);
-      const root = findProjectRoot();
-      const bookId = await resolveBookId(bookIdArg, root);
-      const context = await resolveContext(opts);
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.load_config.done ${JSON.stringify({
+        provider: config.llm.provider,
+        baseUrl: config.llm.baseUrl,
+        model: config.llm.model,
+        apiKeyConfigured: Boolean(config.llm.apiKey),
+      })}\n`);
 
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.create_client.start\n`);
+      const client = createClient(config);
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.create_client.done\n`);
+
+      const root = findProjectRoot();
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.project_root ${JSON.stringify({ root })}\n`);
+
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.resolve_book.start ${JSON.stringify({ bookIdArg: bookIdArg ?? null })}\n`);
+      const bookId = await resolveBookId(bookIdArg, root);
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.resolve_book.done ${JSON.stringify({ bookId })}\n`);
+
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.resolve_context.start\n`);
+      const context = await resolveContext(opts);
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.resolve_context.done ${JSON.stringify({ hasContext: Boolean(context?.trim()) })}\n`);
+
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.pipeline.create.start\n`);
       const pipeline = new PipelineRunner({
         client,
         model: config.llm.model,
         projectRoot: root,
         notifyChannels: config.notify,
         ...(context ? { externalContext: context } : {}),
+        logger: (event, payload) => {
+          process.stderr.write(`${new Date().toISOString()} INFO ${event}${payload ? ` ${JSON.stringify(payload)}` : ""}\n`);
+        },
       });
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.pipeline.create.done\n`);
 
       const count = parseInt(opts.count, 10);
       const wordCount = opts.words ? parseInt(opts.words, 10) : undefined;
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.run.start ${JSON.stringify({
+        bookId,
+        count,
+        wordCount: wordCount ?? null,
+      })}\n`);
 
       const results = [];
       for (let i = 0; i < count; i++) {
+        process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.iteration.start ${JSON.stringify({
+          bookId,
+          iteration: i + 1,
+          count,
+          wordCount: wordCount ?? null,
+        })}\n`);
         if (!opts.json) log(`[${i + 1}/${count}] Writing chapter for "${bookId}"...`);
 
         const result = await pipeline.writeNextChapter(bookId, wordCount);
         results.push(result);
+        process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.iteration.done ${JSON.stringify({
+          bookId,
+          iteration: i + 1,
+          count,
+          chapterNumber: result.chapterNumber,
+          title: result.title,
+          wordCount: result.wordCount,
+          passed: result.auditResult.passed,
+          revised: result.revised,
+          status: result.status,
+          issueCount: result.auditResult.issues.length,
+        })}\n`);
 
         if (!opts.json) {
           log(`  Chapter ${result.chapterNumber}: ${result.title}`);
@@ -62,6 +108,12 @@ writeCommand
           log("");
         }
       }
+
+      process.stderr.write(`${new Date().toISOString()} INFO cli.write_next.run.done ${JSON.stringify({
+        bookId,
+        count,
+        resultCount: results.length,
+      })}\n`);
 
       if (opts.json) {
         log(JSON.stringify(results, null, 2));

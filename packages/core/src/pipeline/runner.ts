@@ -19,7 +19,8 @@ import type { WebhookEvent } from "../notify/webhook.js";
 import type { AgentContext } from "../agents/base.js";
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { RadarResult } from "../agents/radar.js";
-import { readFile, readdir, writeFile, mkdir } from "node:fs/promises";
+import { buildChapterFilename, extractChapterBody, resolveChapterFile, writeCanonicalChapterFile } from "../utils/chapter-files.js";
+import { readFile, readdir, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 export interface PipelineConfig {
@@ -30,6 +31,7 @@ export interface PipelineConfig {
   readonly radarSources?: ReadonlyArray<RadarSource>;
   readonly externalContext?: string;
   readonly modelOverrides?: Record<string, string>;
+  readonly logger?: (event: string, payload?: Record<string, unknown>) => void;
 }
 
 export interface ChapterPipelineResult {
@@ -112,6 +114,18 @@ export class PipelineRunner {
     return { profile: parsed.profile };
   }
 
+  private debug(event: string, payload: Record<string, unknown>): void {
+    this.config.logger?.(`pipeline.${event}`, payload);
+  }
+
+  private formatIndexedAuditIssue(issue: AuditIssue): string {
+    const category = issue.category.trim();
+    const description = issue.description.trim();
+    return category.length > 0
+      ? `[${issue.severity}] ${category}: ${description}`
+      : `[${issue.severity}] ${description}`;
+  }
+
   // ---------------------------------------------------------------------------
   // Atomic operations (composable by OpenClaw or agent mode)
   // ---------------------------------------------------------------------------
@@ -137,19 +151,31 @@ export class PipelineRunner {
   async writeDraft(bookId: string, context?: string, wordCount?: number): Promise<DraftResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
+      this.debug("draft.start", { projectRoot: this.config.projectRoot, bookId, hasContext: Boolean(context?.trim()), wordCountOverride: wordCount ?? null });
       const book = await this.state.loadBookConfig(bookId);
       const bookDir = this.state.bookDir(bookId);
       const chapterNumber = await this.state.getNextChapterNumber(bookId);
+      this.debug("draft.book.loaded", { bookId, chapterNumber, genre: book.genre, platform: book.platform, targetWordCount: wordCount ?? book.chapterWordCount });
 
       const { profile: gp } = await this.loadGenreProfile(book.genre);
+      this.debug("draft.genre.loaded", { bookId, chapterNumber, numericalSystem: gp.numericalSystem, pacingRule: gp.pacingRule });
 
       const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
+      this.debug("draft.writer.start", { bookId, chapterNumber });
       const output = await writer.writeChapter({
         book,
         bookDir,
         chapterNumber,
         externalContext: context ?? this.config.externalContext,
         ...(wordCount ? { wordCountOverride: wordCount } : {}),
+      });
+      this.debug("draft.writer.done", {
+        bookId,
+        chapterNumber,
+        title: output.title,
+        wordCount: output.wordCount,
+        postWriteErrors: output.postWriteErrors.length,
+        postWriteWarnings: output.postWriteWarnings.length,
       });
 
       // Save chapter file
@@ -159,11 +185,33 @@ export class PipelineRunner {
       const filename = `${paddedNum}_${sanitized}.md`;
       const filePath = join(chaptersDir, filename);
 
+      const existingChapterFiles = (await readdir(chaptersDir))
+        .filter((file) => file.startsWith(`${paddedNum}_`) && file.endsWith(".md"));
+      if (existingChapterFiles.length > 0) {
+        this.debug("draft.chapter.cleanup.start", {
+          bookId,
+          chapterNumber,
+          existingFiles: existingChapterFiles,
+        });
+        await Promise.all(
+          existingChapterFiles.map((file) => rm(join(chaptersDir, file), { force: true })),
+        );
+        this.debug("draft.chapter.cleanup.done", {
+          bookId,
+          chapterNumber,
+          removedFiles: existingChapterFiles,
+        });
+      }
+
+      this.debug("draft.chapter.write.start", { bookId, chapterNumber, filePath });
       await writeFile(filePath, `# 第${chapterNumber}章 ${output.title}\n\n${output.content}`, "utf-8");
+      this.debug("draft.chapter.write.done", { bookId, chapterNumber, filePath, contentLength: output.content.length });
 
       // Save truth files
+      this.debug("draft.truth_files.start", { bookId, chapterNumber });
       await writer.saveChapter(bookDir, output, gp.numericalSystem);
       await writer.saveNewTruthFiles(bookDir, output);
+      this.debug("draft.truth_files.done", { bookId, chapterNumber });
 
       // Update index
       const existingIndex = await this.state.loadChapterIndex(bookId);
@@ -176,16 +224,22 @@ export class PipelineRunner {
         createdAt: now,
         updatedAt: now,
         auditIssues: [],
+        auditDetails: [],
       };
+      this.debug("draft.index.save.start", { bookId, chapterNumber, existingChapters: existingIndex.length });
       await this.state.saveChapterIndex(bookId, [...existingIndex, newEntry]);
+      this.debug("draft.index.save.done", { bookId, chapterNumber, totalChapters: existingIndex.length + 1 });
 
       // Snapshot
+      this.debug("draft.snapshot.start", { bookId, chapterNumber });
       await this.state.snapshotState(bookId, chapterNumber);
+      this.debug("draft.snapshot.done", { bookId, chapterNumber });
 
       await this.emitWebhook("chapter-complete", bookId, chapterNumber, {
         title: output.title,
         wordCount: output.wordCount,
       });
+      this.debug("draft.done", { bookId, chapterNumber, title: output.title, wordCount: output.wordCount, filePath });
 
       return { chapterNumber, title: output.title, wordCount: output.wordCount, filePath };
     } finally {
@@ -195,21 +249,43 @@ export class PipelineRunner {
 
   /** Audit the latest (or specified) chapter. Read-only, no lock needed. */
   async auditDraft(bookId: string, chapterNumber?: number): Promise<AuditResult & { readonly chapterNumber: number }> {
+    this.debug("audit.start", { projectRoot: this.config.projectRoot, bookId, chapterNumber: chapterNumber ?? null });
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
     const targetChapter = chapterNumber ?? (await this.state.getNextChapterNumber(bookId)) - 1;
     if (targetChapter < 1) {
       throw new Error(`No chapters to audit for "${bookId}"`);
     }
+    this.debug("audit.book.loaded", { bookId, targetChapter, genre: book.genre, platform: book.platform });
 
-    const content = await this.readChapterContent(bookDir, targetChapter);
+    this.debug("audit.chapter.read.start", { bookId, targetChapter });
+      const chapterMeta = (await this.state.loadChapterIndex(bookId)).find((item) => item.number === targetChapter);
+      const content = await this.readChapterContent(bookDir, targetChapter, chapterMeta?.title);
+      this.debug("audit.chapter.read.done", { bookId, targetChapter, contentLength: content.length });
     const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
+    this.debug("audit.auditor.start", { bookId, targetChapter });
     const llmResult = await auditor.auditChapter(bookDir, content, targetChapter, book.genre);
+    this.debug("audit.auditor.done", {
+      bookId,
+      targetChapter,
+      passed: llmResult.passed,
+      issueCount: llmResult.issues.length,
+      summary: llmResult.summary,
+    });
 
     // Merge rule-based AI-tell detection
+    this.debug("audit.ai_tells.start", { bookId, targetChapter });
     const aiTells = analyzeAITells(content);
+    this.debug("audit.ai_tells.done", { bookId, targetChapter, issueCount: aiTells.issues.length });
     // Merge sensitive word detection
+    this.debug("audit.sensitive_words.start", { bookId, targetChapter });
     const sensitiveResult = analyzeSensitiveWords(content);
+    this.debug("audit.sensitive_words.done", {
+      bookId,
+      targetChapter,
+      issueCount: sensitiveResult.issues.length,
+      blockedCount: sensitiveResult.found.filter((f) => f.severity === "block").length,
+    });
     const hasBlockedWords = sensitiveResult.found.some((f) => f.severity === "block");
     const mergedIssues: ReadonlyArray<AuditIssue> = [
       ...llmResult.issues,
@@ -221,8 +297,15 @@ export class PipelineRunner {
       issues: mergedIssues,
       summary: llmResult.summary,
     };
+    this.debug("audit.result.merged", {
+      bookId,
+      targetChapter,
+      passed: result.passed,
+      totalIssues: result.issues.length,
+    });
 
     // Update index with audit result
+    this.debug("audit.index.save.start", { bookId, targetChapter });
     const index = await this.state.loadChapterIndex(bookId);
     const updated = index.map((ch) =>
       ch.number === targetChapter
@@ -230,11 +313,18 @@ export class PipelineRunner {
             ...ch,
             status: (result.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
             updatedAt: new Date().toISOString(),
-            auditIssues: result.issues.map((i) => `[${i.severity}] ${i.description}`),
+            auditIssues: result.issues.map((issue) => this.formatIndexedAuditIssue(issue)),
+            auditDetails: result.issues.map((issue) => ({ ...issue })),
           }
         : ch,
     );
     await this.state.saveChapterIndex(bookId, updated);
+    this.debug("audit.index.save.done", {
+      bookId,
+      targetChapter,
+      status: updated.find((ch) => ch.number === targetChapter)?.status ?? null,
+      issueCount: updated.find((ch) => ch.number === targetChapter)?.auditIssues.length ?? 0,
+    });
 
     await this.emitWebhook(
       result.passed ? "audit-passed" : "audit-failed",
@@ -242,6 +332,12 @@ export class PipelineRunner {
       targetChapter,
       { summary: result.summary, issueCount: result.issues.length },
     );
+    this.debug("audit.done", {
+      bookId,
+      targetChapter,
+      passed: result.passed,
+      issueCount: result.issues.length,
+    });
 
     return { ...result, chapterNumber: targetChapter };
   }
@@ -250,35 +346,107 @@ export class PipelineRunner {
   async reviseDraft(bookId: string, chapterNumber?: number, mode: ReviseMode = "rewrite", instruction?: string): Promise<ReviseResult> {
     const releaseLock = await this.state.acquireBookLock(bookId);
     try {
+      this.debug("revise.start", {
+        projectRoot: this.config.projectRoot,
+        bookId,
+        chapterNumber: chapterNumber ?? null,
+        mode,
+        hasInstruction: Boolean(instruction?.trim()),
+      });
       const book = await this.state.loadBookConfig(bookId);
       const bookDir = this.state.bookDir(bookId);
       const targetChapter = chapterNumber ?? (await this.state.getNextChapterNumber(bookId)) - 1;
       if (targetChapter < 1) {
         throw new Error(`No chapters to revise for "${bookId}"`);
       }
+      this.debug("revise.book.loaded", { bookId, targetChapter, genre: book.genre, platform: book.platform });
 
       // Read the current audit issues from index
+      this.debug("revise.index.load.start", { bookId, targetChapter });
       const index = await this.state.loadChapterIndex(bookId);
       const chapterMeta = index.find((ch) => ch.number === targetChapter);
       if (!chapterMeta) {
         throw new Error(`Chapter ${targetChapter} not found in index`);
       }
+      this.debug("revise.index.load.done", {
+        bookId,
+        targetChapter,
+        status: chapterMeta.status,
+        indexedIssueCount: chapterMeta.auditIssues.length,
+      });
 
-      // Re-audit to get structured issues (index only stores strings)
-      const content = await this.readChapterContent(bookDir, targetChapter);
-      const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
-      const auditResult = await auditor.auditChapter(bookDir, content, targetChapter, book.genre);
+      // Prefer stored audit issues from index; only re-audit when there are no existing issues.
+      this.debug("revise.chapter.read.start", { bookId, targetChapter });
+      const content = await this.readChapterContent(bookDir, targetChapter, chapterMeta.title);
+      this.debug("revise.chapter.read.done", { bookId, targetChapter, contentLength: content.length });
+      let auditResult: AuditResult;
+      if (chapterMeta.auditDetails?.length) {
+        auditResult = {
+          passed: chapterMeta.auditDetails.every((issue) => issue.severity !== "critical"),
+          issues: chapterMeta.auditDetails.map((issue) => ({ ...issue })),
+          summary: "使用已存在的完整审计结果直接修订",
+        };
+        this.debug("revise.audit.reuse_details", {
+          bookId,
+          targetChapter,
+          issueCount: chapterMeta.auditDetails.length,
+          status: chapterMeta.status,
+        });
+      } else {
+        this.debug("revise.audit.refresh.start", {
+          bookId,
+          targetChapter,
+          indexedIssueCount: chapterMeta.auditIssues.length,
+          reason: chapterMeta.auditIssues.length > 0 ? "missing_audit_details" : "no_stored_audit",
+        });
+        const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
+        const llmAudit = await auditor.auditChapter(bookDir, content, targetChapter, book.genre);
+        const aiTells = analyzeAITells(content);
+        const sensitiveResult = analyzeSensitiveWords(content);
+        const hasBlockedWords = sensitiveResult.found.some((found) => found.severity === "block");
+        auditResult = {
+          passed: hasBlockedWords ? false : llmAudit.passed,
+          issues: [...llmAudit.issues, ...aiTells.issues, ...sensitiveResult.issues],
+          summary: llmAudit.summary,
+        };
+        this.debug("revise.audit.refresh.done", {
+          bookId,
+          targetChapter,
+          passed: auditResult.passed,
+          issueCount: auditResult.issues.length,
+        });
+      }
 
-      if (auditResult.passed) {
-        return { chapterNumber: targetChapter, wordCount: content.length, fixedIssues: ["No issues to fix"] };
+      if (auditResult.issues.length === 0 && !instruction?.trim()) {
+        this.debug("revise.skip.no_issues", { bookId, targetChapter, mode });
+        return { chapterNumber: targetChapter, wordCount: content.length, fixedIssues: ["没有需要修复的问题"] };
       }
 
       const { profile: gp } = await this.loadGenreProfile(book.genre);
+      this.debug("revise.genre.loaded", { bookId, targetChapter, numericalSystem: gp.numericalSystem });
 
       const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
+      this.debug("revise.reviser.start", {
+        bookId,
+        targetChapter,
+        mode,
+        issueCount: auditResult.issues.length,
+        hasInstruction: Boolean(instruction?.trim()),
+      });
       const reviseOutput = await reviser.reviseChapter(
         bookDir, content, targetChapter, auditResult.issues, mode, book.genre, instruction,
       );
+
+      this.debug("revise.output", {
+        projectRoot: this.config.projectRoot,
+        bookId,
+        chapter: targetChapter,
+        mode,
+        revisedWordCount: reviseOutput.wordCount,
+        revisedContentLength: reviseOutput.revisedContent.length,
+        fixedIssuesCount: reviseOutput.fixedIssues.length,
+        preview: reviseOutput.revisedContent.slice(0, 180),
+      });
 
       if (reviseOutput.revisedContent.length === 0) {
         throw new Error("Reviser returned empty content");
@@ -286,19 +454,35 @@ export class PipelineRunner {
 
       // Save revised chapter file
       const chaptersDir = join(bookDir, "chapters");
-      const files = await readdir(chaptersDir);
-      const paddedNum = String(targetChapter).padStart(4, "0");
-      const existingFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-      if (existingFile) {
-        await writeFile(
-          join(chaptersDir, existingFile),
-          `# 第${targetChapter}章 ${chapterMeta.title}\n\n${reviseOutput.revisedContent}`,
-          "utf-8",
-        );
-      }
+      const resolvedChapter = await resolveChapterFile(chaptersDir, targetChapter, chapterMeta.title);
+      const targetFilename = buildChapterFilename(targetChapter, chapterMeta.title);
+      this.debug("revise.write.before", {
+        bookId,
+        chapter: targetChapter,
+        selectedFile: resolvedChapter.selected.file,
+        targetFile: targetFilename,
+        candidateCount: resolvedChapter.candidates.length,
+        duplicates: resolvedChapter.duplicates.map((item) => item.file),
+      });
+      const writeResult = await writeCanonicalChapterFile({
+        chaptersDir,
+        chapterNumber: targetChapter,
+        title: chapterMeta.title,
+        body: reviseOutput.revisedContent,
+      });
+      const afterStat = await stat(writeResult.fullPath);
+      this.debug("revise.write.after", {
+        bookId,
+        chapter: targetChapter,
+        file: writeResult.fullPath,
+        size: afterStat.size,
+        mtimeMs: afterStat.mtimeMs,
+        removedDuplicates: writeResult.removedDuplicates,
+      });
 
       // Update truth files
       const storyDir = join(bookDir, "story");
+      this.debug("revise.truth_files.start", { bookId, chapter: targetChapter });
       if (reviseOutput.updatedState !== "(状态卡未更新)") {
         await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
       }
@@ -308,8 +492,22 @@ export class PipelineRunner {
       if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
         await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
       }
+      if (reviseOutput.updatedChapterSummaries !== "(章节摘要未更新)") {
+        await writeFile(join(storyDir, "chapter_summaries.md"), reviseOutput.updatedChapterSummaries, "utf-8");
+      }
+      if (reviseOutput.updatedSubplots !== "(支线进度板未更新)") {
+        await writeFile(join(storyDir, "subplot_board.md"), reviseOutput.updatedSubplots, "utf-8");
+      }
+      if (reviseOutput.updatedEmotionalArcs !== "(情感弧线未更新)") {
+        await writeFile(join(storyDir, "emotional_arcs.md"), reviseOutput.updatedEmotionalArcs, "utf-8");
+      }
+      if (reviseOutput.updatedCharacterMatrix !== "(角色交互矩阵未更新)") {
+        await writeFile(join(storyDir, "character_matrix.md"), reviseOutput.updatedCharacterMatrix, "utf-8");
+      }
+      this.debug("revise.truth_files.done", { bookId, chapter: targetChapter });
 
       // Update index
+      this.debug("revise.index.save.start", { bookId, chapter: targetChapter });
       const updatedIndex = index.map((ch) =>
         ch.number === targetChapter
           ? {
@@ -317,17 +515,34 @@ export class PipelineRunner {
               status: "ready-for-review" as ChapterMeta["status"],
               wordCount: reviseOutput.wordCount,
               updatedAt: new Date().toISOString(),
+              auditIssues: [],
+              auditDetails: [],
             }
           : ch,
       );
       await this.state.saveChapterIndex(bookId, updatedIndex);
+      this.debug("revise.index.saved", {
+        bookId,
+        chapter: targetChapter,
+        status: updatedIndex.find((ch) => ch.number === targetChapter)?.status ?? null,
+        updatedAt: updatedIndex.find((ch) => ch.number === targetChapter)?.updatedAt ?? null,
+      });
 
       // Re-snapshot
+      this.debug("revise.snapshot.start", { bookId, chapter: targetChapter });
       await this.state.snapshotState(bookId, targetChapter);
+      this.debug("revise.snapshot.done", { bookId, chapter: targetChapter });
 
       await this.emitWebhook("revision-complete", bookId, targetChapter, {
         wordCount: reviseOutput.wordCount,
         fixedCount: reviseOutput.fixedIssues.length,
+      });
+      this.debug("revise.done", {
+        bookId,
+        chapter: targetChapter,
+        mode,
+        wordCount: reviseOutput.wordCount,
+        fixedIssuesCount: reviseOutput.fixedIssues.length,
       });
 
       return {
@@ -395,6 +610,12 @@ export class PipelineRunner {
     temperatureOverride?: number,
     onProgress?: (step: string) => void,
   ): Promise<ChapterPipelineResult> {
+    this.debug("write_next.start", {
+      projectRoot: this.config.projectRoot,
+      bookId,
+      wordCountOverride: wordCount ?? null,
+      temperatureOverride: temperatureOverride ?? null,
+    });
     const safeProgress = (step: string) => {
       try {
         onProgress?.(step);
@@ -404,15 +625,28 @@ export class PipelineRunner {
     };
     process.stderr.write(`[pipeline] [${bookId}] acquiring lock\n`);
     safeProgress("acquiring-lock");
+    this.debug("write_next.lock.acquire.start", { bookId });
     const releaseLock = await this.state.acquireBookLock(bookId);
     process.stderr.write(`[pipeline] [${bookId}] lock acquired\n`);
     safeProgress("lock-acquired");
+    this.debug("write_next.lock.acquire.done", { bookId });
     try {
-      return await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, safeProgress);
+      const result = await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, safeProgress);
+      this.debug("write_next.done", {
+        bookId,
+        chapterNumber: result.chapterNumber,
+        title: result.title,
+        wordCount: result.wordCount,
+        revised: result.revised,
+        passed: result.auditResult.passed,
+        status: result.status,
+      });
+      return result;
     } finally {
       await releaseLock();
       process.stderr.write(`[pipeline] [${bookId}] lock released\n`);
       safeProgress("lock-released");
+      this.debug("write_next.lock.release.done", { bookId });
     }
   }
 
@@ -426,6 +660,19 @@ export class PipelineRunner {
     const bookDir = this.state.bookDir(bookId);
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
     const { profile: gp } = await this.loadGenreProfile(book.genre);
+    this.debug("write_next.book.loaded", {
+      bookId,
+      chapterNumber,
+      genre: book.genre,
+      platform: book.platform,
+      targetWordCount: wordCount ?? book.chapterWordCount,
+    });
+    this.debug("write_next.genre.loaded", {
+      bookId,
+      chapterNumber,
+      numericalSystem: gp.numericalSystem,
+      pacingRule: gp.pacingRule,
+    });
     const log = (step: string, msg: string) => {
       process.stderr.write(`[pipeline] [ch${chapterNumber}] [${step}] ${msg}\n`);
       try {
@@ -437,6 +684,7 @@ export class PipelineRunner {
 
     // 1. Write chapter
     log("write", "start");
+    this.debug("write_next.writer.start", { bookId, chapterNumber });
     const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
     const output = await writer.writeChapter({
       book,
@@ -447,6 +695,14 @@ export class PipelineRunner {
       ...(temperatureOverride ? { temperatureOverride } : {}),
     });
     log("write", `done — ${output.wordCount} words, title="${output.title}"`);
+    this.debug("write_next.writer.done", {
+      bookId,
+      chapterNumber,
+      title: output.title,
+      wordCount: output.wordCount,
+      postWriteErrors: output.postWriteErrors.length,
+      postWriteWarnings: output.postWriteWarnings.length,
+    });
 
     // 2a. Post-write error gate: if deterministic rules found errors, auto-fix before LLM audit
     let finalContent = output.content;
@@ -455,6 +711,11 @@ export class PipelineRunner {
 
     if (output.postWriteErrors.length > 0) {
       log("spot-fix", `start — ${output.postWriteErrors.length} post-write errors`);
+      this.debug("write_next.spot_fix.start", {
+        bookId,
+        chapterNumber,
+        postWriteErrors: output.postWriteErrors.length,
+      });
       const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
       const spotFixIssues = output.postWriteErrors.map((v) => ({
         severity: "critical" as const,
@@ -476,10 +737,17 @@ export class PipelineRunner {
         revised = true;
       }
       log("spot-fix", "done");
+      this.debug("write_next.spot_fix.done", {
+        bookId,
+        chapterNumber,
+        wordCount: finalWordCount,
+        revised,
+      });
     }
 
     // 2b. LLM audit
     log("audit", "start");
+    this.debug("write_next.audit.start", { bookId, chapterNumber });
     const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
     const llmAudit = await auditor.auditChapter(
       bookDir,
@@ -496,6 +764,13 @@ export class PipelineRunner {
       summary: llmAudit.summary,
     };
     log("audit", `done — passed=${auditResult.passed}, issues=${auditResult.issues.length}`);
+    this.debug("write_next.audit.done", {
+      bookId,
+      chapterNumber,
+      passed: auditResult.passed,
+      issueCount: auditResult.issues.length,
+      blockedWords: hasBlockedWriteWords,
+    });
 
     // 3. If audit fails, try auto-revise once
     if (!auditResult.passed) {
@@ -504,6 +779,12 @@ export class PipelineRunner {
       );
       if (criticalIssues.length > 0) {
         log("revise", `start — ${criticalIssues.length} critical issues`);
+        this.debug("write_next.revise.start", {
+          bookId,
+          chapterNumber,
+          criticalIssues: criticalIssues.length,
+          totalIssues: auditResult.issues.length,
+        });
         const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
         const reviseOutput = await reviser.reviseChapter(
           bookDir,
@@ -523,6 +804,12 @@ export class PipelineRunner {
 
           if (postCount > preCount) {
             log("revise", "discarded — AI markers increased");
+            this.debug("write_next.revise.discarded", {
+              bookId,
+              chapterNumber,
+              preAiMarkers: preCount,
+              postAiMarkers: postCount,
+            });
           } else {
             finalContent = reviseOutput.revisedContent;
             finalWordCount = reviseOutput.wordCount;
@@ -531,6 +818,7 @@ export class PipelineRunner {
 
           // Re-audit the (possibly revised) content
           log("re-audit", "start");
+          this.debug("write_next.reaudit.start", { bookId, chapterNumber });
           const reAudit = await auditor.auditChapter(
             bookDir,
             finalContent,
@@ -547,9 +835,17 @@ export class PipelineRunner {
             summary: reAudit.summary,
           };
           log("re-audit", `done — passed=${auditResult.passed}, issues=${auditResult.issues.length}`);
+          this.debug("write_next.reaudit.done", {
+            bookId,
+            chapterNumber,
+            passed: auditResult.passed,
+            issueCount: auditResult.issues.length,
+            blockedWords: reHasBlocked,
+          });
 
           // Update state files from revision
           const storyDir = join(bookDir, "story");
+          this.debug("write_next.truth_files_from_revise.start", { bookId, chapterNumber });
           if (reviseOutput.updatedState !== "(状态卡未更新)") {
             await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
           }
@@ -559,13 +855,21 @@ export class PipelineRunner {
           if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
             await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
           }
+          this.debug("write_next.truth_files_from_revise.done", { bookId, chapterNumber });
         }
         log("revise", "done");
+        this.debug("write_next.revise.done", {
+          bookId,
+          chapterNumber,
+          revised,
+          finalWordCount,
+        });
       }
     }
 
     // 4. Save chapter (original or revised)
     log("save", "start");
+    this.debug("write_next.save.start", { bookId, chapterNumber });
     const chaptersDir = join(bookDir, "chapters");
     const paddedNum = String(chapterNumber).padStart(4, "0");
     const title = output.title;
@@ -576,16 +880,27 @@ export class PipelineRunner {
       `# 第${chapterNumber}章 ${title}\n\n${finalContent}`,
       "utf-8",
     );
+    this.debug("write_next.chapter.write.done", {
+      bookId,
+      chapterNumber,
+      filePath: join(chaptersDir, filename),
+      contentLength: finalContent.length,
+    });
 
     // Save original state files if not revised
     if (!revised) {
+      this.debug("write_next.truth_files_from_writer.start", { bookId, chapterNumber });
       await writer.saveChapter(bookDir, output, gp.numericalSystem);
+      this.debug("write_next.truth_files_from_writer.done", { bookId, chapterNumber });
     }
 
     // Save new truth files (summaries, subplots, emotional arcs, character matrix)
+    this.debug("write_next.new_truth_files.start", { bookId, chapterNumber });
     await writer.saveNewTruthFiles(bookDir, output);
+    this.debug("write_next.new_truth_files.done", { bookId, chapterNumber });
 
     // 5. Update chapter index
+    this.debug("write_next.index.save.start", { bookId, chapterNumber });
     const existingIndex = await this.state.loadChapterIndex(bookId);
     const now = new Date().toISOString();
     const newEntry: ChapterMeta = {
@@ -595,14 +910,22 @@ export class PipelineRunner {
       wordCount: finalWordCount,
       createdAt: now,
       updatedAt: now,
-      auditIssues: auditResult.issues.map(
-        (i) => `[${i.severity}] ${i.description}`,
-      ),
+      auditIssues: auditResult.issues.map((issue) => this.formatIndexedAuditIssue(issue)),
+      auditDetails: auditResult.issues.map((issue) => ({ ...issue })),
     };
     await this.state.saveChapterIndex(bookId, [...existingIndex, newEntry]);
+    this.debug("write_next.index.save.done", {
+      bookId,
+      chapterNumber,
+      totalChapters: existingIndex.length + 1,
+      status: newEntry.status,
+      issueCount: newEntry.auditIssues.length,
+    });
 
     // 5.5 Snapshot state for rollback support
+    this.debug("write_next.snapshot.start", { bookId, chapterNumber });
     await this.state.snapshotState(bookId, chapterNumber);
+    this.debug("write_next.snapshot.done", { bookId, chapterNumber });
     log("save", "done");
 
     // 6. Send notification
@@ -699,7 +1022,7 @@ export class PipelineRunner {
         role: "user",
         content: `分析以下参考文本的写作风格：\n\n${referenceText.slice(0, 20000)}`,
       },
-    ], { temperature: 0.3, maxTokens: 4096 });
+    ], { temperature: 0.3, maxTokens: 16000 });
 
     await writeFile(join(storyDir, "style_guide.md"), response.content, "utf-8");
     return response.content;
@@ -821,7 +1144,7 @@ ${emotions}
 ## 正传角色矩阵
 ${matrix}`,
       },
-    ], { temperature: 0.3, maxTokens: 16384 });
+    ], { temperature: 0.3, maxTokens: 16000 });
 
     // Append deterministic meta block (LLM may hallucinate timestamps)
     const metaBlock = [
@@ -858,18 +1181,24 @@ ${matrix}`,
     });
   }
 
-  private async readChapterContent(bookDir: string, chapterNumber: number): Promise<string> {
+  private async readChapterContent(bookDir: string, chapterNumber: number, preferredTitle?: string): Promise<string> {
     const chaptersDir = join(bookDir, "chapters");
-    const files = await readdir(chaptersDir);
-    const paddedNum = String(chapterNumber).padStart(4, "0");
-    const chapterFile = files.find((f) => f.startsWith(paddedNum) && f.endsWith(".md"));
-    if (!chapterFile) {
-      throw new Error(`Chapter ${chapterNumber} file not found in ${chaptersDir}`);
+    const resolved = await resolveChapterFile(chaptersDir, chapterNumber, preferredTitle);
+    if (resolved.duplicates.length > 0) {
+      this.debug("chapter.file.multiple_matches", {
+        bookDir,
+        chapterNumber,
+        preferredTitle: preferredTitle ?? null,
+        selected: resolved.selected.file,
+        candidates: resolved.candidates.map((item) => ({
+          file: item.file,
+          size: item.size,
+          mtimeMs: item.mtimeMs,
+          headingTitle: item.headingTitle,
+        })),
+      });
     }
-    const raw = await readFile(join(chaptersDir, chapterFile), "utf-8");
-    // Strip the title line
-    const lines = raw.split("\n");
-    const contentStart = lines.findIndex((l, i) => i > 0 && l.trim().length > 0);
-    return contentStart >= 0 ? lines.slice(contentStart).join("\n") : raw;
+    const raw = await readFile(resolved.selected.fullPath, "utf-8");
+    return extractChapterBody(raw);
   }
 }

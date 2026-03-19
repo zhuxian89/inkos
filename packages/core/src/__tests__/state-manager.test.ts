@@ -79,6 +79,14 @@ describe("StateManager", () => {
         createdAt: "2026-01-02T00:00:00Z",
         updatedAt: "2026-01-02T00:00:00Z",
         auditIssues: ["pacing issue"],
+        auditDetails: [
+          {
+            severity: "warning",
+            category: "节奏检查",
+            description: "铺垫偏长",
+            suggestion: "压缩中段铺垫",
+          },
+        ],
       },
     ];
 

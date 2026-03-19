@@ -5,6 +5,11 @@ import type { ColumnsType } from "antd/es/table";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { IssueTags } from "./issue-tags";
+import {
+  buildReviseSelectOptions,
+  ReviseModeGuide,
+  type ReviseMode,
+} from "./revise-mode-guide";
 
 interface PendingReview {
   readonly bookId: string;
@@ -32,7 +37,7 @@ interface AuditValues {
 
 interface ReviseValues {
   readonly chapter?: number;
-  readonly mode: "spot-fix" | "rewrite" | "polish" | "rework";
+  readonly mode: ReviseMode;
 }
 
 export function BookAuditPanel({ bookId }: Readonly<{ bookId: string }>) {
@@ -43,6 +48,7 @@ export function BookAuditPanel({ bookId }: Readonly<{ bookId: string }>) {
   const [isRevising, setIsRevising] = useState(false);
   const [auditForm] = Form.useForm<AuditValues>();
   const [reviseForm] = Form.useForm<ReviseValues>();
+  const selectedReviseMode = Form.useWatch("mode", reviseForm) ?? "rewrite";
 
   async function loadPending(): Promise<void> {
     setIsRefreshing(true);
@@ -56,7 +62,7 @@ export function BookAuditPanel({ bookId }: Readonly<{ bookId: string }>) {
   }
 
   useEffect(() => {
-    reviseForm.setFieldsValue({ mode: "spot-fix", chapter: undefined });
+    reviseForm.setFieldsValue({ mode: "rewrite", chapter: undefined });
     void loadPending();
   }, [bookId, reviseForm]);
 
@@ -135,15 +141,9 @@ export function BookAuditPanel({ bookId }: Readonly<{ bookId: string }>) {
                 <InputNumber min={1} style={{ width: "100%" }} placeholder="为空表示最新章节" />
               </Form.Item>
               <Form.Item label="模式" name="mode" rules={[{ required: true }]}>
-                <Select
-                  options={[
-                    { value: "spot-fix", label: "定点修复（spot-fix）" },
-                    { value: "rewrite", label: "重写（rewrite）" },
-                    { value: "polish", label: "润色（polish）" },
-                    { value: "rework", label: "重构（rework）" },
-                  ]}
-                />
+                <Select options={buildReviseSelectOptions()} optionLabelProp="label" />
               </Form.Item>
+              <ReviseModeGuide mode={selectedReviseMode} />
               <Button danger htmlType="submit" loading={isRevising}>开始修订</Button>
             </Form>
           </Card>

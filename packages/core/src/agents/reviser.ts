@@ -15,6 +15,10 @@ export interface ReviseOutput {
   readonly updatedState: string;
   readonly updatedLedger: string;
   readonly updatedHooks: string;
+  readonly updatedChapterSummaries: string;
+  readonly updatedSubplots: string;
+  readonly updatedEmotionalArcs: string;
+  readonly updatedCharacterMatrix: string;
 }
 
 const MODE_DESCRIPTIONS: Record<ReviseMode, string> = {
@@ -33,7 +37,7 @@ const MODE_DESCRIPTIONS: Record<ReviseMode, string> = {
 7. 群像反应具体化：✗"全场震惊" → ✓"老陈的烟掉在裤子上，烫得他跳起来"
 8. 段落长度差异化：不再等长段落，有的段只有一句话，有的段七八行
 9. 消灭"不禁""仿佛""宛如"等AI标记词：换成具体感官描写`,
-  "spot-fix": "定点修复：只修改审稿意见指出的具体句子或段落，其余所有内容必须原封不动保留。修改范围限定在问题句子及其前后各一句。禁止改动无关段落",
+  "spot-fix": "定点修复：只修改审稿意见指出的具体句子或段落，其余所有内容必须原封不动保留。修改范围限定在问题句子及其前后各一句。若问题来自正文与真相文件不一致，可最小范围同步对应真相文件；这类同步不算无关改动",
 };
 
 export class ReviserAgent extends BaseAgent {
@@ -50,18 +54,52 @@ export class ReviserAgent extends BaseAgent {
     genre?: string,
     authorInstruction?: string,
   ): Promise<ReviseOutput> {
-    const [currentState, ledger, hooks, styleGuideRaw] = await Promise.all([
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.load_story_files.start ${JSON.stringify({
+      bookDir,
+      chapterNumber,
+      mode,
+      issueCount: issues.length,
+      hasInstruction: Boolean(authorInstruction?.trim()),
+    })}\n`);
+    const [currentState, ledger, hooks, styleGuideRaw, chapterSummaries, subplotBoard, emotionalArcs, characterMatrix, parentCanon] = await Promise.all([
       this.readFileSafe(join(bookDir, "story/current_state.md")),
       this.readFileSafe(join(bookDir, "story/particle_ledger.md")),
       this.readFileSafe(join(bookDir, "story/pending_hooks.md")),
       this.readFileSafe(join(bookDir, "story/style_guide.md")),
+      this.readFileSafe(join(bookDir, "story/chapter_summaries.md")),
+      this.readFileSafe(join(bookDir, "story/subplot_board.md")),
+      this.readFileSafe(join(bookDir, "story/emotional_arcs.md")),
+      this.readFileSafe(join(bookDir, "story/character_matrix.md")),
+      this.readFileSafe(join(bookDir, "story/parent_canon.md")),
     ]);
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.load_story_files.done ${JSON.stringify({
+      chapterNumber,
+      currentStateLength: currentState.length,
+      ledgerLength: ledger.length,
+      hooksLength: hooks.length,
+      styleGuideLength: styleGuideRaw.length,
+      chapterSummariesLength: chapterSummaries.length,
+      subplotBoardLength: subplotBoard.length,
+      emotionalArcsLength: emotionalArcs.length,
+      characterMatrixLength: characterMatrix.length,
+      parentCanonLength: parentCanon.length,
+    })}\n`);
 
     // Load genre profile and book rules
     const genreId = genre ?? "other";
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.load_rules.start ${JSON.stringify({
+      chapterNumber,
+      genreId,
+    })}\n`);
     const { profile: gp } = await readGenreProfile(this.ctx.projectRoot, genreId);
     const parsedRules = await readBookRules(bookDir);
     const bookRules = parsedRules?.rules ?? null;
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.load_rules.done ${JSON.stringify({
+      chapterNumber,
+      genreName: gp.name,
+      numericalSystem: gp.numericalSystem,
+      hasBookRules: Boolean(bookRules),
+    })}\n`);
 
     // Fallback: use book_rules body when style_guide.md doesn't exist
     const styleGuide = styleGuideRaw !== "(文件不存在)"
@@ -79,18 +117,24 @@ export class ReviserAgent extends BaseAgent {
     const protagonistBlock = bookRules?.protagonist
       ? `\n\n主角人设锁定：${bookRules.protagonist.name}，${bookRules.protagonist.personalityLock.join("、")}。修改不得违反人设。`
       : "";
+    const canonBlock = parentCanon !== "(文件不存在)"
+      ? `\n\n正传正典参照：\n${parentCanon}`
+      : "";
 
-    const systemPrompt = `你是一位专业的${gp.name}网络小说修稿编辑。你的任务是根据审稿意见对章节进行修正。${protagonistBlock}
+    const systemPrompt = `你是一位专业的${gp.name}网络小说修稿编辑。你的任务是根据审稿意见对章节进行修正。${protagonistBlock}${canonBlock}
 
 修稿模式：${modeDesc}
 
 修稿原则：
 1. 按模式控制修改幅度
 2. 修根因，不做表面润色${numericalRule}
+3. 如果审稿问题来自正文与真相文件冲突，必须同步修正受影响的真相文件（章节摘要、支线进度板、情感弧线、角色交互矩阵），且只改必要部分
 4. 伏笔状态必须与伏笔池同步
 5. 不改变剧情走向和核心冲突
 6. 保持原文的语言风格和节奏
-7. 修改后同步更新状态卡${gp.numericalSystem ? "、账本" : ""}、伏笔池
+7. 修改后同步更新状态卡${gp.numericalSystem ? "、账本" : ""}、伏笔池，以及所有受影响的真相文件
+8. 如果问题只是知识库/资料同步错误，也要优先修正真相文件，不要只改正文糊弄过去
+9. 除专有名词中必须保留的外文缩写外，正文、修订说明、状态卡和真相文件都必须使用自然简体中文，不得夹杂英文单词、英文短语或中英混写
 
 输出格式：
 
@@ -104,10 +148,34 @@ export class ReviserAgent extends BaseAgent {
 (更新后的完整状态卡)
 ${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账本)" : ""}
 === UPDATED_HOOKS ===
-(更新后的完整伏笔池)`;
+(更新后的完整伏笔池)
+
+=== UPDATED_CHAPTER_SUMMARIES ===
+(如需更新，输出更新后的完整章节摘要文件；否则留空)
+
+=== UPDATED_SUBPLOTS ===
+(如需更新，输出更新后的完整支线进度板；否则留空)
+
+=== UPDATED_EMOTIONAL_ARCS ===
+(如需更新，输出更新后的完整情感弧线；否则留空)
+
+=== UPDATED_CHARACTER_MATRIX ===
+(如需更新，输出更新后的完整角色交互矩阵；否则留空)`;
 
     const ledgerBlock = gp.numericalSystem
       ? `\n## 资源账本\n${ledger}`
+      : "";
+    const chapterSummariesBlock = chapterSummaries !== "(文件不存在)"
+      ? `\n## 章节摘要\n${chapterSummaries}`
+      : "";
+    const subplotBoardBlock = subplotBoard !== "(文件不存在)"
+      ? `\n## 支线进度板\n${subplotBoard}`
+      : "";
+    const emotionalArcsBlock = emotionalArcs !== "(文件不存在)"
+      ? `\n## 情感弧线\n${emotionalArcs}`
+      : "";
+    const characterMatrixBlock = characterMatrix !== "(文件不存在)"
+      ? `\n## 角色交互矩阵\n${characterMatrix}`
       : "";
 
     const userPrompt = `请修正第${chapterNumber}章。
@@ -123,14 +191,27 @@ ${currentState}
 ${ledgerBlock}
 ## 伏笔池
 ${hooks}
+${chapterSummariesBlock}${subplotBoardBlock}${emotionalArcsBlock}${characterMatrixBlock}
 
 ## 文风指南
 ${styleGuide}
 
 ## 待修正章节
 ${chapterContent}`;
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.prompt.ready ${JSON.stringify({
+      chapterNumber,
+      systemPromptLength: systemPrompt.length,
+      userPromptLength: userPrompt.length,
+      chapterContentLength: chapterContent.length,
+    })}\n`);
 
-    const maxTokens = mode === "spot-fix" ? 8192 : 16384;
+    const maxTokens = 16000;
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.llm.start ${JSON.stringify({
+      chapterNumber,
+      model: this.ctx.model,
+      mode,
+      maxTokens,
+    })}\n`);
 
     const response = await this.chat(
       [
@@ -139,8 +220,29 @@ ${chapterContent}`;
       ],
       { temperature: 0.3, maxTokens },
     );
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.llm.done ${JSON.stringify({
+      chapterNumber,
+      responseLength: response.content.length,
+      promptTokens: response.usage.promptTokens,
+      completionTokens: response.usage.completionTokens,
+      totalTokens: response.usage.totalTokens,
+    })}\n`);
 
-    return this.parseOutput(response.content, gp);
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.parse.start ${JSON.stringify({ chapterNumber })}\n`);
+    const parsed = this.parseOutput(response.content, gp);
+    process.stderr.write(`${new Date().toISOString()} INFO reviser.parse.done ${JSON.stringify({
+      chapterNumber,
+      revisedContentLength: parsed.revisedContent.length,
+      fixedIssuesCount: parsed.fixedIssues.length,
+      updatedStateLength: parsed.updatedState.length,
+      updatedLedgerLength: parsed.updatedLedger.length,
+      updatedHooksLength: parsed.updatedHooks.length,
+      updatedChapterSummariesLength: parsed.updatedChapterSummaries.length,
+      updatedSubplotsLength: parsed.updatedSubplots.length,
+      updatedEmotionalArcsLength: parsed.updatedEmotionalArcs.length,
+      updatedCharacterMatrixLength: parsed.updatedCharacterMatrix.length,
+    })}\n`);
+    return parsed;
   }
 
   private parseOutput(content: string, gp: GenreProfile): ReviseOutput {
@@ -167,6 +269,10 @@ ${chapterContent}`;
         ? (extract("UPDATED_LEDGER") || "(账本未更新)")
         : "",
       updatedHooks: extract("UPDATED_HOOKS") || "(伏笔池未更新)",
+      updatedChapterSummaries: extract("UPDATED_CHAPTER_SUMMARIES") || "(章节摘要未更新)",
+      updatedSubplots: extract("UPDATED_SUBPLOTS") || "(支线进度板未更新)",
+      updatedEmotionalArcs: extract("UPDATED_EMOTIONAL_ARCS") || "(情感弧线未更新)",
+      updatedCharacterMatrix: extract("UPDATED_CHARACTER_MATRIX") || "(角色交互矩阵未更新)",
     };
   }
 

@@ -6,7 +6,7 @@ export const LLMConfigSchema = z.object({
   apiKey: z.string().default(""),
   model: z.string().min(1),
   temperature: z.number().min(0).max(2).default(0.7),
-  maxTokens: z.number().int().min(1).default(8192),
+  maxTokens: z.number().int().min(1).default(16000),
   thinkingBudget: z.number().int().min(0).default(0),
   apiFormat: z.enum(["chat", "responses"]).default("chat"),
 });

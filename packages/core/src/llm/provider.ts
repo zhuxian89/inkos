@@ -2,6 +2,10 @@ import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
 import type { LLMConfig } from "../models/project.js";
 
+const DEFAULT_LLM_HEADERS = {
+  "User-Agent": "curl/8.0",
+} as const;
+
 // === Shared Types ===
 
 export interface LLMResponse {
@@ -53,6 +57,7 @@ export type AgentMessage =
 export interface ChatWithToolsResult {
   readonly content: string;
   readonly toolCalls: ReadonlyArray<ToolCall>;
+  readonly reasoning?: string;
 }
 
 function isMoonshotModel(model: string, client: OpenAI): boolean {
@@ -63,12 +68,28 @@ function isMoonshotModel(model: string, client: OpenAI): boolean {
     || normalizedBaseUrl.includes("moonshot");
 }
 
+function extractTextValue(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value.map((item) => extractTextValue(item)).join("");
+  }
+  if (value && typeof value === "object") {
+    if ("text" in value && typeof value.text === "string") {
+      return value.text;
+    }
+    if ("content" in value) {
+      return extractTextValue((value as { content?: unknown }).content);
+    }
+  }
+  return "";
+}
+
 // === Factory ===
 
 export function createLLMClient(config: LLMConfig): LLMClient {
   const defaults = {
     temperature: config.temperature ?? 0.7,
-    maxTokens: config.maxTokens ?? 8192,
+    maxTokens: config.maxTokens ?? 16000,
     thinkingBudget: config.thinkingBudget ?? 0,
   };
 
@@ -80,7 +101,11 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     return {
       provider: "anthropic",
       apiFormat,
-      _anthropic: new Anthropic({ apiKey: config.apiKey, baseURL }),
+      _anthropic: new Anthropic({
+        apiKey: config.apiKey,
+        baseURL,
+        defaultHeaders: DEFAULT_LLM_HEADERS,
+      }),
       defaults,
     };
   }
@@ -88,7 +113,11 @@ export function createLLMClient(config: LLMConfig): LLMClient {
   return {
     provider: "openai",
     apiFormat,
-    _openai: new OpenAI({ apiKey: config.apiKey, baseURL: config.baseUrl }),
+    _openai: new OpenAI({
+      apiKey: config.apiKey,
+      baseURL: config.baseUrl,
+      defaultHeaders: DEFAULT_LLM_HEADERS,
+    }),
     defaults,
   };
 }
@@ -117,6 +146,26 @@ function wrapLLMError(error: unknown): Error {
     );
   }
   return error instanceof Error ? error : new Error(msg);
+}
+
+function isRetryableStreamError(error: unknown): boolean {
+  const msg = String(error).toLowerCase();
+  return msg.includes("stream error")
+    || msg.includes("internal_error")
+    || msg.includes("http/2")
+    || msg.includes("http2")
+    || msg.includes("econnreset")
+    || msg.includes("socket hang up")
+    || msg.includes("terminated")
+    || msg.includes("unexpected end of json input");
+}
+
+function logStreamFallback(provider: "openai-chat" | "openai-responses", model: string, error: unknown): void {
+  process.stderr.write(`${new Date().toISOString()} WARN llm.stream_fallback ${JSON.stringify({
+    provider,
+    model,
+    error: error instanceof Error ? error.message : String(error),
+  })}\n`);
 }
 
 // === Simple Chat (used by all agents via BaseAgent.chat()) ===
@@ -158,12 +207,16 @@ export async function chatWithTools(
   options?: {
     readonly temperature?: number;
     readonly maxTokens?: number;
+    readonly useStream?: boolean;
+    readonly includeReasoning?: boolean;
   },
 ): Promise<ChatWithToolsResult> {
   try {
     const resolved = {
       temperature: options?.temperature ?? client.defaults.temperature,
       maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+      useStream: options?.useStream ?? true,
+      includeReasoning: options?.includeReasoning ?? false,
     };
     if (client.provider === "anthropic") {
       return await chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget);
@@ -198,44 +251,79 @@ async function chatCompletionOpenAIChat(
     ...(webSearch ? { web_search_options: { search_context_size: "medium" as const } } : {}),
   };
 
-  const chunks: string[] = [];
-  let inputTokens = 0;
-  let outputTokens = 0;
-  const stream = await client.chat.completions.create({
-    ...request,
-    stream: true,
-  });
+  try {
+    const chunks: string[] = [];
+    let inputTokens = 0;
+    let outputTokens = 0;
+    const stream = await client.chat.completions.create({
+      ...request,
+      stream: true,
+    });
 
-  for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta as {
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta as {
+        content?: string | null;
+        reasoning_content?: string | null;
+      } | undefined;
+      const textDelta = delta?.content
+        ?? (moonshotCompat ? delta?.reasoning_content : undefined)
+        ?? "";
+      if (textDelta) {
+        chunks.push(textDelta);
+      }
+      if (chunk.usage) {
+        inputTokens = chunk.usage.prompt_tokens ?? 0;
+        outputTokens = chunk.usage.completion_tokens ?? 0;
+      }
+    }
+
+    const content = chunks.join("");
+    if (!content.trim()) {
+      throw new Error("LLM returned empty response");
+    }
+
+    return {
+      content,
+      usage: {
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        totalTokens: inputTokens + outputTokens,
+      },
+    };
+  } catch (error) {
+    if (!isRetryableStreamError(error)) {
+      throw error;
+    }
+
+    logStreamFallback("openai-chat", model, error);
+    const completion = await client.chat.completions.create({
+      ...request,
+      stream: false,
+    });
+
+    const message = completion.choices[0]?.message as {
       content?: string | null;
       reasoning_content?: string | null;
     } | undefined;
-    const textDelta = delta?.content
-      ?? (moonshotCompat ? delta?.reasoning_content : undefined)
+    const content = message?.content
+      ?? (moonshotCompat ? message?.reasoning_content : undefined)
       ?? "";
-    if (textDelta) {
-      chunks.push(textDelta);
+    if (!content.trim()) {
+      throw new Error("LLM returned empty response");
     }
-    if (chunk.usage) {
-      inputTokens = chunk.usage.prompt_tokens ?? 0;
-      outputTokens = chunk.usage.completion_tokens ?? 0;
-    }
-  }
 
-  const content = chunks.join("");
-  if (!content.trim()) {
-    throw new Error("LLM returned empty response");
+    const promptTokens = completion.usage?.prompt_tokens ?? 0;
+    const completionTokens = completion.usage?.completion_tokens ?? 0;
+    const totalTokens = completion.usage?.total_tokens ?? (promptTokens + completionTokens);
+    return {
+      content,
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens,
+      },
+    };
   }
-
-  return {
-    content,
-    usage: {
-      promptTokens: inputTokens,
-      completionTokens: outputTokens,
-      totalTokens: inputTokens + outputTokens,
-    },
-  };
 }
 
 async function chatWithToolsOpenAIChat(
@@ -243,7 +331,12 @@ async function chatWithToolsOpenAIChat(
   model: string,
   messages: ReadonlyArray<AgentMessage>,
   tools: ReadonlyArray<ToolDefinition>,
-  options: { readonly temperature: number; readonly maxTokens: number },
+  options: {
+    readonly temperature: number;
+    readonly maxTokens: number;
+    readonly useStream: boolean;
+    readonly includeReasoning: boolean;
+  },
 ): Promise<ChatWithToolsResult> {
   const openaiMessages = agentMessagesToOpenAIChat(messages);
   const openaiTools: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map((t) => ({
@@ -255,39 +348,103 @@ async function chatWithToolsOpenAIChat(
     },
   }));
 
-  const stream = await client.chat.completions.create({
+  const moonshotCompat = isMoonshotModel(model, client);
+
+  if (options.useStream) {
+    const stream = await client.chat.completions.create({
+      model,
+      messages: openaiMessages,
+      tools: openaiTools,
+      temperature: options.temperature,
+      max_tokens: options.maxTokens,
+      stream: true,
+    });
+
+    let content = "";
+    let reasoning = "";
+    const toolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
+
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta as {
+        content?: unknown;
+        reasoning?: unknown;
+        reasoning_content?: unknown;
+        tool_calls?: Array<{
+          index: number;
+          id?: string;
+          function?: {
+            name?: string;
+            arguments?: string;
+          };
+        }>;
+      } | undefined;
+      const contentDelta = extractTextValue(delta?.content);
+      if (contentDelta) content += contentDelta;
+
+      if (options.includeReasoning) {
+        const reasoningDelta = extractTextValue(
+          moonshotCompat ? (delta?.reasoning_content ?? delta?.reasoning) : delta?.reasoning,
+        );
+        if (reasoningDelta) reasoning += reasoningDelta;
+      }
+
+      if (delta?.tool_calls) {
+        for (const tc of delta.tool_calls) {
+          const existing = toolCallMap.get(tc.index);
+          if (existing) {
+            existing.arguments += tc.function?.arguments ?? "";
+          } else {
+            toolCallMap.set(tc.index, {
+              id: tc.id ?? "",
+              name: tc.function?.name ?? "",
+              arguments: tc.function?.arguments ?? "",
+            });
+          }
+        }
+      }
+    }
+
+    const toolCalls: ToolCall[] = [...toolCallMap.values()];
+    return { content, toolCalls, reasoning: reasoning.trim() || undefined };
+  }
+
+  const completion = await client.chat.completions.create({
     model,
     messages: openaiMessages,
     tools: openaiTools,
     temperature: options.temperature,
     max_tokens: options.maxTokens,
-    stream: true,
+    stream: false,
   });
 
-  let content = "";
-  const toolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
+  const message = completion.choices[0]?.message as {
+    content?: unknown;
+    reasoning?: unknown;
+    reasoning_content?: unknown;
+    tool_calls?: Array<{
+      id?: string;
+      function?: {
+        name?: string;
+        arguments?: string;
+      };
+    }>;
+  } | undefined;
 
-  for await (const chunk of stream) {
-    const delta = chunk.choices[0]?.delta;
-    if (delta?.content) content += delta.content;
-    if (delta?.tool_calls) {
-      for (const tc of delta.tool_calls) {
-        const existing = toolCallMap.get(tc.index);
-        if (existing) {
-          existing.arguments += tc.function?.arguments ?? "";
-        } else {
-          toolCallMap.set(tc.index, {
-            id: tc.id ?? "",
-            name: tc.function?.name ?? "",
-            arguments: tc.function?.arguments ?? "",
-          });
-        }
-      }
-    }
-  }
+  const toolCalls: ToolCall[] = (message?.tool_calls ?? []).map((toolCall) => ({
+    id: toolCall.id ?? "",
+    name: toolCall.function?.name ?? "",
+    arguments: toolCall.function?.arguments ?? "",
+  }));
 
-  const toolCalls: ToolCall[] = [...toolCallMap.values()];
-  return { content, toolCalls };
+  const reasoning = options.includeReasoning
+    ? extractTextValue(moonshotCompat ? (message?.reasoning_content ?? message?.reasoning) : message?.reasoning).trim()
+    : "";
+
+  return {
+    content: extractTextValue(message?.content).trim(),
+    toolCalls,
+    reasoning: reasoning || undefined,
+  };
 }
 
 function agentMessagesToOpenAIChat(
@@ -348,41 +505,70 @@ async function chatCompletionOpenAIResponses(
   const tools: OpenAI.Responses.Tool[] | undefined = webSearch
     ? [{ type: "web_search_preview" as const }]
     : undefined;
-
-  const stream = await client.responses.create({
+  const request = {
     model,
     input,
     temperature: options.temperature,
     max_output_tokens: options.maxTokens,
-    stream: true,
     ...(tools ? { tools } : {}),
-  });
-
-  const chunks: string[] = [];
-  let inputTokens = 0;
-  let outputTokens = 0;
-
-  for await (const event of stream) {
-    if (event.type === "response.output_text.delta") {
-      chunks.push(event.delta);
-    }
-    if (event.type === "response.completed") {
-      inputTokens = event.response.usage?.input_tokens ?? 0;
-      outputTokens = event.response.usage?.output_tokens ?? 0;
-    }
-  }
-
-  const content = chunks.join("");
-  if (!content) throw new Error("LLM returned empty response");
-
-  return {
-    content,
-    usage: {
-      promptTokens: inputTokens,
-      completionTokens: outputTokens,
-      totalTokens: inputTokens + outputTokens,
-    },
   };
+
+  try {
+    const stream = await client.responses.create({
+      ...request,
+      stream: true,
+    });
+
+    const chunks: string[] = [];
+    let inputTokens = 0;
+    let outputTokens = 0;
+
+    for await (const event of stream) {
+      if (event.type === "response.output_text.delta") {
+        chunks.push(event.delta);
+      }
+      if (event.type === "response.completed") {
+        inputTokens = event.response.usage?.input_tokens ?? 0;
+        outputTokens = event.response.usage?.output_tokens ?? 0;
+      }
+    }
+
+    const content = chunks.join("");
+    if (!content) throw new Error("LLM returned empty response");
+
+    return {
+      content,
+      usage: {
+        promptTokens: inputTokens,
+        completionTokens: outputTokens,
+        totalTokens: inputTokens + outputTokens,
+      },
+    };
+  } catch (error) {
+    if (!isRetryableStreamError(error)) {
+      throw error;
+    }
+
+    logStreamFallback("openai-responses", model, error);
+    const response = await client.responses.create({
+      ...request,
+      stream: false,
+    });
+    if (!response.output_text) {
+      throw new Error("LLM returned empty response");
+    }
+    const promptTokens = response.usage?.input_tokens ?? 0;
+    const completionTokens = response.usage?.output_tokens ?? 0;
+    const totalTokens = response.usage?.total_tokens ?? (promptTokens + completionTokens);
+    return {
+      content: response.output_text,
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens,
+      },
+    };
+  }
 }
 
 async function chatWithToolsOpenAIResponses(
@@ -390,7 +576,12 @@ async function chatWithToolsOpenAIResponses(
   model: string,
   messages: ReadonlyArray<AgentMessage>,
   tools: ReadonlyArray<ToolDefinition>,
-  options: { readonly temperature: number; readonly maxTokens: number },
+  options: {
+    readonly temperature: number;
+    readonly maxTokens: number;
+    readonly useStream: boolean;
+    readonly includeReasoning: boolean;
+  },
 ): Promise<ChatWithToolsResult> {
   const input = agentMessagesToResponsesInput(messages);
   const responsesTools: OpenAI.Responses.Tool[] = tools.map((t) => ({

@@ -1,8 +1,9 @@
 "use client";
 
-import { App, Button, Card, Col, Divider, Form, Input, InputNumber, Modal, Radio, Row, Select, Space, Tag, Typography } from "antd";
+import { App, Button, Card, Checkbox, Col, Divider, Form, Input, InputNumber, Modal, Radio, Row, Select, Space, Tag, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 
 interface CreateBookValues {
   readonly title: string;
@@ -17,14 +18,34 @@ interface CreateBookValues {
 interface InitAssistantMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
+  readonly reasoning?: string;
 }
 
 interface InitAssistantResult {
   readonly ok: boolean;
   readonly reply?: string;
   readonly brief?: string;
+  readonly reasoning?: string;
   readonly error?: string;
 }
+
+interface LlmProfile {
+  readonly id: string;
+  readonly name: string;
+  readonly model: string;
+  readonly isActive: boolean;
+}
+
+interface LlmProfilesResponse {
+  readonly ok: boolean;
+  readonly profiles: ReadonlyArray<LlmProfile>;
+  readonly activeProfileId: string | null;
+}
+
+const CREATE_BOOK_CHAT_STORAGE_KEY = "inkos.create-book.smart-chat";
+const CREATE_BOOK_BRIEF_STORAGE_KEY = "inkos.create-book.smart-brief";
+const CREATE_BOOK_CHAT_OPTIONS_STORAGE_KEY = "inkos.create-book.smart-chat-options";
+const CREATE_BOOK_CHAT_PROFILE_STORAGE_KEY = "inkos.create-book.smart-chat-profile";
 
 export function CreateBookLauncher(props: Readonly<{
   readonly buttonText?: string;
@@ -39,10 +60,90 @@ export function CreateBookLauncher(props: Readonly<{
   const [assistantMessages, setAssistantMessages] = useState<ReadonlyArray<InitAssistantMessage>>([]);
   const [assistantDraft, setAssistantDraft] = useState("");
   const [assistantBrief, setAssistantBrief] = useState("");
+  const [assistantUseStream, setAssistantUseStream] = useState(true);
+  const [assistantIncludeReasoning, setAssistantIncludeReasoning] = useState(false);
+  const [assistantProfiles, setAssistantProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
+  const [assistantProfileId, setAssistantProfileId] = useState<string | undefined>(undefined);
   const [createResult, setCreateResult] = useState<unknown>(null);
   const createPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [form] = Form.useForm<CreateBookValues>();
   const selectedCreateMode = Form.useWatch("initMode", form) ?? "full";
+
+  function loadStoredAssistantMessages(): ReadonlyArray<InitAssistantMessage> {
+    if (typeof window === "undefined") return [];
+    try {
+      const raw = window.localStorage.getItem(CREATE_BOOK_CHAT_STORAGE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw) as ReadonlyArray<InitAssistantMessage>;
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function persistAssistantMessages(messages: ReadonlyArray<InitAssistantMessage>): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(CREATE_BOOK_CHAT_STORAGE_KEY, JSON.stringify(messages));
+  }
+
+  function loadStoredAssistantBrief(): string {
+    if (typeof window === "undefined") return "";
+    return window.localStorage.getItem(CREATE_BOOK_BRIEF_STORAGE_KEY) ?? "";
+  }
+
+  function loadStoredAssistantChatOptions(): { readonly useStream: boolean; readonly includeReasoning: boolean } {
+    if (typeof window === "undefined") {
+      return { useStream: true, includeReasoning: false };
+    }
+    try {
+      const raw = window.localStorage.getItem(CREATE_BOOK_CHAT_OPTIONS_STORAGE_KEY);
+      if (!raw) return { useStream: true, includeReasoning: false };
+      const parsed = JSON.parse(raw) as { useStream?: boolean; includeReasoning?: boolean };
+      return {
+        useStream: parsed.useStream !== false,
+        includeReasoning: parsed.includeReasoning === true,
+      };
+    } catch {
+      return { useStream: true, includeReasoning: false };
+    }
+  }
+
+  function persistAssistantChatOptions(options: { readonly useStream: boolean; readonly includeReasoning: boolean }): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(CREATE_BOOK_CHAT_OPTIONS_STORAGE_KEY, JSON.stringify(options));
+  }
+
+  function loadStoredAssistantProfileId(): string | undefined {
+    if (typeof window === "undefined") return undefined;
+    const value = window.localStorage.getItem(CREATE_BOOK_CHAT_PROFILE_STORAGE_KEY);
+    return value?.trim() ? value : undefined;
+  }
+
+  function persistAssistantProfileId(profileId?: string): void {
+    if (typeof window === "undefined") return;
+    if (profileId?.trim()) {
+      window.localStorage.setItem(CREATE_BOOK_CHAT_PROFILE_STORAGE_KEY, profileId.trim());
+      return;
+    }
+    window.localStorage.removeItem(CREATE_BOOK_CHAT_PROFILE_STORAGE_KEY);
+  }
+
+  async function loadAssistantProfiles(): Promise<void> {
+    const response = await fetch("/api/inkos/llm-profiles", { cache: "no-store" });
+    const data = (await response.json()) as LlmProfilesResponse;
+    const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+    setAssistantProfiles(profiles);
+    const stored = loadStoredAssistantProfileId();
+    const fallback = data.activeProfileId ?? profiles.find((item) => item.isActive)?.id;
+    const selected = stored && profiles.some((item) => item.id === stored) ? stored : fallback ?? undefined;
+    setAssistantProfileId(selected);
+    persistAssistantProfileId(selected);
+  }
+
+  function persistAssistantBrief(brief: string): void {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(CREATE_BOOK_BRIEF_STORAGE_KEY, brief);
+  }
 
   useEffect(() => {
     form.setFieldsValue({
@@ -54,6 +155,12 @@ export function CreateBookLauncher(props: Readonly<{
       initMode: "full",
       context: "",
     });
+    setAssistantMessages(loadStoredAssistantMessages());
+    setAssistantBrief(loadStoredAssistantBrief());
+    const storedOptions = loadStoredAssistantChatOptions();
+    setAssistantUseStream(storedOptions.useStream);
+    setAssistantIncludeReasoning(storedOptions.includeReasoning);
+    void loadAssistantProfiles();
 
     return () => {
       if (createPollRef.current) clearInterval(createPollRef.current);
@@ -65,6 +172,10 @@ export function CreateBookLauncher(props: Readonly<{
     setAssistantMessages([]);
     setAssistantDraft("");
     setAssistantBrief("");
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(CREATE_BOOK_CHAT_STORAGE_KEY);
+      window.localStorage.removeItem(CREATE_BOOK_BRIEF_STORAGE_KEY);
+    }
   }
 
   function closeModal(): void {
@@ -81,6 +192,7 @@ export function CreateBookLauncher(props: Readonly<{
     const values = form.getFieldsValue();
     const nextMessages = [...assistantMessages, { role: "user" as const, content: draft }];
     setAssistantMessages(nextMessages);
+    persistAssistantMessages(nextMessages);
     setAssistantDraft("");
     setChatting(true);
 
@@ -95,6 +207,9 @@ export function CreateBookLauncher(props: Readonly<{
         chapterWords: values.chapterWords || 3000,
         context: values.context || undefined,
         currentBrief: assistantBrief || undefined,
+        useStream: assistantUseStream,
+        includeReasoning: assistantIncludeReasoning,
+        profileId: assistantProfileId,
         messages: nextMessages,
       }),
     })
@@ -104,8 +219,18 @@ export function CreateBookLauncher(props: Readonly<{
           void message.error(data.error ?? "智能初始化对话失败");
           return;
         }
-        setAssistantMessages((prev) => [...prev, { role: "assistant", content: data.reply?.trim() || "我已经整理好了当前方向，你可以继续补充。" }]);
-        setAssistantBrief(data.brief ?? "");
+        setAssistantMessages((prev) => {
+          const updated = [...prev, {
+            role: "assistant" as const,
+            content: data.reply?.trim() || "我已经整理好了当前方向，你可以继续补充。",
+            reasoning: typeof data.reasoning === "string" ? data.reasoning : undefined,
+          }];
+          persistAssistantMessages(updated);
+          return updated;
+        });
+        const nextBrief = data.brief ?? "";
+        setAssistantBrief(nextBrief);
+        persistAssistantBrief(nextBrief);
       })
       .catch((error: unknown) => {
         void message.error(error instanceof Error ? error.message : String(error));
@@ -193,14 +318,15 @@ export function CreateBookLauncher(props: Readonly<{
         open={open}
         onCancel={closeModal}
         footer={null}
-        width={selectedCreateMode === "smart" ? 1240 : 860}
+        width={selectedCreateMode === "smart" ? CHAT_MODAL_WIDTH : 860}
+        styles={selectedCreateMode === "smart" ? { body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } } : undefined}
         destroyOnHidden
       >
-        <Space direction="vertical" size={16} style={{ width: "100%" }}>
+        <Space direction="vertical" size={16} style={{ width: "100%", height: selectedCreateMode === "smart" ? "100%" : undefined }}>
           <Typography.Text type="secondary">
             创建流程分成两部分：左侧确定基础参数，右侧通过多轮对话把书名、主线、角色和结局方向聊清楚。
           </Typography.Text>
-          <Form layout="vertical" form={form} onFinish={submitCreateBook}>
+          <Form layout="vertical" form={form} onFinish={submitCreateBook} style={selectedCreateMode === "smart" ? { display: "flex", flexDirection: "column", flex: 1, minHeight: 0 } : undefined}>
             <Row gutter={[16, 16]}>
               <Col xs={24} lg={selectedCreateMode === "smart" ? 10 : 24}>
                 <Card
@@ -264,10 +390,15 @@ export function CreateBookLauncher(props: Readonly<{
               </Col>
 
               {selectedCreateMode === "smart" ? (
-                <Col xs={24} lg={14}>
-                  <Card size="small" title="智能初始化对话">
-                    <Space direction="vertical" size={12} style={{ width: "100%" }}>
-                      <Typography.Text type="secondary">
+                <Col xs={24} lg={14} style={{ display: "flex", minHeight: 0 }}>
+                  <Card
+                    size="small"
+                    title="智能初始化对话"
+                    style={{ height: "100%", width: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}
+                    bodyStyle={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}
+                  >
+                    <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", height: "100%", minHeight: 0 }}>
+                      <Typography.Text type="secondary" style={{ flexShrink: 0 }}>
                         这里用来多轮确认书名、卖点、主线、角色关系、阶段高潮和结局方向。左边的基础参数会作为上下文一起参与对话。
                       </Typography.Text>
                       <ChatPanel
@@ -278,22 +409,78 @@ export function CreateBookLauncher(props: Readonly<{
                         sending={chatting}
                         placeholder="例如：我想写一本短篇穿越爽文，地点在武大图书馆，人物和案件全部架空，男主重生后要一步步翻盘，结局必须痛快。"
                         emptyText="先说说你想写什么，比如主题、人物、冲突、结局倾向。助手会一边追问，一边整理成长期创作约束；左侧填写的要求也会并进去。"
-                        minHeight={300}
-                        maxHeight={420}
+                        minHeight={260}
+                        maxHeight="100%"
+                        topBar={(
+                          <Space wrap>
+                            <Select
+                              style={{ minWidth: 280 }}
+                              value={assistantProfileId}
+                              onChange={(value) => {
+                                const next = value || undefined;
+                                setAssistantProfileId(next);
+                                persistAssistantProfileId(next);
+                              }}
+                              placeholder="使用当前激活配置"
+                              options={assistantProfiles.map((item) => ({
+                                value: item.id,
+                                label: item.isActive ? `${item.name} · ${item.model}（当前激活）` : `${item.name} · ${item.model}`,
+                              }))}
+                            />
+                            <Checkbox
+                              checked={assistantUseStream}
+                              onChange={(event) => {
+                                const next = event.target.checked;
+                                setAssistantUseStream(next);
+                                persistAssistantChatOptions({
+                                  useStream: next,
+                                  includeReasoning: assistantIncludeReasoning,
+                                });
+                              }}
+                            >
+                              使用流式
+                            </Checkbox>
+                            <Checkbox
+                              checked={assistantIncludeReasoning}
+                              onChange={(event) => {
+                                const next = event.target.checked;
+                                setAssistantIncludeReasoning(next);
+                                persistAssistantChatOptions({
+                                  useStream: assistantUseStream,
+                                  includeReasoning: next,
+                                });
+                              }}
+                            >
+                              展示 reasoning
+                            </Checkbox>
+                          </Space>
+                        )}
                         footerLeft={<Typography.Text type="secondary">建议连续聊 3 到 5 轮，再创建。</Typography.Text>}
+                        footerRight={(
+                          <Button
+                            onClick={() => resetAssistant()}
+                            disabled={chatting}
+                          >
+                            清空对话
+                          </Button>
+                        )}
                         sendText="发送给初始化助手"
+                        containerStyle={{ flex: 1, minHeight: 0 }}
                       />
-                      <div>
+                      <div style={{ flexShrink: 0 }}>
                         <Typography.Text strong>长期创作约束</Typography.Text>
                         <Input.TextArea
-                          rows={10}
+                          rows={6}
                           value={assistantBrief}
-                          onChange={(event) => setAssistantBrief(event.target.value)}
+                          onChange={(event) => {
+                            setAssistantBrief(event.target.value);
+                            persistAssistantBrief(event.target.value);
+                          }}
                           placeholder="对话整理出的长期创作约束会显示在这里。创建时会与左侧填写内容合并保存，创建后也可以继续修改。"
                           style={{ marginTop: 8 }}
                         />
                       </div>
-                    </Space>
+                    </div>
                   </Card>
                 </Col>
               ) : null}

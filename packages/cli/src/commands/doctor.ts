@@ -86,7 +86,7 @@ export const doctorCommand = new Command("doctor")
       log("\n  [..] Testing API connectivity...");
       const response = await chatCompletion(client, config.llm.model, [
         { role: "user", content: "Say OK" },
-      ], { maxTokens: 16 });
+      ], { maxTokens: 16000 });
 
       checks.push({
         name: "API Connectivity",
