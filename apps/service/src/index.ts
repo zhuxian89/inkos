@@ -39,7 +39,7 @@ const LOG_STRING_PREVIEW_LIMIT = 120;
 // ---------------------------------------------------------------------------
 interface Job {
   readonly id: string;
-  readonly type: "write-next" | "create-book" | "command" | "audit" | "revise";
+  readonly type: "write-next" | "create-book" | "command" | "audit" | "revise" | "chapter-chat";
   status: "running" | "done" | "error";
   step: string;
   bookId?: string;
@@ -1842,6 +1842,19 @@ async function updateProjectModelOverrides(updates: Record<string, string | null
   return config;
 }
 
+function buildChapterChatFallbackReply(toolTrace: ReadonlyArray<{ readonly name: string; readonly args: Record<string, unknown> }>): string {
+  if (toolTrace.some((item) => item.name === "write_text_file")) {
+    return "已按你的要求完成修改，并写回相关文件。你可以继续让我解释改动点，或再提具体调整要求。";
+  }
+  if (toolTrace.some((item) => item.name === "read_text_file")) {
+    return "我已经查看了相关章节/状态文件。本次没有直接输出正文答复，你可以继续告诉我要改哪里。";
+  }
+  if (toolTrace.length > 0) {
+    return "我已经完成本次处理，但没有生成可展示的正文回复。你可以继续补充更具体的修改要求。";
+  }
+  return "我收到了这次请求，但没有生成可展示的回复。你可以换一种更具体的说法再试一次。";
+}
+
 async function runChapterAssistant(input: {
   readonly bookId: string;
   readonly chapterNumber: number;
@@ -1884,6 +1897,9 @@ async function runChapterAssistant(input: {
     "凡是涉及路径、文件位置、读取哪个文件、修改哪个文件，必须先调用 get_current_chapter_paths 工具获取真实路径，然后再继续。",
     "禁止凭经验猜测目录结构，禁止自行拼接路径，禁止把 books/<bookId>/ 这一层省略掉。",
     "如果没有先调用工具确认路径，就不要在回答中写任何具体文件路径或执行任何文件操作。",
+    "无论是否调用工具、无论是否已经完成文件修改，最后都必须输出一段面向用户的中文最终回复。",
+    "如果你修改了文件，最终回复必须明确告诉用户你改了什么；如果你只读取了文件，也必须明确告诉用户你看了什么以及下一步建议。",
+    "禁止只调用工具后直接结束，禁止把最终回复留空。",
     "你可以使用 Markdown 组织回复，优先用短标题、列表、表格或代码块提高可读性。",
     "请使用自然简体中文，结论要直接，尽量给出分点建议。",
     "除文件路径、模型名、命令名这类必须保留的内容外，不要夹杂英文单词或中英混写表达。",
@@ -1935,11 +1951,22 @@ async function runChapterAssistant(input: {
     },
   );
 
+  const reply = response.content.trim() || buildChapterChatFallbackReply(response.toolTrace);
+
+  if (!response.content.trim()) {
+    logInfo("chapter.chat.empty_reply_fallback", {
+      bookId: input.bookId,
+      chapterNumber: input.chapterNumber,
+      toolCount: response.toolTrace.length,
+      toolNames: response.toolTrace.map((item) => item.name),
+    });
+  }
+
   return {
-    reply: response.content.trim(),
+    reply,
     reasoning: response.reasoning,
     model: llm.model,
-    profileId: llm.profileId,
+    profileId: "profileId" in llm ? llm.profileId : undefined,
   };
 }
 
@@ -2250,6 +2277,7 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
     useStream: z.boolean().optional(),
     includeReasoning: z.boolean().optional(),
     profileId: z.string().optional(),
+    async: z.boolean().optional(),
   });
 
   try {
@@ -2266,7 +2294,53 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
       useStream: input.useStream !== false,
       includeReasoning: input.includeReasoning === true,
       profileId: input.profileId ?? null,
+      async: input.async === true,
     });
+    if (input.async) {
+      const job = createJob({
+        type: "chapter-chat",
+        step: `ch${chapterNumber}:chat:queued`,
+        bookId,
+      });
+      startJob(job, { chapter: chapterNumber, profileId: input.profileId ?? null });
+      void (async () => {
+        try {
+          updateJobStep(job, `ch${chapterNumber}:chat:start`, { chapter: chapterNumber, profileId: input.profileId ?? null });
+          const result = await runChapterAssistant({
+            bookId,
+            chapterNumber,
+            messages: input.messages,
+            useStream: input.useStream,
+            includeReasoning: input.includeReasoning,
+            profileId: input.profileId,
+          });
+          job.result = { ok: true, ...result };
+          updateJobStep(job, `ch${chapterNumber}:chat:done`, {
+            chapter: chapterNumber,
+            profileId: result.profileId ?? input.profileId ?? null,
+            model: result.model,
+          });
+          logInfo("chapter.chat.done", {
+            bookId,
+            chapterNumber,
+            jobId: job.id,
+            profileId: result.profileId ?? input.profileId ?? null,
+            model: result.model,
+          });
+          finishJob(job, { chapter: chapterNumber, model: result.model });
+        } catch (error) {
+          failJob(job, error);
+          logError("chapter.chat.error", {
+            bookId,
+            chapter: chapterNumber,
+            jobId: job.id,
+            error: describeError(error),
+          });
+        }
+      })();
+      res.json({ ok: true, jobId: job.id, queued: true });
+      return;
+    }
     const result = await runChapterAssistant({
       bookId,
       chapterNumber,

@@ -1,7 +1,8 @@
 "use client";
 
-import { App, Alert, Button, Card, Checkbox, Descriptions, Input, Modal, Select, Space, Table, Typography } from "antd";
+import { App, Alert, Button, Card, Checkbox, Descriptions, Dropdown, Grid, Input, Modal, Select, Space, Statistic, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
+import { MoreOutlined } from "@ant-design/icons";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ChatPanel } from "./chat-panel";
@@ -49,17 +50,10 @@ const CHAPTER_CHAT_STORAGE_PREFIX = "inkos.chapter-chat.";
 const CHAPTER_CHAT_OPTIONS_STORAGE_PREFIX = "inkos.chapter-chat-options.";
 const CHAPTER_CHAT_PROFILE_STORAGE_PREFIX = "inkos.chapter-chat-profile.";
 
-function compactLines(input: string, limit = 8): string[] {
-  return input
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .filter((line) => /^(?:[-*•]\s|\d+[.、)]\s*)/.test(line) || line.includes("问题") || line.includes("策略") || line.includes("修正"))
-    .slice(0, limit);
-}
-
 export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: string; embedded?: boolean }>) {
   const { message } = App.useApp();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>([]);
   const [detail, setDetail] = useState<ChapterDetail | null>(null);
   const [actionResult, setActionResult] = useState<unknown>(null);
@@ -74,7 +68,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [chatIncludeReasoning, setChatIncludeReasoning] = useState(false);
   const [chatProfiles, setChatProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
   const [chatProfileId, setChatProfileId] = useState<string | undefined>(undefined);
-  const [applyingChatRevision, setApplyingChatRevision] = useState(false);
   const [replacingChapter, setReplacingChapter] = useState(false);
   const [replacePreviewOpen, setReplacePreviewOpen] = useState(false);
   const [replacePreviewLoading, setReplacePreviewLoading] = useState(false);
@@ -242,12 +235,13 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
 
   function sendChapterChat(): void {
     if (!chatChapter || !chatDraft.trim() || chatting) return;
+    const chapterNumber = chatChapter.number;
     const nextMessages = [...chatMessages, { role: "user" as const, content: chatDraft.trim() }];
     setChatMessages(nextMessages);
-    persistChapterChat(chatChapter.number, nextMessages);
+    persistChapterChat(chapterNumber, nextMessages);
     setChatDraft("");
     setChatting(true);
-    void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chatChapter.number}/chat`, {
+    void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chapterNumber}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -255,20 +249,29 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         useStream: chatUseStream,
         includeReasoning: chatIncludeReasoning,
         profileId: chatProfileId,
+        async: true,
       }),
     })
       .then(async (response) => {
         const data = await response.json();
-        if (!response.ok || !data?.ok) {
+        if (!response.ok || !data?.ok || !data?.jobId) {
           throw new Error(data?.error ?? "章节对话失败");
         }
+        const result = await pollJob(String(data.jobId)) as {
+          ok?: boolean;
+          reply?: string;
+          reasoning?: string;
+        };
+        const content = typeof result?.reply === "string" && result.reply.trim()
+          ? result.reply.trim()
+          : "已完成本次处理，但没有返回可显示的正文回复。";
         setChatMessages((prev) => {
           const updated = [...prev, {
             role: "assistant" as const,
-            content: String(data.reply ?? ""),
-            reasoning: typeof data.reasoning === "string" ? data.reasoning : undefined,
+            content,
+            reasoning: typeof result?.reasoning === "string" ? result.reasoning : undefined,
           }];
-          persistChapterChat(chatChapter.number, updated);
+          persistChapterChat(chapterNumber, updated);
           return updated;
         });
       })
@@ -276,86 +279,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         void message.error(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setChatting(false));
-  }
-
-  function applyChatRevision(): void {
-    if (!chatChapter || chatMessages.length === 0 || applyingChatRevision) return;
-    setApplyingChatRevision(true);
-
-    const authorMessages = chatMessages
-      .filter((item) => item.role === "user")
-      .map((item) => item.content.trim())
-      .filter(Boolean);
-
-    const latestAssistantMessage = [...chatMessages]
-      .reverse()
-      .find((item) => item.role === "assistant" && item.content.trim().length > 0)?.content.trim() ?? "";
-
-    const latestAuthorRequest = authorMessages.at(-1) ?? "";
-    const authorRequirements = authorMessages.map((content, index) => `- 作者要求${index + 1}：${content}`).join("\n");
-    const assistantSuggestionLines = compactLines(latestAssistantMessage, 10);
-    const assistantSuggestions = assistantSuggestionLines.length > 0
-      ? assistantSuggestionLines.map((content, index) => `- 助手要点${index + 1}：${content}`).join("\n")
-      : "- （无）";
-
-    const instruction = [
-      "请直接按以下修改单重构本章，并输出修改后的完整章节。",
-      "优先级：作者明确要求 > 助手建议 > 原稿。",
-      "不要解释，不要分析，不要给方案，只做正文重构。",
-      "如果作者要求与原稿冲突，以作者要求为准。",
-      "",
-      "## 本次直接修改目标",
-      latestAuthorRequest ? latestAuthorRequest : "按下面的作者要求与助手建议综合修改本章。",
-      "",
-      "## 作者明确要求",
-      authorRequirements || "- （无）",
-      "",
-      "## 助手要点摘要",
-      assistantSuggestions,
-    ].join("\n");
-
-    void fetch("/api/inkos/revise", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        bookId,
-        chapter: chatChapter.number,
-        mode: "rework",
-        instruction,
-        async: true,
-      }),
-    })
-      .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok || !data?.ok || !data?.jobId) {
-          setActionResult({
-            request: {
-              bookId,
-              chapter: chatChapter.number,
-              mode: "rework",
-              instruction,
-            },
-            response: data,
-          });
-          throw new Error(data?.error ?? "按对话修改失败");
-        }
-        const result = await pollJob(String(data.jobId));
-        setActionResult({
-          request: {
-            bookId,
-            chapter: chatChapter.number,
-            mode: "rework",
-            instruction,
-          },
-          response: result,
-        });
-        void message.success("已按当前对话修改本章");
-        await loadChapters();
-      })
-      .catch((error: unknown) => {
-        void message.error(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => setApplyingChatRevision(false));
   }
 
   function latestAssistantReply(): string {
@@ -412,6 +335,26 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       .finally(() => setReplacePreviewLoading(false));
   }
 
+  const chatMenuItems = [
+    {
+      key: "clear",
+      label: "清空对话",
+      disabled: chatting,
+      onClick: () => {
+        if (!chatChapter) return;
+        setChatMessages([]);
+        setChatDraft("");
+        persistChapterChat(chatChapter.number, []);
+      },
+    },
+    {
+      key: "replace",
+      label: "用最后回复替换全文",
+      disabled: chatting || replacingChapter || !latestAssistantReply(),
+      onClick: () => replaceChapterWithLatestReply(),
+    },
+  ];
+
   const columns: ColumnsType<ChapterMeta> = [
     {
       title: "操作",
@@ -451,15 +394,61 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const content = (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card
+        size={isMobile ? "small" : "default"}
         title={embedded ? "章节区" : `章节列表 · ${bookId}`}
         extra={(
-          <Space>
-            {!embedded ? <Link href={`/books/${encodeURIComponent(bookId)}`}><Button>返回工作台</Button></Link> : null}
-            <Button loading={isRefreshing} onClick={() => void loadChapters()}>刷新</Button>
-          </Space>
+          <div style={{ display: "flex", gap: 8, flexDirection: isMobile ? "column" : "row", width: isMobile ? 120 : undefined }}>
+            {!embedded ? <Link href={`/books/${encodeURIComponent(bookId)}`}><Button block>返回工作台</Button></Link> : null}
+            <Button block loading={isRefreshing} onClick={() => void loadChapters()}>刷新</Button>
+          </div>
         )}
+        bodyStyle={isMobile ? { padding: 12 } : undefined}
       >
-        <Table rowKey="number" columns={columns} dataSource={chapters.slice()} pagination={{ pageSize: 10 }} />
+        {isMobile ? (
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            {chapters.map((row) => (
+              <Card key={row.number} size="small" bodyStyle={{ padding: 14 }}>
+                <Space direction="vertical" size={12} style={{ width: "100%" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <Typography.Title level={5} style={{ margin: 0 }}>
+                      Ch.{row.number} · {row.title}
+                    </Typography.Title>
+                    <Space wrap size={[8, 8]}>
+                      <Tag color="blue">{row.status}</Tag>
+                      <Tag>{row.wordCount.toLocaleString()} 字</Tag>
+                    </Space>
+                  </div>
+
+                  <IssueTags issues={row.auditIssues} maxVisible={3} />
+
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                    <Button loading={openingChapter === row.number} onClick={() => loadChapterDetail(row.number)}>打开</Button>
+                    <Button onClick={() => openChapterChat(row)}>对话</Button>
+                    <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}>
+                      <Button block>详情</Button>
+                    </Link>
+                    <ChapterActions
+                      bookId={bookId}
+                      chapter={row.number}
+                      onResult={setActionResult}
+                      onDone={() => void loadChapters()}
+                      compact
+                    />
+                  </div>
+
+                  {row.status === "ready-for-review" ? (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                      <Button loading={reviewAction === `approve:${row.number}`} onClick={() => callReviewAction("approve", row.number)}>通过</Button>
+                      <Button danger loading={reviewAction === `reject:${row.number}`} onClick={() => callReviewAction("reject", row.number)}>驳回</Button>
+                    </div>
+                  ) : null}
+                </Space>
+              </Card>
+            ))}
+          </Space>
+        ) : (
+          <Table rowKey="number" columns={columns} dataSource={chapters.slice()} pagination={{ pageSize: 10 }} scroll={{ x: 1100 }} />
+        )}
       </Card>
 
       <Card title={embedded ? "当前选中章节" : "已选章节"}>
@@ -490,15 +479,15 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           if (!chatting) setChatChapter(null);
         }}
         footer={null}
-        width={CHAT_MODAL_WIDTH}
-        style={{ top: 20 }}
-        styles={{ body: { paddingTop: 12, height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
+        width={isMobile ? "94vw" : CHAT_MODAL_WIDTH}
+        style={{ top: isMobile ? 8 : 20 }}
+        styles={{ body: { paddingTop: 8, height: isMobile ? "76vh" : CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnClose
-        title={chatChapter ? `章节对话 · Ch.${chatChapter.number} ${chatChapter.title}` : "章节对话"}
+        title={chatChapter ? `Ch.${chatChapter.number} · ${chatChapter.title}` : "章节对话"}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", height: "100%", minHeight: 0 }}>
           <Typography.Text type="secondary" style={{ flexShrink: 0 }}>
-            这里用于快速讨论和小范围修改。系统会自动读取本章正文、审计问题、书籍设定和长期创作约束；整章审计/修订请继续用章节区按钮手动操作。
+            围绕本章讨论问题与修改方向。
           </Typography.Text>
           <ChatPanel
             messages={chatMessages}
@@ -558,26 +547,11 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
               </Space>
             )}
             footerRight={(
-              <>
-                <Button
-                  onClick={() => {
-                    if (!chatChapter) return;
-                    setChatMessages([]);
-                    setChatDraft("");
-                    persistChapterChat(chatChapter.number, []);
-                  }}
-                  disabled={chatting || applyingChatRevision}
-                >
-                  清空对话
+              <Dropdown menu={{ items: chatMenuItems }} trigger={["click"]}>
+                <Button icon={<MoreOutlined />} disabled={chatting || replacingChapter}>
+                  更多
                 </Button>
-                <Button onClick={applyChatRevision} loading={applyingChatRevision} disabled={chatting || chatMessages.length === 0}>
-                  按当前对话修改本章
-                </Button>
-                <Button onClick={replaceChapterWithLatestReply} loading={replacingChapter} disabled={chatting || applyingChatRevision || !latestAssistantReply()}>
-                  用最后回复替换全文
-                </Button>
-                <Button onClick={() => setChatChapter(null)} disabled={chatting || applyingChatRevision || replacingChapter}>关闭</Button>
-              </>
+              </Dropdown>
             )}
             containerStyle={{ flex: 1, minHeight: 0 }}
           />
@@ -604,7 +578,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "1fr 1fr",
+              gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr",
               gap: 16,
               width: "100%",
             }}
