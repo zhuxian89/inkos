@@ -1946,6 +1946,7 @@ async function runChapterAssistant(input: {
   const pendingHooks = await readStoryFile(input.bookId, "pending_hooks.md");
   const chapterSummaries = await readStoryFile(input.bookId, "chapter_summaries.md");
   const bookDir = state.bookDir(input.bookId);
+  const pathSnapshot = await hydrateChapterChatPathSnapshot(buildChapterChatPathSnapshot(input.bookId, bookDir));
   const dialogueModel = (config.modelOverrides?.dialogue ?? config.llm.model).trim();
   const llm = input.profileId?.trim()
     ? await createClientFromOptionalProfile(input.profileId)
@@ -1990,6 +1991,8 @@ async function runChapterAssistant(input: {
     currentState.trim() ? `当前状态卡（${storyFilePath(input.bookId, "current_state.md")}）：\n${currentState.trim()}` : "",
     pendingHooks.trim() ? `伏笔池（${storyFilePath(input.bookId, "pending_hooks.md")}）：\n${pendingHooks.trim().slice(-2500)}` : "",
     chapterSummaries.trim() ? `章节摘要（${storyFilePath(input.bookId, "chapter_summaries.md")}）：\n${chapterSummaries.trim().slice(-3000)}` : "",
+    `已确认真实章节文件：\n- ${pathSnapshot.chapterFiles.join("\n- ")}`,
+    `已确认真实 story 文件：\n- ${pathSnapshot.storyFiles.join("\n- ")}`,
     `当前章节正文：\n${chapterContent.slice(0, 12000)}`,
   ]
     .filter(Boolean)

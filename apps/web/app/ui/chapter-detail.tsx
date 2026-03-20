@@ -36,13 +36,12 @@ export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: str
       <Card
         style={{
           borderRadius: 24,
-          overflow: "hidden",
-          background: "linear-gradient(135deg, rgba(16,29,35,0.96) 0%, rgba(34,56,60,0.92) 52%, rgba(106,134,126,0.84) 100%)",
+          background: "rgba(255,255,255,0.94)",
         }}
-        title={<span style={{ color: "#f2f7f6" }}>{`章节详情 · ${bookId} / ${chapter}`}</span>}
+        title={<span style={{ color: "#21353b" }}>{`章节详情 · ${bookId} / ${chapter}`}</span>}
         extra={(
           <Space>
-            <Link href={`/books/${encodeURIComponent(bookId)}/chapters`}><Button>返回章节列表</Button></Link>
+            <Link href={`/books/${encodeURIComponent(bookId)}`}><Button>返回工作台</Button></Link>
           </Space>
         )}
       >

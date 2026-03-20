@@ -432,14 +432,15 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
                     <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}>
                       <Button block>详情</Button>
                     </Link>
-                    <ChapterActions
-                      bookId={bookId}
-                      chapter={row.number}
-                      onResult={setActionResult}
-                      onDone={() => void loadChapters()}
-                      compact
-                    />
                   </div>
+
+                  <ChapterActions
+                    bookId={bookId}
+                    chapter={row.number}
+                    onResult={setActionResult}
+                    onDone={() => void loadChapters()}
+                    compact
+                  />
 
                   {row.status === "ready-for-review" ? (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
@@ -453,20 +454,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           </Space>
         ) : (
           <Table rowKey="number" columns={columns} dataSource={chapters.slice()} pagination={{ pageSize: 10 }} scroll={{ x: 1100 }} />
-        )}
-      </Card>
-
-      <Card title={embedded ? "当前选中章节" : "已选章节"} style={{ borderRadius: 22, background: "rgba(255,255,255,0.9)" }}>
-        {!detail ? (
-          <Typography.Text type="secondary">点击“打开”查看章节元信息。</Typography.Text>
-        ) : (
-          <Descriptions column={1} bordered size="small">
-            <Descriptions.Item label="是否成功">{String(detail.ok)}</Descriptions.Item>
-            <Descriptions.Item label="章节号">{detail.chapter ?? "-"}</Descriptions.Item>
-            <Descriptions.Item label="标题">{detail.title ?? "-"}</Descriptions.Item>
-            <Descriptions.Item label="文件路径">{detail.filePath ?? "-"}</Descriptions.Item>
-            <Descriptions.Item label="错误">{detail.error ?? "-"}</Descriptions.Item>
-          </Descriptions>
         )}
       </Card>
 
