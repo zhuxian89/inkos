@@ -1,0 +1,50 @@
+services:
+  service-dev:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    environment:
+      PORT: 4010
+      INKOS_PROJECT_ROOT: /data/project
+      INKOS_HOME: /root/.inkos
+      CHOKIDAR_USEPOLLING: "1"
+      WATCHPACK_POLLING: "true"
+    volumes:
+      - .:/app
+      - ${HOME}/inkos-data/project:/data/project
+      - ${HOME}/inkos-data/inkos-home:/root/.inkos
+      - inkos-dev-node-modules:/app/node_modules
+      - inkos-dev-pnpm-store:/root/.local/share/pnpm/store
+    ports:
+      - "4010:4010"
+    command: >-
+      bash -lc "corepack enable &&
+      pnpm install --frozen-lockfile &&
+      pnpm --filter @actalk/inkos-core build &&
+      pnpm --filter @actalk/inkos-service dev"
+    restart: unless-stopped
+
+  web-dev:
+    image: node:22-bookworm-slim
+    working_dir: /app
+    environment:
+      PORT: 3000
+      INKOS_SERVICE_URL: http://service-dev:4010
+      CHOKIDAR_USEPOLLING: "1"
+      WATCHPACK_POLLING: "true"
+    depends_on:
+      - service-dev
+    volumes:
+      - .:/app
+      - inkos-dev-node-modules:/app/node_modules
+      - inkos-dev-pnpm-store:/root/.local/share/pnpm/store
+    ports:
+      - "13006:3000"
+    command: >-
+      bash -lc "corepack enable &&
+      pnpm install --frozen-lockfile &&
+      pnpm --filter @actalk/inkos-web dev"
+    restart: unless-stopped
+
+volumes:
+  inkos-dev-node-modules:
+  inkos-dev-pnpm-store:
