@@ -253,18 +253,39 @@ export function InkosConsole() {
         chapterWords: values.chapterWords || 3000,
         context: values.context || undefined,
         currentBrief: initAssistantBrief || undefined,
+        async: true,
         messages: nextMessages,
       }),
     })
       .then(async (response) => {
-        const data = (await response.json()) as InitAssistantResult;
-        if (!response.ok || !data.ok) {
+        const data = await response.json() as { ok?: boolean; error?: string; jobId?: string };
+        if (!response.ok || !data.ok || !data.jobId) {
           setError(data.error ?? "智能初始化对话失败");
           return;
         }
-        const reply = data.reply?.trim() || "我已经整理好了当前方向，你可以继续补充。";
+        const result = await new Promise<InitAssistantResult>((resolve, reject) => {
+          const timer = setInterval(async () => {
+            try {
+              const pollRes = await fetch(`/api/inkos/jobs/${encodeURIComponent(String(data.jobId))}`, { cache: "no-store" });
+              const job = await pollRes.json();
+              if (job.status === "done") {
+                clearInterval(timer);
+                resolve(job.result as InitAssistantResult);
+                return;
+              }
+              if (job.status === "error") {
+                clearInterval(timer);
+                reject(new Error(job.error ?? "智能初始化对话失败"));
+              }
+            } catch (error) {
+              clearInterval(timer);
+              reject(error);
+            }
+          }, 3000);
+        });
+        const reply = result.reply?.trim() || "我已经整理好了当前方向，你可以继续补充。";
         setInitAssistantMessages((prev) => [...prev, { role: "assistant", content: reply }]);
-        setInitAssistantBrief(data.brief ?? "");
+        setInitAssistantBrief(result.brief ?? "");
       })
       .catch((runError: unknown) => {
         setError(runError instanceof Error ? runError.message : String(runError));

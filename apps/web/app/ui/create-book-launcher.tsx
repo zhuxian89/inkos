@@ -210,25 +210,46 @@ export function CreateBookLauncher(props: Readonly<{
         useStream: assistantUseStream,
         includeReasoning: assistantIncludeReasoning,
         profileId: assistantProfileId,
+        async: true,
         messages: nextMessages,
       }),
     })
       .then(async (response) => {
-        const data = (await response.json()) as InitAssistantResult;
-        if (!response.ok || !data.ok) {
+        const data = await response.json() as { ok?: boolean; error?: string; jobId?: string };
+        if (!response.ok || !data.ok || !data.jobId) {
           void message.error(data.error ?? "智能初始化对话失败");
           return;
         }
+        const result = await new Promise<InitAssistantResult>((resolve, reject) => {
+          const timer = setInterval(async () => {
+            try {
+              const pollRes = await fetch(`/api/inkos/jobs/${encodeURIComponent(String(data.jobId))}`, { cache: "no-store" });
+              const job = await pollRes.json();
+              if (job.status === "done") {
+                clearInterval(timer);
+                resolve(job.result as InitAssistantResult);
+                return;
+              }
+              if (job.status === "error") {
+                clearInterval(timer);
+                reject(new Error(job.error ?? "智能初始化对话失败"));
+              }
+            } catch (error) {
+              clearInterval(timer);
+              reject(error);
+            }
+          }, 3000);
+        });
         setAssistantMessages((prev) => {
           const updated = [...prev, {
             role: "assistant" as const,
-            content: data.reply?.trim() || "我已经整理好了当前方向，你可以继续补充。",
-            reasoning: typeof data.reasoning === "string" ? data.reasoning : undefined,
+            content: result.reply?.trim() || "我已经整理好了当前方向，你可以继续补充。",
+            reasoning: typeof result.reasoning === "string" ? result.reasoning : undefined,
           }];
           persistAssistantMessages(updated);
           return updated;
         });
-        const nextBrief = data.brief ?? "";
+        const nextBrief = result.brief ?? "";
         setAssistantBrief(nextBrief);
         persistAssistantBrief(nextBrief);
       })

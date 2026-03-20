@@ -19,6 +19,7 @@ import {
   Tag,
   Typography,
   Upload,
+  Grid,
 } from "antd";
 import { UploadOutlined } from "@ant-design/icons";
 import Link from "next/link";
@@ -128,6 +129,8 @@ const BOOK_ASSISTANT_PROFILE_STORAGE_PREFIX = "inkos.book-init-profile.";
 
 export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const { message } = App.useApp();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const [statusData, setStatusData] = useState<BookStatusResponse | null>(null);
   const [bookConfigData, setBookConfigData] = useState<BookConfigResponse | null>(null);
   const [result, setResult] = useState<unknown>(null);
@@ -239,6 +242,29 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     const selected = stored && profiles.some((item) => item.id === stored) ? stored : fallback ?? undefined;
     setAssistantProfileId(selected);
     persistAssistantProfileId(selected);
+  }
+
+  async function pollJob(jobId: string): Promise<unknown> {
+    return await new Promise((resolve, reject) => {
+      const timer = setInterval(async () => {
+        try {
+          const response = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+          const job = await response.json();
+          if (job.status === "done") {
+            clearInterval(timer);
+            resolve(job.result);
+            return;
+          }
+          if (job.status === "error") {
+            clearInterval(timer);
+            reject(new Error(job.error ?? "任务执行失败"));
+          }
+        } catch (error) {
+          clearInterval(timer);
+          reject(error);
+        }
+      }, 3000);
+    });
   }
 
   function clearAssistantConversation(): void {
@@ -527,27 +553,29 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         useStream: assistantUseStream,
         includeReasoning: assistantIncludeReasoning,
         profileId: assistantProfileId,
+        async: true,
         messages: nextMessages,
       }),
     })
       .then(async (response) => {
-        const data = (await response.json()) as InitAssistantResult;
-        if (!response.ok || !data.ok) {
+        const data = await response.json() as { ok?: boolean; error?: string; jobId?: string };
+        if (!response.ok || !data.ok || !data.jobId) {
           throw new Error(data.error ?? "智能初始化对话失败");
         }
+        const result = (await pollJob(String(data.jobId))) as InitAssistantResult;
         const updatedMessages = [
           ...nextMessages,
           {
             role: "assistant" as const,
-            content: data.reply?.trim() || "我已经根据当前书籍设定整理了修改方向。",
-            reasoning: typeof data.reasoning === "string" ? data.reasoning : undefined,
+            content: result.reply?.trim() || "我已经根据当前书籍设定整理了修改方向。",
+            reasoning: typeof result.reasoning === "string" ? result.reasoning : undefined,
           },
         ];
         setAssistantMessages(updatedMessages);
         persistAssistantMessages(updatedMessages);
-        if (typeof data.brief === "string") {
-          setAuthorBrief(data.brief);
-          persistAssistantBrief(data.brief);
+        if (typeof result.brief === "string") {
+          setAuthorBrief(result.brief);
+          persistAssistantBrief(result.brief);
         }
       })
       .catch((error: unknown) => {
@@ -600,13 +628,13 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               <Form.Item name="context" label="本次续写要求（可选）">
                 <Input.TextArea rows={6} placeholder="只写这一章要发生什么，比如：推进主线冲突、加快节奏、结尾抛出钩子。" />
               </Form.Item>
-              <Space align="center" size={12}>
-                <Button type="primary" htmlType="submit" size="large" loading={isWriting}>开始续写</Button>
-                <Button size="large" loading={toolAction === "draft"} onClick={() => draftOnly(writeForm.getFieldsValue())}>
+              <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", gap: 12, alignItems: isMobile ? "stretch" : "center" }}>
+                <Button type="primary" htmlType="submit" size="large" block={isMobile} loading={isWriting}>开始续写</Button>
+                <Button size="large" block={isMobile} loading={toolAction === "draft"} onClick={() => draftOnly(writeForm.getFieldsValue())}>
                   只写草稿
                 </Button>
                 {writeStep ? <Typography.Text type="secondary">{writeStep}</Typography.Text> : null}
-              </Space>
+              </div>
             </Form>
           </Space>
         </Card>
@@ -784,25 +812,47 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card
-        title={`书籍工作台 · ${bookId}`}
-        extra={(
-          <Space>
-            <Link href={`/books/${encodeURIComponent(bookId)}/audit`}><Button>专项审计</Button></Link>
-            <Button loading={isRefreshing} onClick={() => void loadBookPanels()}>刷新</Button>
-          </Space>
+        size={isMobile ? "small" : "default"}
+        style={{
+          borderRadius: 26,
+          overflow: "hidden",
+          background: "linear-gradient(135deg, rgba(17,31,37,0.96) 0%, rgba(34,56,60,0.92) 48%, rgba(96,130,122,0.86) 100%)",
+          boxShadow: "0 24px 56px rgba(10,18,24,0.18)",
+        }}
+        title={(
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <Typography.Text style={{ color: "rgba(213, 227, 223, 0.72)", letterSpacing: "0.16em", textTransform: "uppercase", fontSize: 11 }}>
+              书阁主案 · 卷宗总览
+            </Typography.Text>
+            <Typography.Title level={isMobile ? 5 : 4} ellipsis={{ tooltip: statusData?.status?.title ?? bookId }} style={{ margin: 0, color: "#f2f7f6" }}>
+              {statusData?.status?.title ?? bookId}
+            </Typography.Title>
+            <Typography.Text style={{ color: "rgba(224, 236, 233, 0.78)" }} ellipsis={{ tooltip: bookId }}>
+              书籍工作台 · {bookId}
+            </Typography.Text>
+          </div>
         )}
+        extra={null}
+        bodyStyle={isMobile ? { padding: 12 } : { padding: 18 }}
       >
-        <Row gutter={[16, 16]}>
-          <Col xs={24} sm={12} lg={6}><Card><Statistic title="状态" value={statusData?.status?.status ? labelBookStatus(statusData.status.status) : "-"} /></Card></Col>
-          <Col xs={24} sm={12} lg={6}><Card><Statistic title="已写章节" value={statusData?.status?.chaptersWritten ?? 0} /></Card></Col>
-          <Col xs={24} sm={12} lg={6}><Card><Statistic title="总字数" value={statusData?.status?.totalWords ?? 0} /></Card></Col>
-          <Col xs={24} sm={12} lg={6}><Card><Statistic title="下一章" value={statusData?.status?.nextChapter ?? 1} prefix="Ch." /></Card></Col>
+        <Space wrap size={[8, 8]} style={{ marginBottom: 12 }}>
+          {statusData?.status?.genre ? <Tag color="default">{labelGenre(statusData.status.genre)}</Tag> : null}
+          {statusData?.status?.platform ? <Tag color="default">{labelPlatform(statusData.status.platform)}</Tag> : null}
+          {statusData?.status?.status ? <Tag color="cyan">{labelBookStatus(statusData.status.status)}</Tag> : null}
+        </Space>
+        <Row gutter={[12, 12]}>
+          <Col xs={12} sm={12} lg={6}><Card size={isMobile ? "small" : "default"} style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }} bodyStyle={isMobile ? { padding: 14 } : { padding: 16 }}><Statistic title="状态" value={statusData?.status?.status ? labelBookStatus(statusData.status.status) : "-"} valueStyle={{ fontSize: isMobile ? 18 : 26, color: "#214047" }} /></Card></Col>
+          <Col xs={12} sm={12} lg={6}><Card size={isMobile ? "small" : "default"} style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }} bodyStyle={isMobile ? { padding: 14 } : { padding: 16 }}><Statistic title="已写章节" value={statusData?.status?.chaptersWritten ?? 0} valueStyle={{ fontSize: isMobile ? 18 : 26, color: "#214047" }} /></Card></Col>
+          <Col xs={12} sm={12} lg={6}><Card size={isMobile ? "small" : "default"} style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }} bodyStyle={isMobile ? { padding: 14 } : { padding: 16 }}><Statistic title="总字数" value={statusData?.status?.totalWords ?? 0} valueStyle={{ fontSize: isMobile ? 18 : 26, color: "#214047" }} /></Card></Col>
+          <Col xs={12} sm={12} lg={6}><Card size={isMobile ? "small" : "default"} style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }} bodyStyle={isMobile ? { padding: 14 } : { padding: 16 }}><Statistic title="下一章" value={statusData?.status?.nextChapter ?? 1} prefix="Ch." valueStyle={{ fontSize: isMobile ? 18 : 26, color: "#214047" }} /></Card></Col>
         </Row>
       </Card>
 
-      <Tabs defaultActiveKey="write" items={tabs} />
+      <Card style={{ borderRadius: 24, background: "rgba(255,255,255,0.88)" }} bodyStyle={{ paddingTop: 10 }}>
+        <Tabs defaultActiveKey="write" items={tabs} size={isMobile ? "small" : "middle"} tabBarGutter={isMobile ? 12 : 32} />
+      </Card>
 
-      <Card title="最近结果">
+      <Card title="最近结果" style={{ borderRadius: 24, background: "rgba(255,255,255,0.9)" }}>
         {!result ? (
           <Typography.Text type="secondary">执行“续写 / 保存设定 / 保存简报 / 书籍工具”后这里显示结果。</Typography.Text>
         ) : (
