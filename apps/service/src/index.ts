@@ -39,7 +39,7 @@ const LOG_STRING_PREVIEW_LIMIT = 120;
 // ---------------------------------------------------------------------------
 interface Job {
   readonly id: string;
-  readonly type: "write-next" | "create-book" | "command" | "audit" | "revise" | "chapter-chat";
+  readonly type: "write-next" | "create-book" | "command" | "audit" | "revise" | "chapter-chat" | "init-assistant-chat";
   status: "running" | "done" | "error";
   step: string;
   bookId?: string;
@@ -1311,6 +1311,34 @@ function formatChapterAuditDetails(chapterMeta?: ChapterMeta, limit = 8): string
   ].join("\n");
 }
 
+function buildChapterChatPathSnapshot(bookId: string, bookDir: string): {
+  readonly bookDir: string;
+  readonly chaptersDir: string;
+  readonly storyDir: string;
+  readonly chapterFiles: string[];
+  readonly storyFiles: string[];
+} {
+  const chaptersDir = join(bookDir, "chapters");
+  const storyDir = storyDirPath(bookId);
+  return {
+    bookDir,
+    chaptersDir,
+    storyDir,
+    chapterFiles: [],
+    storyFiles: [],
+  };
+}
+
+async function hydrateChapterChatPathSnapshot(snapshot: ReturnType<typeof buildChapterChatPathSnapshot>): Promise<ReturnType<typeof buildChapterChatPathSnapshot>> {
+  const chapterEntries = await readdir(snapshot.chaptersDir, { withFileTypes: true }).catch(() => []);
+  const storyEntries = await readdir(snapshot.storyDir, { withFileTypes: true }).catch(() => []);
+  return {
+    ...snapshot,
+    chapterFiles: chapterEntries.filter((entry) => entry.isFile()).map((entry) => join(snapshot.chaptersDir, entry.name)).sort(),
+    storyFiles: storyEntries.filter((entry) => entry.isFile()).map((entry) => join(snapshot.storyDir, entry.name)).sort(),
+  };
+}
+
 function ensureChapterChatPathAllowed(bookDir: string, rawPath: string): void {
   const normalized = normalizeProfileToolPath(rawPath);
   const relative = normalized.startsWith(bookDir) ? normalized.slice(bookDir.length) : null;
@@ -1327,6 +1355,7 @@ async function executeChapterChatTool(
 ): Promise<string> {
   const state = new StateManager(projectRoot);
   const bookDir = state.bookDir(input.bookId);
+  const pathSnapshot = await hydrateChapterChatPathSnapshot(buildChapterChatPathSnapshot(input.bookId, bookDir));
 
   if (
     name === "read_text_file"
@@ -1335,14 +1364,40 @@ async function executeChapterChatTool(
     || name === "make_directory"
     || name === "delete_path"
   ) {
-    ensureChapterChatPathAllowed(bookDir, String(args.path ?? ""));
-    return executeProfileChatTool(name, args);
+    try {
+      ensureChapterChatPathAllowed(bookDir, String(args.path ?? ""));
+      return await executeProfileChatTool(name, args);
+    } catch (error) {
+      return JSON.stringify({
+        ok: false,
+        recoverable: true,
+        tool: name,
+        error: describeError(error),
+        nextAction: "call get_current_chapter_paths",
+        hint: "路径错误后，不要继续猜路径。请先重新调用 get_current_chapter_paths，再严格从返回的 chapterFiles / storyFiles 里选择真实存在的文件。",
+        chapterFiles: pathSnapshot.chapterFiles,
+        storyFiles: pathSnapshot.storyFiles,
+      }, null, 2);
+    }
   }
 
   if (name === "move_path") {
-    ensureChapterChatPathAllowed(bookDir, String(args.from ?? ""));
-    ensureChapterChatPathAllowed(bookDir, String(args.to ?? ""));
-    return executeProfileChatTool(name, args);
+    try {
+      ensureChapterChatPathAllowed(bookDir, String(args.from ?? ""));
+      ensureChapterChatPathAllowed(bookDir, String(args.to ?? ""));
+      return await executeProfileChatTool(name, args);
+    } catch (error) {
+      return JSON.stringify({
+        ok: false,
+        recoverable: true,
+        tool: name,
+        error: describeError(error),
+        nextAction: "call get_current_chapter_paths",
+        hint: "路径错误后，不要继续猜路径。请先重新调用 get_current_chapter_paths，再严格从返回的 chapterFiles / storyFiles 里选择真实存在的文件。",
+        chapterFiles: pathSnapshot.chapterFiles,
+        storyFiles: pathSnapshot.storyFiles,
+      }, null, 2);
+    }
   }
 
   const bookId = input.bookId;
@@ -1354,8 +1409,6 @@ async function executeChapterChatTool(
       const index = await state.loadChapterIndex(bookId);
       const chapterMeta = index.find((item) => item.number === chapterNumber);
       const chapterFile = await findChapterFile(bookDir, chapterNumber, chapterMeta?.title);
-      const chaptersDir = join(bookDir, "chapters");
-      const storyDir = storyDirPath(bookId);
       return JSON.stringify({
         ok: true,
         bookId,
@@ -1364,13 +1417,15 @@ async function executeChapterChatTool(
         chapterTitle: chapterMeta?.title ?? null,
         projectRoot,
         bookDir,
-        chaptersDir,
-        storyDir,
+        chaptersDir: pathSnapshot.chaptersDir,
+        storyDir: pathSnapshot.storyDir,
         chapterFile,
         authorBriefPath: authorBriefPath(bookId),
         currentStatePath: storyFilePath(bookId, "current_state.md"),
         pendingHooksPath: storyFilePath(bookId, "pending_hooks.md"),
         chapterSummariesPath: storyFilePath(bookId, "chapter_summaries.md"),
+        chapterFiles: pathSnapshot.chapterFiles,
+        storyFiles: pathSnapshot.storyFiles,
       }, null, 2);
     }
 
@@ -1913,6 +1968,7 @@ async function runChapterAssistant(input: {
     "凡是涉及路径、文件位置、读取哪个文件、修改哪个文件，必须先调用 get_current_chapter_paths 工具获取真实路径，然后再继续。",
     "禁止凭经验猜测目录结构，禁止自行拼接路径，禁止把 books/<bookId>/ 这一层省略掉。",
     "如果没有先调用工具确认路径，就不要在回答中写任何具体文件路径或执行任何文件操作。",
+    "如果任何文件工具返回 recoverable=true 的路径错误，你必须立刻重新调用 get_current_chapter_paths，然后只从返回的 chapterFiles / storyFiles 中选择真实存在的文件继续执行。禁止在报错后继续猜路径。",
     "无论是否调用工具、无论是否已经完成文件修改，最后都必须输出一段面向用户的中文最终回复。",
     "如果你修改了文件，最终回复必须明确告诉用户你改了什么；如果你只读取了文件，也必须明确告诉用户你看了什么以及下一步建议。",
     "禁止只调用工具后直接结束，禁止把最终回复留空。",
@@ -2822,6 +2878,7 @@ app.post("/api/init-assistant/chat", async (req, res) => {
     useStream: z.boolean().optional(),
     includeReasoning: z.boolean().optional(),
     profileId: z.string().optional(),
+    async: z.boolean().optional(),
     messages: z.array(z.object({
       role: z.enum(["user", "assistant"]),
       content: z.string().min(1),
@@ -2839,7 +2896,43 @@ app.post("/api/init-assistant/chat", async (req, res) => {
       useStream: input.useStream !== false,
       includeReasoning: input.includeReasoning === true,
       profileId: input.profileId ?? null,
+      async: input.async === true,
     });
+    if (input.async) {
+      const job = createJob({
+        type: "init-assistant-chat",
+        step: `init-assistant:queued`,
+        bookId: input.bookId,
+      });
+      startJob(job, { title: input.title, profileId: input.profileId ?? null });
+      void (async () => {
+        try {
+          updateJobStep(job, "init-assistant:start", { title: input.title, profileId: input.profileId ?? null });
+          const result = await runInitAssistant(input);
+          job.result = { ok: true, ...result };
+          updateJobStep(job, "init-assistant:done", {
+            briefLength: result.brief.length,
+            profileId: result.profileId ?? input.profileId ?? null,
+            model: result.model,
+          });
+          logInfo("init_assistant.chat.done", {
+            bookId: input.bookId ?? null,
+            title: input.title,
+            genre: input.genre,
+            jobId: job.id,
+            briefLength: result.brief.length,
+            profileId: result.profileId ?? input.profileId ?? null,
+            model: result.model,
+          });
+          finishJob(job, { model: result.model });
+        } catch (error) {
+          failJob(job, error);
+          logError("init_assistant.chat.error", { jobId: job.id, error: describeError(error) });
+        }
+      })();
+      res.json({ ok: true, jobId: job.id, queued: true });
+      return;
+    }
     const result = await runInitAssistant(input);
     logInfo("init_assistant.chat.done", {
       bookId: input.bookId ?? null,
@@ -3286,6 +3379,60 @@ app.post("/api/review/approve-all", async (req, res) => {
   } catch (error) {
     logError("review.approve_all.error", { bookId: req.body?.bookId ?? null, error: describeError(error) });
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get("/api/radar/history", async (_req, res) => {
+  try {
+    const radarDir = join(projectRoot, "radar");
+    const entries = await readdir(radarDir, { withFileTypes: true }).catch(() => []);
+    const scans = await Promise.all(entries
+      .filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
+      .map(async (entry) => {
+        const fullPath = join(radarDir, entry.name);
+        const raw = await readFile(fullPath, "utf-8");
+        const parsed = JSON.parse(raw) as {
+          timestamp?: string;
+          marketSummary?: string;
+          recommendations?: Array<unknown>;
+        };
+        const info = await stat(fullPath);
+        return {
+          id: entry.name,
+          filename: entry.name,
+          path: fullPath,
+          timestamp: parsed.timestamp ?? info.mtime.toISOString(),
+          recommendationCount: Array.isArray(parsed.recommendations) ? parsed.recommendations.length : 0,
+          marketSummary: typeof parsed.marketSummary === "string" ? parsed.marketSummary : "",
+          size: info.size,
+        };
+      }));
+    scans.sort((a, b) => String(b.timestamp).localeCompare(String(a.timestamp)));
+    res.json({ ok: true, scans });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.get("/api/radar/history/:id", async (req, res) => {
+  try {
+    const fileName = basename(req.params.id);
+    const filePath = join(projectRoot, "radar", fileName);
+    const raw = await readFile(filePath, "utf-8");
+    res.json({ ok: true, id: fileName, data: JSON.parse(raw) });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.delete("/api/radar/history/:id", async (req, res) => {
+  try {
+    const fileName = basename(req.params.id);
+    const filePath = join(projectRoot, "radar", fileName);
+    await rm(filePath, { force: true });
+    res.json({ ok: true, id: fileName });
+  } catch (error) {
+    res.status(400).json({ ok: false, error: describeError(error) });
   }
 });
 
