@@ -1311,23 +1311,40 @@ function formatChapterAuditDetails(chapterMeta?: ChapterMeta, limit = 8): string
   ].join("\n");
 }
 
+function ensureChapterChatPathAllowed(bookDir: string, rawPath: string): void {
+  const normalized = normalizeProfileToolPath(rawPath);
+  const relative = normalized.startsWith(bookDir) ? normalized.slice(bookDir.length) : null;
+  const isInsideBook = relative !== null && (relative === "" || relative.startsWith("/"));
+  if (!isInsideBook) {
+    throw new Error(`章节对话只允许访问当前书籍目录内的真实路径：${normalized}`);
+  }
+}
+
 async function executeChapterChatTool(
   input: { readonly bookId: string; readonly chapterNumber: number },
   name: string,
   args: Record<string, unknown>,
 ): Promise<string> {
+  const state = new StateManager(projectRoot);
+  const bookDir = state.bookDir(input.bookId);
+
   if (
     name === "read_text_file"
     || name === "list_directory"
     || name === "write_text_file"
     || name === "make_directory"
-    || name === "move_path"
     || name === "delete_path"
   ) {
+    ensureChapterChatPathAllowed(bookDir, String(args.path ?? ""));
     return executeProfileChatTool(name, args);
   }
 
-  const state = new StateManager(projectRoot);
+  if (name === "move_path") {
+    ensureChapterChatPathAllowed(bookDir, String(args.from ?? ""));
+    ensureChapterChatPathAllowed(bookDir, String(args.to ?? ""));
+    return executeProfileChatTool(name, args);
+  }
+
   const bookId = input.bookId;
   const chapterNumber = input.chapterNumber;
 
@@ -1336,7 +1353,6 @@ async function executeChapterChatTool(
       const book = await state.loadBookConfig(bookId);
       const index = await state.loadChapterIndex(bookId);
       const chapterMeta = index.find((item) => item.number === chapterNumber);
-      const bookDir = state.bookDir(bookId);
       const chapterFile = await findChapterFile(bookDir, chapterNumber, chapterMeta?.title);
       const chaptersDir = join(bookDir, "chapters");
       const storyDir = storyDirPath(bookId);
@@ -1900,6 +1916,7 @@ async function runChapterAssistant(input: {
     "无论是否调用工具、无论是否已经完成文件修改，最后都必须输出一段面向用户的中文最终回复。",
     "如果你修改了文件，最终回复必须明确告诉用户你改了什么；如果你只读取了文件，也必须明确告诉用户你看了什么以及下一步建议。",
     "禁止只调用工具后直接结束，禁止把最终回复留空。",
+    "最终回复必须使用规范 Markdown。标题、列表、表格、分隔线前后都要保留标准空行，禁止输出半截表格、半截标题或格式残缺的 Markdown。",
     "你可以使用 Markdown 组织回复，优先用短标题、列表、表格或代码块提高可读性。",
     "请使用自然简体中文，结论要直接，尽量给出分点建议。",
     "除文件路径、模型名、命令名这类必须保留的内容外，不要夹杂英文单词或中英混写表达。",
