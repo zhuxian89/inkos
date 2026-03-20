@@ -26,9 +26,9 @@ const assistantMarkdownComponents: Components = {
     <blockquote
       style={{
         margin: "0 0 12px",
-        padding: "4px 0 4px 12px",
-        borderLeft: "3px solid #d9d9d9",
-        color: "#595959",
+        padding: "6px 0 6px 14px",
+        borderLeft: "3px solid rgba(108, 146, 141, 0.45)",
+        color: "#52666b",
       }}
     >
       {children}
@@ -39,8 +39,8 @@ const assistantMarkdownComponents: Components = {
       style={{
         margin: "0 0 12px",
         padding: 12,
-        borderRadius: 10,
-        background: "#f6f8fa",
+        borderRadius: 12,
+        background: "rgba(29, 45, 52, 0.06)",
         overflowX: "auto",
         whiteSpace: "pre",
         lineHeight: 1.6,
@@ -169,10 +169,11 @@ export function ChatPanel(props: Readonly<{
           maxHeight: props.maxHeight ?? 460,
           display: "flex",
           flexDirection: "column",
-          border: "1px solid #f0f0f0",
-          borderRadius: 16,
-          background: "#fafafa",
+          border: "1px solid rgba(72, 103, 104, 0.08)",
+          borderRadius: 18,
+          background: "linear-gradient(180deg, rgba(250,252,251,0.96) 0%, rgba(242,247,246,0.92) 100%)",
           overflow: "hidden",
+          boxShadow: "0 14px 34px rgba(9, 17, 23, 0.08)",
         }}
       >
         <div
@@ -214,8 +215,10 @@ export function ChatPanel(props: Readonly<{
                     style={{
                       maxWidth: "78%",
                       minWidth: 0,
-                      background: item.role === "user" ? "#1677ff" : "#ffffff",
-                      color: item.role === "user" ? "#fff" : "#262626",
+                      background: item.role === "user"
+                        ? "linear-gradient(135deg, #4c7471 0%, #628f89 100%)"
+                        : "rgba(255,255,255,0.94)",
+                      color: item.role === "user" ? "#f6fffd" : "#262626",
                       borderRadius: 18,
                       padding: "14px 16px",
                       whiteSpace: item.role === "user" ? "pre-wrap" : "normal",
@@ -223,8 +226,8 @@ export function ChatPanel(props: Readonly<{
                       overflowWrap: "anywhere",
                       wordBreak: "break-word",
                       boxShadow: item.role === "user"
-                        ? "0 8px 20px rgba(22,119,255,0.18)"
-                        : "0 6px 18px rgba(0,0,0,0.06)",
+                        ? "0 10px 24px rgba(76,116,113,0.22)"
+                        : "0 8px 22px rgba(11,19,24,0.06)",
                     }}
                   >
                     <div>{item.role === "assistant" ? renderAssistantMarkdown(item.content) : item.content}</div>
@@ -251,9 +254,10 @@ export function ChatPanel(props: Readonly<{
 
         <div
           style={{
-            borderTop: "1px solid #f0f0f0",
-            background: "#fff",
+            borderTop: "1px solid rgba(72, 103, 104, 0.08)",
+            background: "rgba(255,255,255,0.86)",
             padding: 16,
+            backdropFilter: "blur(8px)",
           }}
         >
           <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%" }}>
@@ -282,7 +286,7 @@ export function ChatPanel(props: Readonly<{
               <div style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {props.footerLeft ?? <Typography.Text type="secondary">回车发送，Shift+回车换行。</Typography.Text>}
               </div>
-              <Space style={{ marginLeft: "auto", flexShrink: 0 }}>
+              <Space style={{ marginLeft: "auto", flexShrink: 0, justifyContent: "flex-end" }} wrap>
                 {props.footerRight}
                 <Button type="primary" onClick={props.onSend} loading={props.sending}>
                   {props.sendText ?? "发送"}

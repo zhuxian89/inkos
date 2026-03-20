@@ -395,19 +395,24 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card
         size={isMobile ? "small" : "default"}
-        title={embedded ? "章节区" : `章节列表 · ${bookId}`}
+        style={embedded ? { borderRadius: 22, background: "rgba(255,255,255,0.9)" } : {
+          borderRadius: 24,
+          overflow: "hidden",
+          background: "linear-gradient(135deg, rgba(16,29,35,0.96) 0%, rgba(33,55,60,0.92) 52%, rgba(102,128,121,0.84) 100%)",
+        }}
+        title={embedded ? "章节区" : <span style={{ color: "#f2f7f6" }}>{`章节卷册 · ${bookId}`}</span>}
         extra={(
           <div style={{ display: "flex", gap: 8, flexDirection: isMobile ? "column" : "row", width: isMobile ? 120 : undefined }}>
             {!embedded ? <Link href={`/books/${encodeURIComponent(bookId)}`}><Button block>返回工作台</Button></Link> : null}
             <Button block loading={isRefreshing} onClick={() => void loadChapters()}>刷新</Button>
           </div>
         )}
-        bodyStyle={isMobile ? { padding: 12 } : undefined}
+        bodyStyle={isMobile ? { padding: 12 } : { padding: 16 }}
       >
         {isMobile ? (
           <Space direction="vertical" size={12} style={{ width: "100%" }}>
             {chapters.map((row) => (
-              <Card key={row.number} size="small" bodyStyle={{ padding: 14 }}>
+              <Card key={row.number} size="small" style={{ borderRadius: 18, background: "rgba(255,255,255,0.94)" }} bodyStyle={{ padding: 14 }}>
                 <Space direction="vertical" size={12} style={{ width: "100%" }}>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <Typography.Title level={5} style={{ margin: 0 }}>
@@ -451,7 +456,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         )}
       </Card>
 
-      <Card title={embedded ? "当前选中章节" : "已选章节"}>
+      <Card title={embedded ? "当前选中章节" : "已选章节"} style={{ borderRadius: 22, background: "rgba(255,255,255,0.9)" }}>
         {!detail ? (
           <Typography.Text type="secondary">点击“打开”查看章节元信息。</Typography.Text>
         ) : (
@@ -465,7 +470,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         )}
       </Card>
 
-      <Card title="操作结果">
+      <Card title="操作结果" style={{ borderRadius: 22, background: "rgba(255,255,255,0.9)" }}>
         {!actionResult ? (
           <Typography.Text type="secondary">点击“审计 / 修订 / 通过 / 驳回”后这里显示结果。</Typography.Text>
         ) : (

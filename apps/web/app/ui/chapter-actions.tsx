@@ -17,6 +17,7 @@ export function ChapterActions(props: Readonly<{
   chapter: number;
   onResult?: (result: unknown) => void;
   onDone?: () => void | Promise<void>;
+  compact?: boolean;
 }>) {
   const { message } = App.useApp();
   const [isAuditing, setIsAuditing] = useState(false);
@@ -117,9 +118,11 @@ export function ChapterActions(props: Readonly<{
   const isRevising = reviseMode !== null;
   const isBusy = isAuditing || isRevising;
 
+  const buttonSize = props.compact ? "middle" : "small";
+
   return (
-    <Space>
-      <Button size="small" loading={isAuditing} disabled={isBusy} onClick={audit}>审计</Button>
+    <div style={{ display: "grid", gridTemplateColumns: props.compact ? "1fr 1fr" : undefined, gap: props.compact ? 8 : 0, width: props.compact ? "100%" : undefined }}>
+      <Button size={buttonSize} block={props.compact} loading={isAuditing} disabled={isBusy} onClick={audit}>审计</Button>
       <Dropdown
         trigger={["click"]}
         disabled={isBusy}
@@ -128,7 +131,7 @@ export function ChapterActions(props: Readonly<{
           onClick: (evt) => openReviseModal(evt.key as ReviseMode),
         }}
       >
-        <Button size="small" loading={isRevising} disabled={isBusy}>修订</Button>
+        <Button size={buttonSize} block={props.compact} loading={isRevising} disabled={isBusy}>修订</Button>
       </Dropdown>
       <Modal
         title={pendingMode ? `${getReviseModeLabel(pendingMode)} · 第 ${props.chapter} 章` : "修订"}
@@ -160,6 +163,6 @@ export function ChapterActions(props: Readonly<{
           />
         </Space>
       </Modal>
-    </Space>
+    </div>
   );
 }

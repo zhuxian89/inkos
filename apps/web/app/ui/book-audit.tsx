@@ -117,7 +117,12 @@ export function BookAuditPanel({ bookId }: Readonly<{ bookId: string }>) {
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Card
-        title={`审计面板 · ${bookId}`}
+        style={{
+          borderRadius: 24,
+          overflow: "hidden",
+          background: "linear-gradient(135deg, rgba(17,31,37,0.96) 0%, rgba(33,55,60,0.92) 52%, rgba(100,129,122,0.84) 100%)",
+        }}
+        title={<span style={{ color: "#f2f7f6" }}>{`审卷台 · ${bookId}`}</span>}
         extra={(
           <Space>
             <Link href={`/books/${encodeURIComponent(bookId)}`}><Button>返回工作台</Button></Link>
@@ -126,7 +131,7 @@ export function BookAuditPanel({ bookId }: Readonly<{ bookId: string }>) {
         )}
       >
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
-          <Card title="执行审计">
+          <Card title="执笔审卷" style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }}>
             <Form layout="vertical" form={auditForm} onFinish={runAudit}>
               <Form.Item label="章节号（可选）" name="chapter">
                 <InputNumber min={1} style={{ width: "100%" }} placeholder="为空表示最新章节" />
@@ -135,7 +140,7 @@ export function BookAuditPanel({ bookId }: Readonly<{ bookId: string }>) {
             </Form>
           </Card>
 
-          <Card title="执行修订">
+          <Card title="落笔修卷" style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }}>
             <Form layout="vertical" form={reviseForm} onFinish={runRevise}>
               <Form.Item label="章节号（可选）" name="chapter">
                 <InputNumber min={1} style={{ width: "100%" }} placeholder="为空表示最新章节" />
@@ -150,11 +155,11 @@ export function BookAuditPanel({ bookId }: Readonly<{ bookId: string }>) {
         </Space>
       </Card>
 
-      <Card title="待审核队列">
+      <Card title="待审卷册" style={{ borderRadius: 22, background: "rgba(255,255,255,0.9)" }}>
         <Table rowKey={(row) => `${row.bookId}-${row.chapter}`} dataSource={pending.slice()} columns={columns} pagination={{ pageSize: 8 }} />
       </Card>
 
-      <Card title="最近操作">
+      <Card title="最近判词" style={{ borderRadius: 22, background: "rgba(255,255,255,0.9)" }}>
         {!result ? (
           <Typography.Text type="secondary">执行“审计 / 修订”后这里展示结果。</Typography.Text>
         ) : (

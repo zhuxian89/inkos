@@ -150,16 +150,25 @@ export function AdvancedToolsWorkspace() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Card>
-        <Typography.Title level={4}>高级工具</Typography.Title>
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+      <Card
+        style={{
+          borderRadius: 24,
+          overflow: "hidden",
+          background: "linear-gradient(135deg, rgba(18,31,37,0.96) 0%, rgba(35,56,60,0.92) 54%, rgba(104,130,122,0.84) 100%)",
+        }}
+      >
+        <Typography.Text style={{ color: "rgba(214, 227, 223, 0.72)", letterSpacing: "0.16em", textTransform: "uppercase", fontSize: 11 }}>
+          秘库 · 旁门器具
+        </Typography.Text>
+        <Typography.Title level={4} style={{ marginTop: 8, marginBottom: 8, color: "#f2f7f6" }}>高级工具</Typography.Title>
+        <Typography.Paragraph style={{ marginBottom: 0, color: "rgba(227, 236, 234, 0.8)" }}>
           这里只保留页面还没单独承接的低频能力，避免和首页、设置、书籍工作台重复。
         </Typography.Paragraph>
       </Card>
 
       {error ? <Alert type="error" showIcon message={error} /> : null}
 
-      <Card title="通用命令执行器">
+      <Card title="通用命令执行器" style={{ borderRadius: 22, background: "rgba(255,255,255,0.9)" }}>
         <Space direction="vertical" size={12} style={{ width: "100%" }}>
           <Select
             value={selectedCommand?.id}

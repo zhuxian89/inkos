@@ -8,6 +8,7 @@ import {
   Checkbox,
   Col,
   Form,
+  Grid,
   Input,
   Modal,
   Popconfirm,
@@ -112,6 +113,8 @@ interface StoredProfileChatSession {
 
 export function SetupWorkspace() {
   const { message } = App.useApp();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const [initialized, setInitialized] = useState<boolean>(false);
   const [summary, setSummary] = useState<SetupSummaryResponse | null>(null);
   const [daemon, setDaemon] = useState<CommandCatalogResponse["daemon"] | null>(null);
@@ -451,18 +454,27 @@ export function SetupWorkspace() {
 
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
-      <Card>
-        <Typography.Title level={4}>设置</Typography.Title>
-        <Typography.Paragraph type="secondary" style={{ marginBottom: 0 }}>
+      <Card
+        style={{
+          borderRadius: 24,
+          overflow: "hidden",
+          background: "linear-gradient(135deg, rgba(16,29,35,0.96) 0%, rgba(34,56,60,0.92) 54%, rgba(104,130,122,0.84) 100%)",
+        }}
+      >
+        <Typography.Text style={{ color: "rgba(214, 227, 223, 0.72)", letterSpacing: "0.16em", textTransform: "uppercase", fontSize: 11 }}>
+          灵枢 · 阵眼设定
+        </Typography.Text>
+        <Typography.Title level={4} style={{ marginTop: 8, marginBottom: 8, color: "#f2f7f6" }}>设置</Typography.Title>
+        <Typography.Paragraph style={{ marginBottom: 0, color: "rgba(227, 236, 234, 0.8)" }}>
           这里集中处理模型配置、项目检测和自动写作开关。原来分散在命令里的项目级功能，统一归到这一页。
         </Typography.Paragraph>
       </Card>
 
       <Row gutter={[16, 16]}>
-        <Col xs={24} sm={12} lg={6}><Card><Statistic title="工作区" value={initialized ? "已初始化" : "未初始化"} /></Card></Col>
-        <Col xs={24} sm={12} lg={6}><Card><Statistic title="书籍数" value={summary?.books?.length ?? 0} /></Card></Col>
-        <Col xs={24} sm={12} lg={6}><Card><Statistic title="自动写作" value={daemon?.running ? "运行中" : "未运行"} /></Card></Col>
-        <Col xs={24} sm={12} lg={6}><Card><Statistic title="项目目录" value={summary?.projectRoot ? "已配置" : "未知"} /></Card></Col>
+        <Col xs={24} sm={12} lg={6}><Card style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }}><Statistic title="工作区" value={initialized ? "已初始化" : "未初始化"} valueStyle={{ color: "#214047" }} /></Card></Col>
+        <Col xs={24} sm={12} lg={6}><Card style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }}><Statistic title="书籍数" value={summary?.books?.length ?? 0} valueStyle={{ color: "#214047" }} /></Card></Col>
+        <Col xs={24} sm={12} lg={6}><Card style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }}><Statistic title="自动写作" value={daemon?.running ? "运行中" : "未运行"} valueStyle={{ color: "#214047" }} /></Card></Col>
+        <Col xs={24} sm={12} lg={6}><Card style={{ borderRadius: 20, background: "rgba(255,255,255,0.92)" }}><Statistic title="项目目录" value={summary?.projectRoot ? "已配置" : "未知"} valueStyle={{ color: "#214047" }} /></Card></Col>
       </Row>
 
       <Card
@@ -489,59 +501,95 @@ export function SetupWorkspace() {
             onChange={(value) => activateProfile(String(value))}
             style={{ width: "100%" }}
           />
-          <Table<LlmProfile>
-            rowKey="id"
-            size="small"
-            pagination={false}
-            dataSource={[...profiles]}
-            columns={[
-              { title: "名称", dataIndex: "name", key: "name" },
-              { title: "模型", key: "model", render: (_v, r) => `${r.provider}/${r.model}` },
-              {
-                title: "状态",
-                key: "status",
-                width: 120,
-                render: (_v, r) => (r.isActive ? <Tag color="green">已激活</Tag> : <Tag>未激活</Tag>),
-              },
-              {
-                title: "操作",
-                key: "actions",
-                width: 260,
-                render: (_v, record) => (
-                  <Space>
-                    <Button size="small" onClick={() => openEditProfile(record)}>编辑</Button>
-                    <Button
-                      size="small"
-                      type="primary"
-                      ghost
-                      disabled={record.isActive}
-                      onClick={() => activateProfile(record.id)}
-                    >
-                      激活
-                    </Button>
-                    <Button size="small" loading={testingProfileId === record.id} onClick={() => testProfile(record.id)}>
-                      测试
-                    </Button>
-                    <Tooltip title="直接和这个配置绑定的模型对话，验证真实输出效果。">
-                      <Button size="small" onClick={() => openProfileChat(record)}>
-                        对话
-                      </Button>
-                    </Tooltip>
+          {isMobile ? (
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              {profiles.map((record) => (
+                <Card key={record.id} size="small" style={{ borderRadius: 16, background: "rgba(255,255,255,0.94)" }} bodyStyle={{ padding: 14 }}>
+                  <Space direction="vertical" size={10} style={{ width: "100%" }}>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <Typography.Text strong>{record.name}</Typography.Text>
+                      <Typography.Text type="secondary" style={{ wordBreak: "break-all" }}>{`${record.provider}/${record.model}`}</Typography.Text>
+                    </div>
+                    <div>
+                      {record.isActive ? <Tag color="green">已激活</Tag> : <Tag>未激活</Tag>}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
+                      <Button size="small" onClick={() => openEditProfile(record)}>编辑</Button>
+                      <Button size="small" type="primary" ghost disabled={record.isActive} onClick={() => activateProfile(record.id)}>激活</Button>
+                      <Button size="small" loading={testingProfileId === record.id} onClick={() => testProfile(record.id)}>测试</Button>
+                      <Tooltip title="直接和这个配置绑定的模型对话，验证真实输出效果。">
+                        <Button size="small" onClick={() => openProfileChat(record)}>对话</Button>
+                      </Tooltip>
+                    </div>
                     <Popconfirm
                       title="确认删除这个配置吗？"
                       description={record.isActive ? "当前激活配置不能删除。" : "删除后不可恢复。"}
                       onConfirm={() => deleteProfile(record.id)}
                       disabled={record.isActive}
                     >
-                      <Button size="small" danger disabled={record.isActive} loading={deletingProfileId === record.id}>
+                      <Button size="small" danger block disabled={record.isActive} loading={deletingProfileId === record.id}>
                         删除
                       </Button>
                     </Popconfirm>
                   </Space>
-                ),
-              },
-            ]}
-          />
+                </Card>
+              ))}
+            </Space>
+          ) : (
+            <Table<LlmProfile>
+              rowKey="id"
+              size="small"
+              pagination={false}
+              dataSource={[...profiles]}
+              columns={[
+                { title: "名称", dataIndex: "name", key: "name" },
+                { title: "模型", key: "model", render: (_v, r) => `${r.provider}/${r.model}` },
+                {
+                  title: "状态",
+                  key: "status",
+                  width: 120,
+                  render: (_v, r) => (r.isActive ? <Tag color="green">已激活</Tag> : <Tag>未激活</Tag>),
+                },
+                {
+                  title: "操作",
+                  key: "actions",
+                  width: 260,
+                  render: (_v, record) => (
+                    <Space>
+                      <Button size="small" onClick={() => openEditProfile(record)}>编辑</Button>
+                      <Button
+                        size="small"
+                        type="primary"
+                        ghost
+                        disabled={record.isActive}
+                        onClick={() => activateProfile(record.id)}
+                      >
+                        激活
+                      </Button>
+                      <Button size="small" loading={testingProfileId === record.id} onClick={() => testProfile(record.id)}>
+                        测试
+                      </Button>
+                      <Tooltip title="直接和这个配置绑定的模型对话，验证真实输出效果。">
+                        <Button size="small" onClick={() => openProfileChat(record)}>
+                          对话
+                        </Button>
+                      </Tooltip>
+                      <Popconfirm
+                        title="确认删除这个配置吗？"
+                        description={record.isActive ? "当前激活配置不能删除。" : "删除后不可恢复。"}
+                        onConfirm={() => deleteProfile(record.id)}
+                        disabled={record.isActive}
+                      >
+                        <Button size="small" danger disabled={record.isActive} loading={deletingProfileId === record.id}>
+                          删除
+                        </Button>
+                      </Popconfirm>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+          )}
         </Space>
       </Card>
 
