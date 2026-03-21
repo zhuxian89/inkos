@@ -1771,23 +1771,42 @@ function composeInitContext(context?: string, authorBrief?: string): string | un
   return sections.length > 0 ? sections.join("\n\n") : undefined;
 }
 
-async function collectAllBookPaths(rootDir: string): Promise<ReadonlyArray<string>> {
-  const paths: string[] = [];
+async function buildBookDirectorySummary(bookDir: string): Promise<string> {
+  const storyDir = join(bookDir, "story");
+  const chaptersDir = join(bookDir, "chapters");
+  const snapshotsDir = join(storyDir, "snapshots");
 
-  async function walk(dir: string): Promise<void> {
-    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-      const full = join(dir, entry.name);
-      paths.push(full);
-      if (entry.isDirectory()) {
-        await walk(full);
-      }
-    }
+  // story/ files (one level, skip snapshots directory)
+  const storyEntries = await readdir(storyDir, { withFileTypes: true }).catch(() => []);
+  const storyFiles = storyEntries
+    .filter((e) => e.isFile())
+    .map((e) => e.name)
+    .sort();
+
+  // chapters/ count + range
+  const chapterEntries = await readdir(chaptersDir).catch(() => []);
+  const chapterMdFiles = chapterEntries.filter((f) => f.endsWith(".md") && !f.startsWith("index")).sort();
+
+  // snapshots/ count
+  const snapshotEntries = await readdir(snapshotsDir, { withFileTypes: true }).catch(() => []);
+  const snapshotDirs = snapshotEntries.filter((e) => e.isDirectory());
+
+  const lines = ["## 本书目录概览"];
+  if (storyFiles.length > 0) {
+    lines.push(`- story/ 下文件：${storyFiles.join("、")}`);
   }
-
-  paths.push(rootDir);
-  await walk(rootDir);
-  return paths;
+  if (chapterMdFiles.length > 0) {
+    const first = chapterMdFiles[0]!.slice(0, 4);
+    const last = chapterMdFiles[chapterMdFiles.length - 1]!.slice(0, 4);
+    lines.push(`- chapters/ 下共 ${chapterMdFiles.length} 个章节文件（${first} ~ ${last}）`);
+  } else {
+    lines.push("- chapters/ 下暂无章节文件");
+  }
+  if (snapshotDirs.length > 0) {
+    lines.push(`- snapshots/ 下共 ${snapshotDirs.length} 个快照目录`);
+  }
+  lines.push("如需查看具体文件列表，请调用 list_directory 工具。");
+  return lines.join("\n");
 }
 
 function mergeAuthorBrief(context?: string, authorBrief?: string): string | undefined {
@@ -1807,7 +1826,7 @@ async function buildExistingBookContext(bookId: string): Promise<{
   const state = new StateManager(projectRoot);
   const bookDir = state.bookDir(bookId);
   const chapterIndex = await state.loadChapterIndex(bookId);
-  const allBookPaths = await collectAllBookPaths(bookDir);
+  const directorySummary = await buildBookDirectorySummary(bookDir);
   const latestChapter = [...chapterIndex].sort((left, right) => right.number - left.number)[0];
   const latestChapterFile = latestChapter
     ? await findChapterFile(bookDir, latestChapter.number, latestChapter.title).catch(() => "")
@@ -1840,10 +1859,7 @@ async function buildExistingBookContext(bookId: string): Promise<{
     "这是一本已经存在的书，请优先在这些已有资料基础上补强，不要把它当成全新开书。",
   ].join("\n");
 
-  const allPathsBlock = [
-    "## 本书全部路径（目录+文件）",
-    ...allBookPaths.map((item) => `- ${item}`),
-  ].join("\n");
+  const allPathsBlock = directorySummary;
 
   const memoryBlock = [
     authorBrief.trim() ? `## 已有作者简报（${authorBriefPath(bookId)}）\n${authorBrief.trim()}` : "",
@@ -1956,6 +1972,16 @@ async function runInitAssistant(input: {
     ? await buildExistingBookContext(resolvedBookId)
     : null;
 
+  // Build path reference for system prompt (always in attention)
+  const initPathReference = existingBookContext
+    ? [
+        "",
+        existingBookContext.pathBlock,
+        existingBookContext.allPathsBlock,
+        "如需读取或写入文件，请使用提供的工具（read_text_file / write_text_file / list_directory），并使用上述真实路径。",
+      ].join("\n")
+    : "";
+
   const systemPrompt = [
     "你是 InkOS 的智能初始化助手，负责在作者开书前通过对话梳理小说方案。",
     "你的任务不是直接写小说，而是帮助作者明确：主题、卖点、主线走向、阶段高潮、结局方向、主角人设、平台适配点。",
@@ -1964,13 +1990,14 @@ async function runInitAssistant(input: {
     "你必须显式利用系统给你的平台信息、题材规则和 InkOS 架构上下文，不要把自己当成普通写作助手。",
     "如果我提供了某本已存在书籍的目录、story 文件路径和已有长期记忆，说明这次是在旧书基础上继续补强，你必须优先尊重这些已有资料。",
     "遇到书名还不稳、主线不清、结局含糊、主角动机发虚时，优先追问这些关键点。",
-    "每次都要同步维护一份可直接用于初始化的“创作简报”。",
+    "每次都要同步维护一份可直接用于初始化的\u201C创作简报\u201D。",
     "reply 字段可以使用 Markdown，便于用标题、列表等方式提高可读性；brief 字段继续输出完整创作简报 Markdown。",
     "输出必须是 JSON，对象结构如下：",
     "{\"reply\":\"给作者的话\",\"brief\":\"完整创作简报Markdown\"}",
     "不要用 Markdown 代码块包裹整个 JSON，不要输出额外解释。",
     "",
     systemContext,
+    initPathReference,
   ].join("\n");
 
   const metaPrompt = [
@@ -1984,8 +2011,6 @@ async function runInitAssistant(input: {
     "",
     "当前创作简报：",
     input.currentBrief?.trim() ? input.currentBrief.trim() : "（暂无，请你根据对话逐步整理）",
-    existingBookContext?.pathBlock ?? "",
-    existingBookContext?.allPathsBlock ?? "",
     existingBookContext?.memoryBlock ?? "",
     "",
     "创作简报建议至少包含这些部分：",
@@ -2002,10 +2027,22 @@ async function runInitAssistant(input: {
     "## 明确禁忌与边界",
   ].join("\n");
 
+  // Inject path reminder before the last user message
+  const bookDir = resolvedBookId ? join(projectRoot, "books", resolvedBookId) : "";
+  const initPathReminder = resolvedBookId
+    ? `[路径提醒] bookDir=${bookDir} | storyDir=${storyDirPath(resolvedBookId)} | authorBrief=${authorBriefPath(resolvedBookId)}`
+    : "";
+  const userMessages = input.messages.map((message, idx) => {
+    if (message.role === "user" && idx === input.messages.length - 1 && initPathReminder) {
+      return { role: message.role, content: `${initPathReminder}\n\n${message.content}` };
+    }
+    return { role: message.role, content: message.content };
+  });
+
   const messages: Array<{ readonly role: "system" | "user" | "assistant"; readonly content: string }> = [
     { role: "system", content: systemPrompt },
     { role: "user", content: metaPrompt },
-    ...input.messages.map((message) => ({ role: message.role, content: message.content })),
+    ...userMessages,
   ];
 
   const response = await runToolEnabledConversation(llm.client, llm.model, messages, {
@@ -2099,6 +2136,18 @@ async function runChapterAssistant(input: {
     model: llm.model,
   });
 
+  const pathReference = [
+    `## 当前工作路径（每轮对话均有效）`,
+    `- bookId：${input.bookId}`,
+    `- 书籍目录：${bookDir}`,
+    `- story 目录：${storyDirPath(input.bookId)}`,
+    `- 当前章节文件：${chapterFile}`,
+    `- 作者简报：${authorBriefPath(input.bookId)}`,
+    `- 状态卡：${storyFilePath(input.bookId, "current_state.md")}`,
+    `- 伏笔池：${storyFilePath(input.bookId, "pending_hooks.md")}`,
+    `- 章节摘要：${storyFilePath(input.bookId, "chapter_summaries.md")}`,
+  ].join("\n");
+
   const systemPrompt = [
     "你是 InkOS 的章节级写作编辑助手。",
     "你的任务是围绕当前章节直接干活：读文件、改文件、解释修改。",
@@ -2115,6 +2164,8 @@ async function runChapterAssistant(input: {
     "你可以使用 Markdown 组织回复，优先用短标题、列表、表格或代码块提高可读性。",
     "请使用自然简体中文，结论要直接，尽量给出分点建议。",
     "除文件路径、模型名、命令名这类必须保留的内容外，不要夹杂英文单词或中英混写表达。",
+    "",
+    pathReference,
   ].join("\n");
 
   const contextPrompt = [
@@ -2136,13 +2187,24 @@ async function runChapterAssistant(input: {
     .filter(Boolean)
     .join("\n\n");
 
+  // Build per-turn path reminder to inject before the latest user message
+  const pathReminder = `[路径提醒] bookDir=${bookDir} | chapterFile=${chapterFile} | storyDir=${storyDirPath(input.bookId)}`;
+
+  // Inject path reminder before the last user message to keep paths in attention
+  const userMessages = input.messages.map((message, idx) => {
+    if (message.role === "user" && idx === input.messages.length - 1) {
+      return { role: message.role, content: `${pathReminder}\n\n${message.content}` };
+    }
+    return { role: message.role, content: message.content };
+  });
+
   const response = await runToolEnabledConversation(
     llm.client,
     llm.model,
     [
       { role: "system", content: systemPrompt },
       { role: "user", content: contextPrompt },
-      ...input.messages.map((message) => ({ role: message.role, content: message.content })),
+      ...userMessages,
     ],
     {
       maxTurns: 8,
