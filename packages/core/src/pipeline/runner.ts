@@ -7,7 +7,7 @@ import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent } from "../agents/architect.js";
 import { WriterAgent } from "../agents/writer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
-import { ReviserAgent, type ReviseMode } from "../agents/reviser.js";
+import { ReviserAgent, type ReviseMode, type ReviseOutput } from "../agents/reviser.js";
 import { RadarAgent } from "../agents/radar.js";
 import type { RadarSource } from "../agents/radar-source.js";
 import { readGenreProfile } from "../agents/rules-reader.js";
@@ -735,6 +735,7 @@ export class PipelineRunner {
         finalContent = fixResult.revisedContent;
         finalWordCount = fixResult.wordCount;
         revised = true;
+        await this.saveTruthFilesFromRevision(bookDir, chapterNumber, gp.numericalSystem, fixResult);
       }
       log("spot-fix", "done");
       this.debug("write_next.spot_fix.done", {
@@ -815,31 +816,7 @@ export class PipelineRunner {
             finalWordCount = reviseOutput.wordCount;
             revised = true;
 
-            // Save all truth files from accepted revision
-            const storyDir = join(bookDir, "story");
-            this.debug("write_next.truth_files_from_revise.start", { bookId, chapterNumber });
-            if (reviseOutput.updatedState !== "(状态卡未更新)") {
-              await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
-            }
-            if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
-              await writeFile(join(storyDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
-            }
-            if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
-              await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
-            }
-            if (reviseOutput.updatedChapterSummaries !== "(章节摘要未更新)") {
-              await writeFile(join(storyDir, "chapter_summaries.md"), reviseOutput.updatedChapterSummaries, "utf-8");
-            }
-            if (reviseOutput.updatedSubplots !== "(支线进度板未更新)") {
-              await writeFile(join(storyDir, "subplot_board.md"), reviseOutput.updatedSubplots, "utf-8");
-            }
-            if (reviseOutput.updatedEmotionalArcs !== "(情感弧线未更新)") {
-              await writeFile(join(storyDir, "emotional_arcs.md"), reviseOutput.updatedEmotionalArcs, "utf-8");
-            }
-            if (reviseOutput.updatedCharacterMatrix !== "(角色交互矩阵未更新)") {
-              await writeFile(join(storyDir, "character_matrix.md"), reviseOutput.updatedCharacterMatrix, "utf-8");
-            }
-            this.debug("write_next.truth_files_from_revise.done", { bookId, chapterNumber });
+            await this.saveTruthFilesFromRevision(bookDir, chapterNumber, gp.numericalSystem, reviseOutput);
           }
 
           // Re-audit the (possibly revised) content
@@ -1194,6 +1171,38 @@ ${matrix}`,
       timestamp: new Date().toISOString(),
       data,
     });
+  }
+
+  private async saveTruthFilesFromRevision(
+    bookDir: string,
+    chapterNumber: number,
+    numericalSystem: boolean,
+    output: ReviseOutput,
+  ): Promise<void> {
+    const storyDir = join(bookDir, "story");
+    this.debug("write_next.truth_files_from_revise.start", { chapterNumber });
+    if (output.updatedState !== "(状态卡未更新)") {
+      await writeFile(join(storyDir, "current_state.md"), output.updatedState, "utf-8");
+    }
+    if (numericalSystem && output.updatedLedger && output.updatedLedger !== "(账本未更新)") {
+      await writeFile(join(storyDir, "particle_ledger.md"), output.updatedLedger, "utf-8");
+    }
+    if (output.updatedHooks !== "(伏笔池未更新)") {
+      await writeFile(join(storyDir, "pending_hooks.md"), output.updatedHooks, "utf-8");
+    }
+    if (output.updatedChapterSummaries !== "(章节摘要未更新)") {
+      await writeFile(join(storyDir, "chapter_summaries.md"), output.updatedChapterSummaries, "utf-8");
+    }
+    if (output.updatedSubplots !== "(支线进度板未更新)") {
+      await writeFile(join(storyDir, "subplot_board.md"), output.updatedSubplots, "utf-8");
+    }
+    if (output.updatedEmotionalArcs !== "(情感弧线未更新)") {
+      await writeFile(join(storyDir, "emotional_arcs.md"), output.updatedEmotionalArcs, "utf-8");
+    }
+    if (output.updatedCharacterMatrix !== "(角色交互矩阵未更新)") {
+      await writeFile(join(storyDir, "character_matrix.md"), output.updatedCharacterMatrix, "utf-8");
+    }
+    this.debug("write_next.truth_files_from_revise.done", { chapterNumber });
   }
 
   private async readChapterContent(bookDir: string, chapterNumber: number, preferredTitle?: string): Promise<string> {
