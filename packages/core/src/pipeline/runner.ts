@@ -5,7 +5,7 @@ import type { ChapterMeta } from "../models/chapter.js";
 import type { NotifyChannel } from "../models/project.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import { ArchitectAgent } from "../agents/architect.js";
-import { WriterAgent } from "../agents/writer.js";
+import { WriterAgent, type WriteChapterOutput } from "../agents/writer.js";
 import { ContinuityAuditor } from "../agents/continuity.js";
 import { ReviserAgent, type ReviseMode, type ReviseOutput } from "../agents/reviser.js";
 import { RadarAgent } from "../agents/radar.js";
@@ -247,7 +247,7 @@ export class PipelineRunner {
     }
   }
 
-  /** Audit the latest (or specified) chapter. Read-only, no lock needed. */
+  /** Audit the latest (or specified) chapter. Lock index-write section to avoid concurrent overwrite. */
   async auditDraft(bookId: string, chapterNumber?: number): Promise<AuditResult & { readonly chapterNumber: number }> {
     this.debug("audit.start", { projectRoot: this.config.projectRoot, bookId, chapterNumber: chapterNumber ?? null });
     const book = await this.state.loadBookConfig(bookId);
@@ -305,26 +305,34 @@ export class PipelineRunner {
     });
 
     // Update index with audit result
-    this.debug("audit.index.save.start", { bookId, targetChapter });
-    const index = await this.state.loadChapterIndex(bookId);
-    const updated = index.map((ch) =>
-      ch.number === targetChapter
-        ? {
-            ...ch,
-            status: (result.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
-            updatedAt: new Date().toISOString(),
-            auditIssues: result.issues.map((issue) => this.formatIndexedAuditIssue(issue)),
-            auditDetails: result.issues.map((issue) => ({ ...issue })),
-          }
-        : ch,
-    );
-    await this.state.saveChapterIndex(bookId, updated);
-    this.debug("audit.index.save.done", {
-      bookId,
-      targetChapter,
-      status: updated.find((ch) => ch.number === targetChapter)?.status ?? null,
-      issueCount: updated.find((ch) => ch.number === targetChapter)?.auditIssues.length ?? 0,
-    });
+    this.debug("audit.index.save.lock.start", { bookId, targetChapter });
+    const releaseLock = await this.state.acquireBookLock(bookId);
+    this.debug("audit.index.save.lock.done", { bookId, targetChapter });
+    try {
+      this.debug("audit.index.save.start", { bookId, targetChapter });
+      const index = await this.state.loadChapterIndex(bookId);
+      const updated = index.map((ch) =>
+        ch.number === targetChapter
+          ? {
+              ...ch,
+              status: (result.passed ? "ready-for-review" : "audit-failed") as ChapterMeta["status"],
+              updatedAt: new Date().toISOString(),
+              auditIssues: result.issues.map((issue) => this.formatIndexedAuditIssue(issue)),
+              auditDetails: result.issues.map((issue) => ({ ...issue })),
+            }
+          : ch,
+      );
+      await this.state.saveChapterIndex(bookId, updated);
+      this.debug("audit.index.save.done", {
+        bookId,
+        targetChapter,
+        status: updated.find((ch) => ch.number === targetChapter)?.status ?? null,
+        issueCount: updated.find((ch) => ch.number === targetChapter)?.auditIssues.length ?? 0,
+      });
+    } finally {
+      await releaseLock();
+      this.debug("audit.index.save.lock.release", { bookId, targetChapter });
+    }
 
     await this.emitWebhook(
       result.passed ? "audit-passed" : "audit-failed",
@@ -735,7 +743,7 @@ export class PipelineRunner {
         finalContent = fixResult.revisedContent;
         finalWordCount = fixResult.wordCount;
         revised = true;
-        await this.saveTruthFilesFromRevision(bookDir, chapterNumber, gp.numericalSystem, fixResult);
+        await this.saveTruthFilesFromRevision(bookDir, chapterNumber, gp.numericalSystem, fixResult, output);
       }
       log("spot-fix", "done");
       this.debug("write_next.spot_fix.done", {
@@ -816,7 +824,7 @@ export class PipelineRunner {
             finalWordCount = reviseOutput.wordCount;
             revised = true;
 
-            await this.saveTruthFilesFromRevision(bookDir, chapterNumber, gp.numericalSystem, reviseOutput);
+            await this.saveTruthFilesFromRevision(bookDir, chapterNumber, gp.numericalSystem, reviseOutput, output);
           }
 
           // Re-audit the (possibly revised) content
@@ -860,19 +868,17 @@ export class PipelineRunner {
     log("save", "start");
     this.debug("write_next.save.start", { bookId, chapterNumber });
     const chaptersDir = join(bookDir, "chapters");
-    const paddedNum = String(chapterNumber).padStart(4, "0");
-    const title = output.title;
-    const filename = `${paddedNum}_${title.replace(/[/\\?%*:|"<>]/g, "").replace(/\s+/g, "_").slice(0, 50)}.md`;
-
-    await writeFile(
-      join(chaptersDir, filename),
-      `# 第${chapterNumber}章 ${title}\n\n${finalContent}`,
-      "utf-8",
-    );
+    const writeResult = await writeCanonicalChapterFile({
+      chaptersDir,
+      chapterNumber,
+      title: output.title,
+      body: finalContent,
+    });
     this.debug("write_next.chapter.write.done", {
       bookId,
       chapterNumber,
-      filePath: join(chaptersDir, filename),
+      filePath: writeResult.fullPath,
+      removedDuplicates: writeResult.removedDuplicates,
       contentLength: finalContent.length,
     });
 
@@ -1178,31 +1184,83 @@ ${matrix}`,
     chapterNumber: number,
     numericalSystem: boolean,
     output: ReviseOutput,
+    fallback?: WriteChapterOutput,
   ): Promise<void> {
+    const isMeaningful = (value: string | undefined): value is string =>
+      Boolean(value) && !value?.startsWith("(");
     const storyDir = join(bookDir, "story");
     this.debug("write_next.truth_files_from_revise.start", { chapterNumber });
-    if (output.updatedState !== "(状态卡未更新)") {
-      await writeFile(join(storyDir, "current_state.md"), output.updatedState, "utf-8");
+
+    const updatedState = isMeaningful(output.updatedState)
+      ? output.updatedState
+      : (isMeaningful(fallback?.updatedState) ? fallback.updatedState : "");
+    if (updatedState) {
+      await writeFile(join(storyDir, "current_state.md"), updatedState, "utf-8");
     }
-    if (numericalSystem && output.updatedLedger && output.updatedLedger !== "(账本未更新)") {
-      await writeFile(join(storyDir, "particle_ledger.md"), output.updatedLedger, "utf-8");
+
+    const updatedLedger = isMeaningful(output.updatedLedger)
+      ? output.updatedLedger
+      : (isMeaningful(fallback?.updatedLedger) ? fallback.updatedLedger : "");
+    if (numericalSystem && updatedLedger) {
+      await writeFile(join(storyDir, "particle_ledger.md"), updatedLedger, "utf-8");
     }
-    if (output.updatedHooks !== "(伏笔池未更新)") {
-      await writeFile(join(storyDir, "pending_hooks.md"), output.updatedHooks, "utf-8");
+
+    const updatedHooks = isMeaningful(output.updatedHooks)
+      ? output.updatedHooks
+      : (isMeaningful(fallback?.updatedHooks) ? fallback.updatedHooks : "");
+    if (updatedHooks) {
+      await writeFile(join(storyDir, "pending_hooks.md"), updatedHooks, "utf-8");
     }
-    if (output.updatedChapterSummaries !== "(章节摘要未更新)") {
+
+    if (isMeaningful(output.updatedChapterSummaries)) {
       await writeFile(join(storyDir, "chapter_summaries.md"), output.updatedChapterSummaries, "utf-8");
+    } else if (isMeaningful(fallback?.chapterSummary)) {
+      await this.appendChapterSummaryRowsIfMissing(storyDir, fallback.chapterSummary);
     }
-    if (output.updatedSubplots !== "(支线进度板未更新)") {
-      await writeFile(join(storyDir, "subplot_board.md"), output.updatedSubplots, "utf-8");
+
+    const updatedSubplots = isMeaningful(output.updatedSubplots)
+      ? output.updatedSubplots
+      : (isMeaningful(fallback?.updatedSubplots) ? fallback.updatedSubplots : "");
+    if (updatedSubplots) {
+      await writeFile(join(storyDir, "subplot_board.md"), updatedSubplots, "utf-8");
     }
-    if (output.updatedEmotionalArcs !== "(情感弧线未更新)") {
-      await writeFile(join(storyDir, "emotional_arcs.md"), output.updatedEmotionalArcs, "utf-8");
+
+    const updatedEmotionalArcs = isMeaningful(output.updatedEmotionalArcs)
+      ? output.updatedEmotionalArcs
+      : (isMeaningful(fallback?.updatedEmotionalArcs) ? fallback.updatedEmotionalArcs : "");
+    if (updatedEmotionalArcs) {
+      await writeFile(join(storyDir, "emotional_arcs.md"), updatedEmotionalArcs, "utf-8");
     }
-    if (output.updatedCharacterMatrix !== "(角色交互矩阵未更新)") {
-      await writeFile(join(storyDir, "character_matrix.md"), output.updatedCharacterMatrix, "utf-8");
+
+    const updatedCharacterMatrix = isMeaningful(output.updatedCharacterMatrix)
+      ? output.updatedCharacterMatrix
+      : (isMeaningful(fallback?.updatedCharacterMatrix) ? fallback.updatedCharacterMatrix : "");
+    if (updatedCharacterMatrix) {
+      await writeFile(join(storyDir, "character_matrix.md"), updatedCharacterMatrix, "utf-8");
     }
+
     this.debug("write_next.truth_files_from_revise.done", { chapterNumber });
+  }
+
+  private async appendChapterSummaryRowsIfMissing(storyDir: string, summary: string): Promise<void> {
+    const summaryPath = join(storyDir, "chapter_summaries.md");
+    let existing = "";
+    try {
+      existing = await readFile(summaryPath, "utf-8");
+    } catch {
+      existing = "# 章节摘要\n\n| 章节 | 标题 | 出场人物 | 关键事件 | 状态变化 | 伏笔动态 | 情绪基调 | 章节类型 |\n|------|------|----------|----------|----------|----------|----------|----------|\n";
+    }
+
+    const extractDataRows = (text: string): string[] =>
+      text
+        .split("\n")
+        .filter((line) => line.startsWith("|") && !line.startsWith("| 章节") && !line.startsWith("|--"));
+
+    const existingRows = new Set(extractDataRows(existing));
+    const incomingRows = extractDataRows(summary).filter((line) => !existingRows.has(line));
+    if (incomingRows.length === 0) return;
+
+    await writeFile(summaryPath, `${existing.trimEnd()}\n${incomingRows.join("\n")}\n`, "utf-8");
   }
 
   private async readChapterContent(bookDir: string, chapterNumber: number, preferredTitle?: string): Promise<string> {
