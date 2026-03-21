@@ -196,6 +196,8 @@ export function MarketWorkspace() {
         open={Boolean(selectedHistory)}
         onCancel={() => setSelectedHistory(null)}
         footer={null}
+        maskClosable={false}
+        keyboard
         width="min(960px, 94vw)"
         title={selectedHistory ? `扫描历史 · ${selectedHistory.id}` : "扫描历史"}
         destroyOnClose

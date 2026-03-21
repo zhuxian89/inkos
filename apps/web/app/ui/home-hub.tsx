@@ -67,19 +67,20 @@ export function HomeHub() {
         bordered={false}
         style={{
           overflow: "hidden",
-          background: "linear-gradient(135deg, rgba(13,25,31,0.96) 0%, rgba(29,51,56,0.92) 42%, rgba(90,120,115,0.88) 100%)",
-          boxShadow: "0 24px 60px rgba(10, 18, 24, 0.22)",
+          background: "linear-gradient(135deg, rgba(236, 245, 242, 0.98) 0%, rgba(225, 239, 235, 0.96) 48%, rgba(208, 228, 223, 0.94) 100%)",
+          boxShadow: "0 18px 42px rgba(60, 92, 90, 0.12)",
+          border: "1px solid rgba(95, 143, 138, 0.12)",
         }}
         bodyStyle={{ padding: isMobile ? 18 : 26 }}
       >
         <Space direction="vertical" size={10} style={{ width: "100%" }}>
-          <Typography.Text style={{ color: "rgba(224, 235, 232, 0.76)", letterSpacing: "0.18em", textTransform: "uppercase", fontSize: 12 }}>
-            青云夜雨 · 书卷世界
+          <Typography.Text style={{ color: "rgba(58, 88, 86, 0.7)", letterSpacing: "0.18em", textTransform: "uppercase", fontSize: 12 }}>
+            青云晨雾 · 书卷世界
           </Typography.Text>
-          <Typography.Title level={isMobile ? 3 : 2} style={{ margin: 0, color: "#f3f8f7" }}>
+          <Typography.Title level={isMobile ? 3 : 2} style={{ margin: 0, color: "#1f3536" }}>
             写作工作台
           </Typography.Title>
-          <Typography.Paragraph style={{ margin: 0, color: "rgba(226, 236, 234, 0.82)", maxWidth: 720, lineHeight: 1.85 }}>
+          <Typography.Paragraph style={{ margin: 0, color: "rgba(42, 74, 72, 0.82)", maxWidth: 720, lineHeight: 1.85 }}>
             在这里统览书卷、审计、修订与章节流转。让每一本书像宗门秘卷一样，有脉络、有锋芒，也有它自己的天命。
           </Typography.Paragraph>
         </Space>

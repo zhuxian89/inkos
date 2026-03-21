@@ -1,8 +1,9 @@
 "use client";
 
-import { App, Button, Card, Checkbox, Col, Divider, Form, Input, InputNumber, Modal, Radio, Row, Select, Space, Tag, Typography } from "antd";
+import { App, Button, Card, Checkbox, Col, Divider, Form, Grid, Input, InputNumber, Modal, Radio, Row, Select, Space, Tag, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 
 interface CreateBookValues {
@@ -67,7 +68,13 @@ export function CreateBookLauncher(props: Readonly<{
   const [createResult, setCreateResult] = useState<unknown>(null);
   const createPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [form] = Form.useForm<CreateBookValues>();
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const selectedCreateMode = Form.useWatch("initMode", form) ?? "full";
+
+  function assistantSessionKey(): string {
+    return "book:new";
+  }
 
   function loadStoredAssistantMessages(): ReadonlyArray<InitAssistantMessage> {
     if (typeof window === "undefined") return [];
@@ -84,6 +91,11 @@ export function CreateBookLauncher(props: Readonly<{
   function persistAssistantMessages(messages: ReadonlyArray<InitAssistantMessage>): void {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(CREATE_BOOK_CHAT_STORAGE_KEY, JSON.stringify(messages));
+    void savePersistedChatSession("book-chat", assistantSessionKey(), {
+      title: "新建书籍智能初始化",
+      messages,
+      meta: { source: "create-book-launcher" },
+    });
   }
 
   function loadStoredAssistantBrief(): string {
@@ -156,6 +168,11 @@ export function CreateBookLauncher(props: Readonly<{
       context: "",
     });
     setAssistantMessages(loadStoredAssistantMessages());
+    void loadPersistedChatSession("book-chat", assistantSessionKey()).then((messages) => {
+      if (Array.isArray(messages) && messages.length > 0) {
+        setAssistantMessages(messages as ReadonlyArray<InitAssistantMessage>);
+      }
+    });
     setAssistantBrief(loadStoredAssistantBrief());
     const storedOptions = loadStoredAssistantChatOptions();
     setAssistantUseStream(storedOptions.useStream);
@@ -176,6 +193,7 @@ export function CreateBookLauncher(props: Readonly<{
       window.localStorage.removeItem(CREATE_BOOK_CHAT_STORAGE_KEY);
       window.localStorage.removeItem(CREATE_BOOK_BRIEF_STORAGE_KEY);
     }
+    void clearPersistedChatSession("book-chat", assistantSessionKey());
   }
 
   function closeModal(): void {
@@ -339,7 +357,9 @@ export function CreateBookLauncher(props: Readonly<{
         open={open}
         onCancel={closeModal}
         footer={null}
-        width={selectedCreateMode === "smart" ? CHAT_MODAL_WIDTH : 860}
+        maskClosable={false}
+        keyboard
+        width={selectedCreateMode === "smart" ? (isMobile ? "94vw" : CHAT_MODAL_WIDTH) : 860}
         styles={selectedCreateMode === "smart" ? { body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } } : undefined}
         destroyOnHidden
       >

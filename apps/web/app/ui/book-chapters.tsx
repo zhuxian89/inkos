@@ -6,6 +6,7 @@ import { MoreOutlined } from "@ant-design/icons";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 import { IssueTags } from "./issue-tags";
 import { ChapterActions } from "./chapter-actions";
@@ -78,6 +79,10 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
     return `${CHAPTER_CHAT_STORAGE_PREFIX}${bookId}.${chapter}`;
   }
 
+  function chapterSessionKey(chapter: number): string {
+    return `chapter:${bookId}:${chapter}`;
+  }
+
   function loadStoredChapterChat(chapter: number): ReadonlyArray<ChapterChatMessage> {
     if (typeof window === "undefined") return [];
     try {
@@ -93,6 +98,13 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   function persistChapterChat(chapter: number, messages: ReadonlyArray<ChapterChatMessage>): void {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(chapterChatStorageKey(chapter), JSON.stringify(messages));
+    void savePersistedChatSession("chapter-chat", chapterSessionKey(chapter), {
+      bookId,
+      chapterNumber: chapter,
+      title: chapters.find((item) => item.number === chapter)?.title ?? `Ch.${chapter}`,
+      messages,
+      meta: { source: "book-chapters" },
+    });
   }
 
   function chapterChatOptionsStorageKey(chapter: number): string {
@@ -226,6 +238,11 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   function openChapterChat(row: ChapterMeta): void {
     setChatChapter(row);
     setChatMessages(loadStoredChapterChat(row.number));
+    void loadPersistedChatSession("chapter-chat", chapterSessionKey(row.number)).then((messages) => {
+      if (Array.isArray(messages) && messages.length > 0) {
+        setChatMessages(messages as ReadonlyArray<ChapterChatMessage>);
+      }
+    });
     const storedOptions = loadStoredChapterChatOptions(row.number);
     setChatUseStream(storedOptions.useStream);
     setChatIncludeReasoning(storedOptions.includeReasoning);
@@ -345,6 +362,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         setChatMessages([]);
         setChatDraft("");
         persistChapterChat(chatChapter.number, []);
+        void clearPersistedChatSession("chapter-chat", chapterSessionKey(chatChapter.number));
       },
     },
     {
@@ -471,6 +489,8 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           if (!chatting) setChatChapter(null);
         }}
         footer={null}
+        maskClosable={false}
+        keyboard
         width={isMobile ? "94vw" : CHAT_MODAL_WIDTH}
         style={{ top: isMobile ? 8 : 20 }}
         styles={{ body: { paddingTop: 8, height: isMobile ? "76vh" : CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
@@ -556,6 +576,8 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           if (!replacingChapter) setReplacePreviewOpen(false);
         }}
         title={chatChapter ? `替换预览 · Ch.${chatChapter.number} ${chatChapter.title}` : "替换预览"}
+        maskClosable={false}
+        keyboard
         width={CHAT_MODAL_WIDTH}
         style={{ top: 20 }}
         styles={{ body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}

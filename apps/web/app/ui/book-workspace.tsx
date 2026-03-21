@@ -26,6 +26,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { BookChapters } from "./book-chapters";
 import { ChatPanel } from "./chat-panel";
+import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 import { labelBookStatus, labelGenre, labelPlatform } from "./labels";
 
@@ -161,6 +162,10 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     return `${BOOK_ASSISTANT_CHAT_STORAGE_PREFIX}${bookId}`;
   }
 
+  function assistantSessionKey(): string {
+    return `book:${bookId}`;
+  }
+
   function assistantBriefStorageKey(): string {
     return `${BOOK_ASSISTANT_BRIEF_STORAGE_PREFIX}${bookId}`;
   }
@@ -188,6 +193,12 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   function persistAssistantMessages(messages: ReadonlyArray<InitAssistantMessage>): void {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(assistantChatStorageKey(), JSON.stringify(messages));
+    void savePersistedChatSession("book-chat", assistantSessionKey(), {
+      bookId,
+      title: bookConfigData?.book?.title ?? bookId,
+      messages,
+      meta: { source: "book-workspace" },
+    });
   }
 
   function persistAssistantBrief(brief: string): void {
@@ -273,6 +284,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(assistantChatStorageKey());
     }
+    void clearPersistedChatSession("book-chat", assistantSessionKey());
   }
 
   async function loadBookPanels(): Promise<void> {
@@ -288,6 +300,11 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
       setAuthorBrief(nextBrief);
       persistAssistantBrief(nextBrief);
       setAssistantMessages(loadStoredAssistantMessages());
+      void loadPersistedChatSession("book-chat", assistantSessionKey()).then((messages) => {
+        if (Array.isArray(messages) && messages.length > 0) {
+          setAssistantMessages(messages as ReadonlyArray<InitAssistantMessage>);
+        }
+      });
       const storedOptions = loadStoredAssistantOptions();
       setAssistantUseStream(storedOptions.useStream);
       setAssistantIncludeReasoning(storedOptions.includeReasoning);
@@ -865,7 +882,9 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         open={assistantModalOpen}
         onCancel={() => setAssistantModalOpen(false)}
         footer={null}
-        width={CHAT_MODAL_WIDTH}
+        maskClosable={false}
+        keyboard
+        width={isMobile ? "94vw" : CHAT_MODAL_WIDTH}
         styles={{ body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnHidden={false}
       >

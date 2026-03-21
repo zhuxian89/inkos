@@ -57,6 +57,16 @@ export const QualityGatesSchema = z.object({
 
 export type QualityGates = z.infer<typeof QualityGatesSchema>;
 
+export const ChatPersistenceSchema = z.object({
+  mode: z.enum(["browser", "postgres"]).default("browser"),
+  postgres: z.object({
+    connectionString: z.string().min(1),
+    tablePrefix: z.string().optional(),
+  }).optional(),
+});
+
+export type ChatPersistenceConfig = z.infer<typeof ChatPersistenceSchema>;
+
 export const ProjectConfigSchema = z.object({
   name: z.string().min(1),
   version: z.literal("0.1.0"),
@@ -64,6 +74,9 @@ export const ProjectConfigSchema = z.object({
   notify: z.array(NotifyChannelSchema).default([]),
   detection: DetectionConfigSchema.optional(),
   modelOverrides: z.record(z.string(), z.string()).optional(),
+  chatPersistence: ChatPersistenceSchema.default({
+    mode: "browser",
+  }),
   daemon: z.object({
     schedule: z.object({
       radarCron: z.string().default("0 */6 * * *"),

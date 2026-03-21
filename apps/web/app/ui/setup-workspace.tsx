@@ -24,6 +24,7 @@ import {
 } from "antd";
 import { useEffect, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 
 const PROFILE_CHAT_STORAGE_PREFIX = "inkos.profile-chat.";
@@ -189,6 +190,17 @@ export function SetupWorkspace() {
   function persistProfileChat(profileId: string, payload: StoredProfileChatSession): void {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(profileChatStorageKey(profileId), JSON.stringify(payload));
+    void savePersistedChatSession("profile-chat", `profile:${profileId}`, {
+      profileId,
+      title: `profile:${profileId}`,
+      messages: payload.messages,
+      meta: {
+        genre: payload.genre,
+        platform: payload.platform,
+        useStream: payload.useStream,
+        includeReasoning: payload.includeReasoning,
+      },
+    });
   }
 
   function runDoctor(): void {
@@ -329,6 +341,11 @@ export function SetupWorkspace() {
     setProfileChatPlatform(stored?.platform ?? "tomato");
     setProfileChatUseStream(stored?.useStream !== false);
     setProfileChatIncludeReasoning(stored?.includeReasoning === true);
+    void loadPersistedChatSession("profile-chat", `profile:${profile.id}`).then((messages) => {
+      if (Array.isArray(messages) && messages.length > 0) {
+        setProfileChatMessages(messages as ReadonlyArray<ProfileChatMessage>);
+      }
+    });
   }
 
   function sendProfileChat(): void {
@@ -677,6 +694,8 @@ export function SetupWorkspace() {
         onCancel={() => setProfileModalOpen(false)}
         title={editingProfile ? "编辑配置" : "新建配置"}
         footer={null}
+        maskClosable={false}
+        keyboard
         destroyOnClose
       >
         <Form<ProfileFormValues> layout="vertical" form={profileForm} onFinish={saveProfile}>
@@ -721,7 +740,9 @@ export function SetupWorkspace() {
         }}
         title={chatProfile ? `模型对话测试 · ${chatProfile.name}` : "模型对话测试"}
         footer={null}
-        width={CHAT_MODAL_WIDTH}
+        maskClosable={false}
+        keyboard
+        width={isMobile ? "94vw" : CHAT_MODAL_WIDTH}
         style={{ top: 20 }}
         styles={{ body: { paddingTop: 12, height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnClose

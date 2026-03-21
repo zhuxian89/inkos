@@ -136,6 +136,8 @@ export function ChapterActions(props: Readonly<{
       <Modal
         title={pendingMode ? `${getReviseModeLabel(pendingMode)} · 第 ${props.chapter} 章` : "修订"}
         open={pendingMode !== null}
+        maskClosable={false}
+        keyboard
         onCancel={() => {
           if (isRevising) return;
           setPendingMode(null);
