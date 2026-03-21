@@ -2,6 +2,7 @@ import { BaseAgent } from "./base.js";
 import type { GenreProfile } from "../models/genre-profile.js";
 import type { BookRules } from "../models/book-rules.js";
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
+import { truncateMarkdownTable } from "../utils/truncate.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -360,16 +361,16 @@ ${dimList}
       : "";
 
     const subplotBlock = subplotBoard !== "(文件不存在)"
-      ? `\n## 支线进度板\n${subplotBoard}\n`
+      ? `\n## 支线进度板\n${truncateMarkdownTable(subplotBoard, 20)}\n`
       : "";
     const emotionalBlock = emotionalArcs !== "(文件不存在)"
-      ? `\n## 情感弧线\n${emotionalArcs}\n`
+      ? `\n## 情感弧线\n${truncateMarkdownTable(emotionalArcs, 30)}\n`
       : "";
     const matrixBlock = characterMatrix !== "(文件不存在)"
-      ? `\n## 角色交互矩阵\n${characterMatrix}\n`
+      ? `\n## 角色交互矩阵\n${truncateMarkdownTable(characterMatrix, 30)}\n`
       : "";
     const summariesBlock = chapterSummaries !== "(文件不存在)"
-      ? `\n## 章节摘要（用于节奏检查）\n${chapterSummaries}\n`
+      ? `\n## 章节摘要（用于节奏检查）\n${truncateMarkdownTable(chapterSummaries, 30)}\n`
       : "";
 
     const canonBlock = hasParentCanon

@@ -788,7 +788,7 @@ export class PipelineRunner {
         const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
         const reviseOutput = await reviser.reviseChapter(
           bookDir,
-          output.content,
+          finalContent,
           chapterNumber,
           auditResult.issues,
           "spot-fix",
@@ -797,7 +797,7 @@ export class PipelineRunner {
 
         if (reviseOutput.revisedContent.length > 0) {
           // Guard: reject revision if AI markers increased
-          const preMarkers = analyzeAITells(output.content);
+          const preMarkers = analyzeAITells(finalContent);
           const postMarkers = analyzeAITells(reviseOutput.revisedContent);
           const preCount = preMarkers.issues.length;
           const postCount = postMarkers.issues.length;
@@ -814,6 +814,32 @@ export class PipelineRunner {
             finalContent = reviseOutput.revisedContent;
             finalWordCount = reviseOutput.wordCount;
             revised = true;
+
+            // Save all truth files from accepted revision
+            const storyDir = join(bookDir, "story");
+            this.debug("write_next.truth_files_from_revise.start", { bookId, chapterNumber });
+            if (reviseOutput.updatedState !== "(状态卡未更新)") {
+              await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
+            }
+            if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
+              await writeFile(join(storyDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
+            }
+            if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
+              await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
+            }
+            if (reviseOutput.updatedChapterSummaries !== "(章节摘要未更新)") {
+              await writeFile(join(storyDir, "chapter_summaries.md"), reviseOutput.updatedChapterSummaries, "utf-8");
+            }
+            if (reviseOutput.updatedSubplots !== "(支线进度板未更新)") {
+              await writeFile(join(storyDir, "subplot_board.md"), reviseOutput.updatedSubplots, "utf-8");
+            }
+            if (reviseOutput.updatedEmotionalArcs !== "(情感弧线未更新)") {
+              await writeFile(join(storyDir, "emotional_arcs.md"), reviseOutput.updatedEmotionalArcs, "utf-8");
+            }
+            if (reviseOutput.updatedCharacterMatrix !== "(角色交互矩阵未更新)") {
+              await writeFile(join(storyDir, "character_matrix.md"), reviseOutput.updatedCharacterMatrix, "utf-8");
+            }
+            this.debug("write_next.truth_files_from_revise.done", { bookId, chapterNumber });
           }
 
           // Re-audit the (possibly revised) content
@@ -842,20 +868,6 @@ export class PipelineRunner {
             issueCount: auditResult.issues.length,
             blockedWords: reHasBlocked,
           });
-
-          // Update state files from revision
-          const storyDir = join(bookDir, "story");
-          this.debug("write_next.truth_files_from_revise.start", { bookId, chapterNumber });
-          if (reviseOutput.updatedState !== "(状态卡未更新)") {
-            await writeFile(join(storyDir, "current_state.md"), reviseOutput.updatedState, "utf-8");
-          }
-          if (gp.numericalSystem && reviseOutput.updatedLedger && reviseOutput.updatedLedger !== "(账本未更新)") {
-            await writeFile(join(storyDir, "particle_ledger.md"), reviseOutput.updatedLedger, "utf-8");
-          }
-          if (reviseOutput.updatedHooks !== "(伏笔池未更新)") {
-            await writeFile(join(storyDir, "pending_hooks.md"), reviseOutput.updatedHooks, "utf-8");
-          }
-          this.debug("write_next.truth_files_from_revise.done", { bookId, chapterNumber });
         }
         log("revise", "done");
         this.debug("write_next.revise.done", {
@@ -895,9 +907,12 @@ export class PipelineRunner {
     }
 
     // Save new truth files (summaries, subplots, emotional arcs, character matrix)
-    this.debug("write_next.new_truth_files.start", { bookId, chapterNumber });
-    await writer.saveNewTruthFiles(bookDir, output);
-    this.debug("write_next.new_truth_files.done", { bookId, chapterNumber });
+    // When revised, the reviser already saved updated versions above
+    if (!revised) {
+      this.debug("write_next.new_truth_files.start", { bookId, chapterNumber });
+      await writer.saveNewTruthFiles(bookDir, output);
+      this.debug("write_next.new_truth_files.done", { bookId, chapterNumber });
+    }
 
     // 5. Update chapter index
     this.debug("write_next.index.save.start", { bookId, chapterNumber });

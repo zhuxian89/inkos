@@ -7,6 +7,8 @@ import { readGenreProfile, readBookRules } from "./rules-reader.js";
 import { validatePostWrite, type PostWriteViolation } from "./post-write-validator.js";
 import { analyzeAITells } from "./ai-tells.js";
 import { buildChapterFilename } from "../utils/chapter-files.js";
+import { extractTag } from "../utils/tag-parser.js";
+import { truncateMarkdownTable } from "../utils/truncate.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -182,7 +184,26 @@ export class WriterAgent extends BaseAgent {
     })}\n`);
 
     process.stderr.write(`${new Date().toISOString()} INFO writer.parse.start ${JSON.stringify({ chapterNumber })}\n`);
-    const output = this.parseOutput(chapterNumber, response.content, genreProfile);
+    let output = this.parseOutput(chapterNumber, response.content, genreProfile);
+
+    // Retry once if critical section (CHAPTER_CONTENT) is empty
+    if (!output.content) {
+      process.stderr.write(`${new Date().toISOString()} WARN writer.parse.empty_content — retrying ${JSON.stringify({ chapterNumber })}\n`);
+      const retryResponse = await this.chat(
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+          { role: "assistant", content: response.content },
+          { role: "user", content: "你的输出缺少 === CHAPTER_CONTENT === 区块。请只输出从 === CHAPTER_TITLE === 到 === UPDATED_CHARACTER_MATRIX === 的完整内容，严格遵循输出格式。" },
+        ],
+        { maxTokens: 16000, temperature },
+      );
+      output = this.parseOutput(chapterNumber, retryResponse.content, genreProfile);
+      if (!output.content) {
+        throw new Error(`Writer returned empty chapter content after retry (chapter ${chapterNumber})`);
+      }
+    }
+
     process.stderr.write(`${new Date().toISOString()} INFO writer.parse.done ${JSON.stringify({
       chapterNumber,
       title: output.title,
@@ -254,14 +275,16 @@ export class WriterAgent extends BaseAgent {
 
     const writes: Array<Promise<void>> = [
       writeFile(join(chaptersDir, filename), chapterContent, "utf-8"),
-      writeFile(join(storyDir, "current_state.md"), output.updatedState, "utf-8"),
-      writeFile(join(storyDir, "pending_hooks.md"), output.updatedHooks, "utf-8"),
     ];
 
-    if (numericalSystem) {
-      writes.push(
-        writeFile(join(storyDir, "particle_ledger.md"), output.updatedLedger, "utf-8"),
-      );
+    if (output.updatedState && output.updatedState !== "(状态卡未更新)") {
+      writes.push(writeFile(join(storyDir, "current_state.md"), output.updatedState, "utf-8"));
+    }
+    if (output.updatedHooks && output.updatedHooks !== "(伏笔池未更新)") {
+      writes.push(writeFile(join(storyDir, "pending_hooks.md"), output.updatedHooks, "utf-8"));
+    }
+    if (numericalSystem && output.updatedLedger && output.updatedLedger !== "(账本未更新)") {
+      writes.push(writeFile(join(storyDir, "particle_ledger.md"), output.updatedLedger, "utf-8"));
     }
 
     await Promise.all(writes);
@@ -295,19 +318,19 @@ export class WriterAgent extends BaseAgent {
       : "";
 
     const summariesBlock = params.chapterSummaries !== "(文件尚未创建)"
-      ? `\n## 章节摘要（全部历史章节压缩上下文）\n${params.chapterSummaries}\n`
+      ? `\n## 章节摘要（全部历史章节压缩上下文）\n${truncateMarkdownTable(params.chapterSummaries, 30)}\n`
       : "";
 
     const subplotBlock = params.subplotBoard !== "(文件尚未创建)"
-      ? `\n## 支线进度板\n${params.subplotBoard}\n`
+      ? `\n## 支线进度板\n${truncateMarkdownTable(params.subplotBoard, 20)}\n`
       : "";
 
     const emotionalBlock = params.emotionalArcs !== "(文件尚未创建)"
-      ? `\n## 情感弧线\n${params.emotionalArcs}\n`
+      ? `\n## 情感弧线\n${truncateMarkdownTable(params.emotionalArcs, 30)}\n`
       : "";
 
     const matrixBlock = params.characterMatrix !== "(文件尚未创建)"
-      ? `\n## 角色交互矩阵\n${params.characterMatrix}\n`
+      ? `\n## 角色交互矩阵\n${truncateMarkdownTable(params.characterMatrix, 30)}\n`
       : "";
 
     const fingerprintBlock = params.dialogueFingerprints
@@ -391,13 +414,7 @@ ${params.volumeOutline}
     content: string,
     genreProfile: GenreProfile,
   ): Omit<WriteChapterOutput, "postWriteErrors" | "postWriteWarnings"> {
-    const extract = (tag: string): string => {
-      const regex = new RegExp(
-        `=== ${tag} ===\\s*([\\s\\S]*?)(?==== [A-Z_]+ ===|$)`,
-      );
-      const match = content.match(regex);
-      return match?.[1]?.trim() ?? "";
-    };
+    const extract = (tag: string): string => extractTag(tag, content);
 
     const chapterContent = extract("CHAPTER_CONTENT");
 
@@ -424,24 +441,25 @@ ${params.volumeOutline}
   async saveNewTruthFiles(bookDir: string, output: WriteChapterOutput): Promise<void> {
     const storyDir = join(bookDir, "story");
     const writes: Array<Promise<void>> = [];
+    const isSentinel = (v: string): boolean => !v || v.startsWith("(");
 
     // Append chapter summary to chapter_summaries.md
-    if (output.chapterSummary) {
+    if (output.chapterSummary && !isSentinel(output.chapterSummary)) {
       writes.push(this.appendChapterSummary(storyDir, output.chapterSummary));
     }
 
     // Overwrite subplot board
-    if (output.updatedSubplots) {
+    if (!isSentinel(output.updatedSubplots)) {
       writes.push(writeFile(join(storyDir, "subplot_board.md"), output.updatedSubplots, "utf-8"));
     }
 
     // Overwrite emotional arcs
-    if (output.updatedEmotionalArcs) {
+    if (!isSentinel(output.updatedEmotionalArcs)) {
       writes.push(writeFile(join(storyDir, "emotional_arcs.md"), output.updatedEmotionalArcs, "utf-8"));
     }
 
     // Overwrite character matrix
-    if (output.updatedCharacterMatrix) {
+    if (!isSentinel(output.updatedCharacterMatrix)) {
       writes.push(writeFile(join(storyDir, "character_matrix.md"), output.updatedCharacterMatrix, "utf-8"));
     }
 

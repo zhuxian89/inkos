@@ -3,6 +3,8 @@ import type { GenreProfile } from "../models/genre-profile.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { AuditIssue } from "./continuity.js";
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
+import { extractTag } from "../utils/tag-parser.js";
+import { truncateMarkdownTable } from "../utils/truncate.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -166,16 +168,16 @@ ${gp.numericalSystem ? "\n=== UPDATED_LEDGER ===\n(更新后的完整资源账�
       ? `\n## 资源账本\n${ledger}`
       : "";
     const chapterSummariesBlock = chapterSummaries !== "(文件不存在)"
-      ? `\n## 章节摘要\n${chapterSummaries}`
+      ? `\n## 章节摘要\n${truncateMarkdownTable(chapterSummaries, 30)}`
       : "";
     const subplotBoardBlock = subplotBoard !== "(文件不存在)"
-      ? `\n## 支线进度板\n${subplotBoard}`
+      ? `\n## 支线进度板\n${truncateMarkdownTable(subplotBoard, 20)}`
       : "";
     const emotionalArcsBlock = emotionalArcs !== "(文件不存在)"
-      ? `\n## 情感弧线\n${emotionalArcs}`
+      ? `\n## 情感弧线\n${truncateMarkdownTable(emotionalArcs, 30)}`
       : "";
     const characterMatrixBlock = characterMatrix !== "(文件不存在)"
-      ? `\n## 角色交互矩阵\n${characterMatrix}`
+      ? `\n## 角色交互矩阵\n${truncateMarkdownTable(characterMatrix, 30)}`
       : "";
 
     const userPrompt = `请修正第${chapterNumber}章。
@@ -229,7 +231,23 @@ ${chapterContent}`;
     })}\n`);
 
     process.stderr.write(`${new Date().toISOString()} INFO reviser.parse.start ${JSON.stringify({ chapterNumber })}\n`);
-    const parsed = this.parseOutput(response.content, gp);
+    let parsed = this.parseOutput(response.content, gp);
+
+    // Retry once if critical section (REVISED_CONTENT) is empty
+    if (!parsed.revisedContent) {
+      process.stderr.write(`${new Date().toISOString()} WARN reviser.parse.empty_content — retrying ${JSON.stringify({ chapterNumber, mode })}\n`);
+      const retryResponse = await this.chat(
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+          { role: "assistant", content: response.content },
+          { role: "user", content: "你的输出缺少 === REVISED_CONTENT === 区块。请只输出从 === FIXED_ISSUES === 到 === UPDATED_CHARACTER_MATRIX === 的完整内容，严格遵循输出格式。" },
+        ],
+        { temperature: 0.3, maxTokens },
+      );
+      parsed = this.parseOutput(retryResponse.content, gp);
+    }
+
     process.stderr.write(`${new Date().toISOString()} INFO reviser.parse.done ${JSON.stringify({
       chapterNumber,
       revisedContentLength: parsed.revisedContent.length,
@@ -246,13 +264,7 @@ ${chapterContent}`;
   }
 
   private parseOutput(content: string, gp: GenreProfile): ReviseOutput {
-    const extract = (tag: string): string => {
-      const regex = new RegExp(
-        `=== ${tag} ===\\s*([\\s\\S]*?)(?==== [A-Z_]+ ===|$)`,
-      );
-      const match = content.match(regex);
-      return match?.[1]?.trim() ?? "";
-    };
+    const extract = (tag: string): string => extractTag(tag, content);
 
     const revisedContent = extract("REVISED_CONTENT");
     const fixedRaw = extract("FIXED_ISSUES");
