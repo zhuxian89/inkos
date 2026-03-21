@@ -1771,6 +1771,25 @@ function composeInitContext(context?: string, authorBrief?: string): string | un
   return sections.length > 0 ? sections.join("\n\n") : undefined;
 }
 
+async function collectAllBookPaths(rootDir: string): Promise<ReadonlyArray<string>> {
+  const paths: string[] = [];
+
+  async function walk(dir: string): Promise<void> {
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => []);
+    for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      const full = join(dir, entry.name);
+      paths.push(full);
+      if (entry.isDirectory()) {
+        await walk(full);
+      }
+    }
+  }
+
+  paths.push(rootDir);
+  await walk(rootDir);
+  return paths;
+}
+
 function mergeAuthorBrief(context?: string, authorBrief?: string): string | undefined {
   const sections = [
     context?.trim() ? `## 长期创作约束\n${context.trim()}` : "",
@@ -1782,11 +1801,13 @@ function mergeAuthorBrief(context?: string, authorBrief?: string): string | unde
 
 async function buildExistingBookContext(bookId: string): Promise<{
   readonly pathBlock: string;
+  readonly allPathsBlock: string;
   readonly memoryBlock: string;
 }> {
   const state = new StateManager(projectRoot);
   const bookDir = state.bookDir(bookId);
   const chapterIndex = await state.loadChapterIndex(bookId);
+  const allBookPaths = await collectAllBookPaths(bookDir);
   const latestChapter = [...chapterIndex].sort((left, right) => right.number - left.number)[0];
   const latestChapterFile = latestChapter
     ? await findChapterFile(bookDir, latestChapter.number, latestChapter.title).catch(() => "")
@@ -1819,6 +1840,11 @@ async function buildExistingBookContext(bookId: string): Promise<{
     "这是一本已经存在的书，请优先在这些已有资料基础上补强，不要把它当成全新开书。",
   ].join("\n");
 
+  const allPathsBlock = [
+    "## 本书全部路径（目录+文件）",
+    ...allBookPaths.map((item) => `- ${item}`),
+  ].join("\n");
+
   const memoryBlock = [
     authorBrief.trim() ? `## 已有作者简报（${authorBriefPath(bookId)}）\n${authorBrief.trim()}` : "",
     currentState.trim() ? `## 当前状态卡（${storyFilePath(bookId, "current_state.md")}）\n${currentState.trim()}` : "",
@@ -1828,7 +1854,7 @@ async function buildExistingBookContext(bookId: string): Promise<{
     .filter(Boolean)
     .join("\n\n");
 
-  return { pathBlock, memoryBlock };
+  return { pathBlock, allPathsBlock, memoryBlock };
 }
 
 function extractJsonBlock(text: string): string {
@@ -1959,6 +1985,7 @@ async function runInitAssistant(input: {
     "当前创作简报：",
     input.currentBrief?.trim() ? input.currentBrief.trim() : "（暂无，请你根据对话逐步整理）",
     existingBookContext?.pathBlock ?? "",
+    existingBookContext?.allPathsBlock ?? "",
     existingBookContext?.memoryBlock ?? "",
     "",
     "创作简报建议至少包含这些部分：",
