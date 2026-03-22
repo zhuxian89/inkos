@@ -841,9 +841,6 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                   <Button type="primary" onClick={() => setAssistantModalOpen(true)}>
                     打开智能初始化对话
                   </Button>
-                  <Button onClick={saveAuthorBrief} loading={isSavingBrief}>
-                    保存长期创作约束
-                  </Button>
                   <Button onClick={clearAssistantConversation} disabled={chatting}>
                     清空对话
                   </Button>
@@ -996,9 +993,6 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                 </Button>
                 <Button danger onClick={stopInitAssistantMessage} disabled={!chatting || !assistantJobId}>
                   停止
-                </Button>
-                <Button onClick={saveAuthorBrief} loading={isSavingBrief}>
-                  保存长期创作约束
                 </Button>
               </>
             )}
