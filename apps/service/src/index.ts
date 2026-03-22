@@ -35,6 +35,18 @@ const webCommandTimeoutMs = parseInt(process.env.INKOS_WEB_COMMAND_TIMEOUT_MS ??
 
 const app = express();
 const LOG_STRING_PREVIEW_LIMIT = 120;
+const LOG_BUFFER_LIMIT = Math.max(parseInt(process.env.INKOS_LOG_BUFFER_LIMIT ?? "1500", 10), 200);
+
+interface ServiceLogEntry {
+  readonly id: number;
+  readonly timestamp: string;
+  readonly level: "INFO" | "ERROR";
+  readonly event: string;
+  readonly meta?: Record<string, unknown>;
+}
+
+const serviceLogs: ServiceLogEntry[] = [];
+let nextServiceLogId = 1;
 
 // ---------------------------------------------------------------------------
 // In-memory job store
@@ -224,16 +236,36 @@ app.use((req, res, next) => {
 });
 
 function logInfo(event: string, meta?: Record<string, unknown>): void {
-  process.stdout.write(`${new Date().toISOString()} INFO ${event}${formatMeta(meta)}\n`);
+  const timestamp = new Date().toISOString();
+  const safeMeta = sanitizeMeta(meta);
+  appendServiceLog({ id: nextServiceLogId++, timestamp, level: "INFO", event, ...(safeMeta ? { meta: safeMeta } : {}) });
+  process.stdout.write(`${timestamp} INFO ${event}${formatMeta(safeMeta)}\n`);
 }
 
 function logError(event: string, meta?: Record<string, unknown>): void {
-  process.stderr.write(`${new Date().toISOString()} ERROR ${event}${formatMeta(meta)}\n`);
+  const timestamp = new Date().toISOString();
+  const safeMeta = sanitizeMeta(meta);
+  appendServiceLog({ id: nextServiceLogId++, timestamp, level: "ERROR", event, ...(safeMeta ? { meta: safeMeta } : {}) });
+  process.stderr.write(`${timestamp} ERROR ${event}${formatMeta(safeMeta)}\n`);
 }
 
 function formatMeta(meta?: Record<string, unknown>): string {
   if (!meta || Object.keys(meta).length === 0) return "";
-  return ` ${JSON.stringify(sanitizeForLog(meta))}`;
+  return ` ${JSON.stringify(meta)}`;
+}
+
+function sanitizeMeta(meta?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!meta || Object.keys(meta).length === 0) return undefined;
+  const sanitized = sanitizeForLog(meta);
+  if (!sanitized || typeof sanitized !== "object" || Array.isArray(sanitized)) return undefined;
+  return sanitized as Record<string, unknown>;
+}
+
+function appendServiceLog(entry: ServiceLogEntry): void {
+  serviceLogs.push(entry);
+  if (serviceLogs.length > LOG_BUFFER_LIMIT) {
+    serviceLogs.splice(0, serviceLogs.length - LOG_BUFFER_LIMIT);
+  }
 }
 
 function describeError(error: unknown): string {
@@ -1259,7 +1291,10 @@ async function runProfileChatWithTools(
   logInfo("llm_profiles.chat.compaction", {
     profileId,
     model,
-    ...compacted.stats,
+    originalEstimate: compacted.stats.originalTokenEstimate,
+    compactedEstimate: compacted.stats.compactedTokenEstimate,
+    compressionTriggered: compacted.stats.compressionTriggered,
+    summaryLength: compacted.stats.summaryLength,
   });
 
   return runToolEnabledConversation(client, model, compacted.messages, {
@@ -2215,7 +2250,10 @@ async function runInitAssistant(input: {
     bookId: input.bookId ?? null,
     profileId: llm.profileId ?? null,
     model: llm.model,
-    ...compacted.stats,
+    originalEstimate: compacted.stats.originalTokenEstimate,
+    compactedEstimate: compacted.stats.compactedTokenEstimate,
+    compressionTriggered: compacted.stats.compressionTriggered,
+    summaryLength: compacted.stats.summaryLength,
   });
 
   const response = await runToolEnabledConversation(llm.client, llm.model, compacted.messages, {
@@ -2399,7 +2437,10 @@ async function runChapterAssistant(input: {
     chapterNumber: input.chapterNumber,
     profileId: input.profileId ?? null,
     model: llm.model,
-    ...compacted.stats,
+    originalEstimate: compacted.stats.originalTokenEstimate,
+    compactedEstimate: compacted.stats.compactedTokenEstimate,
+    compressionTriggered: compacted.stats.compressionTriggered,
+    summaryLength: compacted.stats.summaryLength,
   });
 
   const response = await runToolEnabledConversation(
@@ -2452,6 +2493,37 @@ app.get("/api/health", async (_req, res) => {
     service: "inkos-service",
     projectRoot,
     daemon: await daemonStatus(),
+  });
+});
+
+app.get("/api/logs", async (req, res) => {
+  const limitRaw = typeof req.query.limit === "string" ? parseInt(req.query.limit, 10) : 200;
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 1000) : 200;
+  const sinceIdRaw = typeof req.query.sinceId === "string" ? parseInt(req.query.sinceId, 10) : 0;
+  const sinceId = Number.isFinite(sinceIdRaw) ? Math.max(sinceIdRaw, 0) : 0;
+  const level = typeof req.query.level === "string" ? req.query.level.toUpperCase() : "";
+  const eventIncludes = typeof req.query.eventIncludes === "string" ? req.query.eventIncludes.trim().toLowerCase() : "";
+
+  let rows = serviceLogs.slice();
+  if (sinceId > 0) {
+    rows = rows.filter((item) => item.id > sinceId);
+  }
+  if (level === "INFO" || level === "ERROR") {
+    rows = rows.filter((item) => item.level === level);
+  }
+  if (eventIncludes) {
+    rows = rows.filter((item) => item.event.toLowerCase().includes(eventIncludes));
+  }
+  if (rows.length > limit) {
+    rows = rows.slice(-limit);
+  }
+
+  res.json({
+    ok: true,
+    logs: rows,
+    lastId: rows.length > 0 ? rows[rows.length - 1]!.id : sinceId,
+    buffered: serviceLogs.length,
+    bufferLimit: LOG_BUFFER_LIMIT,
   });
 });
 

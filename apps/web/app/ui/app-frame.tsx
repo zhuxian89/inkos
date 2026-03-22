@@ -1,6 +1,6 @@
 "use client";
 
-import { AppstoreOutlined, ConsoleSqlOutlined, FundProjectionScreenOutlined, HomeOutlined, SettingOutlined } from "@ant-design/icons";
+import { AppstoreOutlined, ConsoleSqlOutlined, FundProjectionScreenOutlined, HomeOutlined, ReadOutlined, SettingOutlined } from "@ant-design/icons";
 import { Grid, Layout, Menu } from "antd";
 import type { MenuProps } from "antd";
 import Link from "next/link";
@@ -10,6 +10,7 @@ const NAV_ITEMS: MenuProps["items"] = [
   { key: "/", icon: <HomeOutlined />, label: <Link href="/">首页</Link> },
   { key: "/market", icon: <FundProjectionScreenOutlined />, label: <Link href="/market">市场趋势</Link> },
   { key: "/genres", icon: <AppstoreOutlined />, label: <Link href="/genres">题材库</Link> },
+  { key: "/logs", icon: <ReadOutlined />, label: <Link href="/logs">实时日志</Link> },
   { key: "/settings", icon: <SettingOutlined />, label: <Link href="/settings">设置</Link> },
   { key: "/commands", icon: <ConsoleSqlOutlined />, label: <Link href="/commands">高级工具</Link> },
 ];
@@ -17,6 +18,7 @@ const NAV_ITEMS: MenuProps["items"] = [
 function selectedKey(pathname: string): string {
   if (pathname.startsWith("/market")) return "/market";
   if (pathname.startsWith("/genres")) return "/genres";
+  if (pathname.startsWith("/logs")) return "/logs";
   if (pathname.startsWith("/settings") || pathname.startsWith("/setup")) return "/settings";
   if (pathname.startsWith("/commands")) return "/commands";
   return "/";
