@@ -23,6 +23,7 @@ import { Pool } from "pg";
 import { fileURLToPath } from "node:url";
 import { z } from "zod";
 import { commandRegistry, getCommandDefinition } from "./command-registry.js";
+import { compactConversationMessages } from "./compaction.js";
 import { loadProjectSummary } from "./project.js";
 import { createBookConfig, createPipeline, loadProjectConfig, resolveBookId } from "./runtime.js";
 
@@ -1249,12 +1250,19 @@ async function runProfileChatWithTools(
     readonly onTextDelta?: (delta: string) => void;
     readonly onReasoningDelta?: (delta: string) => void;
   },
-): Promise<{
+  ): Promise<{
   readonly content: string;
   readonly reasoning?: string;
   readonly toolTrace: ReadonlyArray<{ readonly name: string; readonly args: Record<string, unknown> }>;
 }> {
-  return runToolEnabledConversation(client, model, messages, {
+  const compacted = compactConversationMessages(messages, { mode: "profile" });
+  logInfo("llm_profiles.chat.compaction", {
+    profileId,
+    model,
+    ...compacted.stats,
+  });
+
+  return runToolEnabledConversation(client, model, compacted.messages, {
     maxTurns: 8,
     useStream: options?.useStream,
     includeReasoning: options?.includeReasoning,
@@ -2186,8 +2194,15 @@ async function runInitAssistant(input: {
     { role: "user", content: metaPrompt },
     ...userMessages,
   ];
+  const compacted = compactConversationMessages(messages, { mode: "init" });
+  logInfo("init_assistant.chat.compaction", {
+    bookId: input.bookId ?? null,
+    profileId: llm.profileId ?? null,
+    model: llm.model,
+    ...compacted.stats,
+  });
 
-  const response = await runToolEnabledConversation(llm.client, llm.model, messages, {
+  const response = await runToolEnabledConversation(llm.client, llm.model, compacted.messages, {
     maxTurns: 8,
     useStream: input.useStream,
     includeReasoning: input.includeReasoning,
@@ -2357,14 +2372,24 @@ async function runChapterAssistant(input: {
     return { role: message.role, content: message.content };
   });
 
+  const messages: Array<{ readonly role: "system" | "user" | "assistant"; readonly content: string }> = [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: contextPrompt },
+    ...userMessages,
+  ];
+  const compacted = compactConversationMessages(messages, { mode: "chapter" });
+  logInfo("chapter.chat.compaction", {
+    bookId: input.bookId,
+    chapterNumber: input.chapterNumber,
+    profileId: input.profileId ?? null,
+    model: llm.model,
+    ...compacted.stats,
+  });
+
   const response = await runToolEnabledConversation(
     llm.client,
     llm.model,
-    [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: contextPrompt },
-      ...userMessages,
-    ],
+    compacted.messages,
     {
       maxTurns: 8,
       useStream: input.useStream,
