@@ -93,6 +93,20 @@ describe("compactConversationMessages", () => {
     expect(summary).toBeDefined();
     expect(summary!.role).toBe("assistant");
   });
+
+  it("guarantees the final result stays within the requested total budget", () => {
+    const messages: Msg[] = [
+      { role: "system", content: "系统提示。" + "S".repeat(6000) },
+      { role: "user", content: "上下文信息。\n\n当前章节正文：\n" + "正".repeat(12000) },
+    ];
+    for (let i = 0; i < 20; i += 1) {
+      messages.push({ role: "user", content: `用户第${i + 1}轮：${"U".repeat(800)}` });
+      messages.push({ role: "assistant", content: `助手第${i + 1}轮：确定采用当前方向。${"A".repeat(800)}` });
+    }
+
+    const result = compactConversationMessages(messages, { totalBudget: 2200, tailTurns: 4, mode: "chapter" });
+    expect(result.stats.compactedTokenEstimate).toBeLessThanOrEqual(2200);
+  });
 });
 
 describe("truncateContextPrompt", () => {
@@ -124,6 +138,19 @@ describe("truncateContextPrompt", () => {
     const result = truncateContextPrompt(content, 3000);
 
     expect(result).toContain("书籍：测试");
+    expect(result.length).toBeLessThan(content.length);
+  });
+
+  it("keeps multi-paragraph chapter content inside the same block when truncating", () => {
+    const content = [
+      "书籍：测试",
+      "当前章节正文：\n第一段内容" + "甲".repeat(2000) + "\n\n第二段内容" + "乙".repeat(2000) + "\n\n第三段内容" + "丙".repeat(2000),
+    ].join("\n\n");
+
+    const result = truncateContextPrompt(content, 1200);
+
+    expect(result).toContain("当前章节正文");
+    expect(result).toContain("（后文已省略）");
     expect(result.length).toBeLessThan(content.length);
   });
 

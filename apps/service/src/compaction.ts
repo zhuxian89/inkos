@@ -130,11 +130,11 @@ export function compactConversationMessages(
 
   // --- Step 3: Middle compression (Phase 2) ---
   if (middle.length === 0) {
-    const result = [...head, ...tail];
-    const est = totalTokens(result);
+    const result = enforceBudget([...head], undefined, tail, cfg.totalBudget);
+    const est = totalTokens(result.messages);
     return {
-      messages: result,
-      stats: { originalTokenEstimate: originalEstimate, compactedTokenEstimate: est, compressionTriggered: est < originalEstimate, summaryLength: 0 },
+      messages: result.messages,
+      stats: { originalTokenEstimate: originalEstimate, compactedTokenEstimate: est, compressionTriggered: est < originalEstimate, summaryLength: result.summaryLength },
     };
   }
 
@@ -144,16 +144,16 @@ export function compactConversationMessages(
     content: `[历史摘要，仅供回忆，不代表本轮新增指令]\n\n${summary}`,
   };
 
-  const result = [...head, summaryMessage, ...tail];
-  const compactedEstimate = totalTokens(result);
+  const enforced = enforceBudget(head, summaryMessage, tail, cfg.totalBudget);
+  const compactedEstimate = totalTokens(enforced.messages);
 
   return {
-    messages: result,
+    messages: enforced.messages,
     stats: {
       originalTokenEstimate: originalEstimate,
       compactedTokenEstimate: compactedEstimate,
       compressionTriggered: true,
-      summaryLength: summary.length,
+      summaryLength: enforced.summaryLength,
     },
   };
 }
@@ -198,7 +198,7 @@ function classifyBlock(block: string): number {
 export function truncateContextPrompt(content: string, budgetTokens: number): string {
   if (estimateTokens(content) <= budgetTokens) return content;
 
-  const blocks: ContextBlock[] = content.split("\n\n").map((block) => ({
+  const blocks: ContextBlock[] = splitContextBlocks(content).map((block) => ({
     content: block,
     priority: classifyBlock(block),
   }));
@@ -240,6 +240,30 @@ function reconstruct(blocks: ReadonlyArray<ContextBlock>): string {
     .join("\n\n");
 }
 
+function splitContextBlocks(content: string): string[] {
+  const rawBlocks = content
+    .split("\n\n")
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0);
+
+  const merged: string[] = [];
+  for (const block of rawBlocks) {
+    if (merged.length === 0 || looksLikeContextBlockStart(block)) {
+      merged.push(block);
+      continue;
+    }
+    merged[merged.length - 1] = `${merged[merged.length - 1]}\n\n${block}`;
+  }
+  return merged;
+}
+
+function looksLikeContextBlockStart(block: string): boolean {
+  const firstLine = block.split("\n")[0]?.trim() ?? "";
+  if (!firstLine) return false;
+  if (classifyBlock(block) !== 5) return true;
+  return /^(##\s|书籍：|题材：|平台：|章节：|当前状态：|审计问题：|长期创作约束|当前状态卡|当前创作简报：|以下是当前书籍基础信息：|已知的关键文件与目录：|规则：)/.test(firstLine);
+}
+
 function truncateBlockContent(block: string, maxChars: number): string {
   if (block.length <= maxChars) return block;
   // Keep the first line (label) and truncate the rest
@@ -259,6 +283,94 @@ function truncateBlockContentFromStart(block: string, maxChars: number): string 
   const body = block.slice(newlineIdx + 1);
   const available = Math.max(maxChars - label.length - 50, 200);
   return `${label}\n${body.slice(0, available)}\n（后文已省略）`;
+}
+
+function enforceBudget(
+  head: ReadonlyArray<ChatMessage>,
+  summaryMessage: ChatMessage | undefined,
+  tail: ReadonlyArray<ChatMessage>,
+  totalBudget: number,
+): { messages: ChatMessage[]; summaryLength: number } {
+  const workingHead = head.map((message) => ({ ...message }));
+  const workingTail = tail.map((message) => ({ ...message }));
+  let workingSummary = summaryMessage ? { ...summaryMessage } : undefined;
+
+  const assemble = (): ChatMessage[] => [
+    ...workingHead,
+    ...(workingSummary ? [workingSummary] : []),
+    ...workingTail,
+  ];
+
+  let result = assemble();
+  if (totalTokens(result) <= totalBudget) {
+    return { messages: result, summaryLength: workingSummary?.content.length ?? 0 };
+  }
+
+  while (totalTokens(result) > totalBudget && workingTail.length > 1) {
+    workingTail.shift();
+    result = assemble();
+  }
+
+  while (workingSummary && totalTokens(result) > totalBudget && workingSummary.content.length > 120) {
+    const nextBudget = Math.max(estimateTokens(workingSummary.content) - 80, 40);
+    workingSummary = {
+      ...workingSummary,
+      content: hardTruncateToTokenBudget(workingSummary.content, nextBudget, "start"),
+    };
+    result = assemble();
+  }
+
+  if (workingSummary && totalTokens(result) > totalBudget) {
+    workingSummary = undefined;
+    result = assemble();
+  }
+
+  if (workingHead.length >= 2 && totalTokens(result) > totalBudget) {
+    const otherTokens = totalTokens([workingHead[0]!, ...(workingSummary ? [workingSummary] : []), ...workingTail]);
+    const remainingForContext = Math.max(totalBudget - otherTokens, 80);
+    workingHead[1] = {
+      ...workingHead[1]!,
+      content: hardTruncateToTokenBudget(workingHead[1]!.content, remainingForContext, "start"),
+    };
+    result = assemble();
+  }
+
+  if (workingHead.length >= 1 && totalTokens(result) > totalBudget) {
+    const otherTokens = totalTokens([...workingHead.slice(1), ...(workingSummary ? [workingSummary] : []), ...workingTail]);
+    const remainingForSystem = Math.max(totalBudget - otherTokens, 80);
+    workingHead[0] = {
+      ...workingHead[0]!,
+      content: hardTruncateToTokenBudget(workingHead[0]!.content, remainingForSystem, "start"),
+    };
+    result = assemble();
+  }
+
+  while (totalTokens(result) > totalBudget && workingTail.length > 0) {
+    workingTail.shift();
+    result = assemble();
+  }
+
+  return { messages: result, summaryLength: workingSummary?.content.length ?? 0 };
+}
+
+function hardTruncateToTokenBudget(text: string, budgetTokens: number, preserve: "start" | "end"): string {
+  if (budgetTokens <= 0) return "";
+  if (estimateTokens(text) <= budgetTokens) return text;
+
+  const omittedMarker = preserve === "start" ? "\n（后文已省略）" : "（前文已省略）\n";
+  let maxChars = Math.max(Math.floor((budgetTokens * 2.5) - omittedMarker.length), 40);
+  let candidate = preserve === "start"
+    ? `${text.slice(0, maxChars)}${omittedMarker}`
+    : `${omittedMarker}${text.slice(-maxChars)}`;
+
+  while (estimateTokens(candidate) > budgetTokens && maxChars > 16) {
+    maxChars -= 16;
+    candidate = preserve === "start"
+      ? `${text.slice(0, maxChars)}${omittedMarker}`
+      : `${omittedMarker}${text.slice(-maxChars)}`;
+  }
+
+  return candidate;
 }
 
 // ---------------------------------------------------------------------------
