@@ -1951,6 +1951,31 @@ function extractJsonBlock(text: string): string {
   return trimmed;
 }
 
+function extractTaggedBlock(text: string, tag: string): string | undefined {
+  const match = text.match(new RegExp(`<${tag}>\\s*([\\s\\S]*?)\\s*<\\/${tag}>`, "i"));
+  const value = match?.[1]?.trim();
+  return value ? value : undefined;
+}
+
+function tryParseTaggedInitPayload(text: string, currentBrief?: string): { reply: string; brief: string } | undefined {
+  const reply = extractTaggedBlock(text, "reply_md");
+  const briefMode = extractTaggedBlock(text, "brief_mode")?.toLowerCase();
+  const briefMd = extractTaggedBlock(text, "brief_md");
+  if (!reply && !briefMode && !briefMd) return undefined;
+
+  const preservedBrief = currentBrief?.trim() || "";
+  const nextBrief = briefMode === "replace"
+    ? (briefMd?.trim() || preservedBrief)
+    : briefMode === "unchanged"
+      ? preservedBrief
+      : (briefMd?.trim() || preservedBrief);
+
+  return {
+    reply: reply || "",
+    brief: nextBrief,
+  };
+}
+
 function tryParseInitPayload(text: string): { reply: string; brief: string } | undefined {
   const candidate = extractJsonBlock(text);
   let parsed = safeParseJson(candidate);
@@ -1965,6 +1990,14 @@ function tryParseInitPayload(text: string): { reply: string; brief: string } | u
 }
 
 function parseInitAssistantPayload(raw: string, currentBrief?: string): { reply: string; brief: string } {
+  const tagged = tryParseTaggedInitPayload(raw, currentBrief);
+  if (tagged) {
+    return {
+      reply: tagged.reply || "我已经整理好了当前方向，你可以继续补充人物、冲突或结局。",
+      brief: tagged.brief || currentBrief?.trim() || "",
+    };
+  }
+
   const parsed = tryParseInitPayload(raw);
   if (parsed) {
     let reply = parsed.reply;
@@ -2080,11 +2113,30 @@ async function runInitAssistant(input: {
     "你必须显式利用系统给你的平台信息、题材规则和 InkOS 架构上下文，不要把自己当成普通写作助手。",
     "如果我提供了某本已存在书籍的目录、story 文件路径和已有长期记忆，说明这次是在旧书基础上继续补强，你必须优先尊重这些已有资料。",
     "遇到书名还不稳、主线不清、结局含糊、主角动机发虚时，优先追问这些关键点。",
-    "每次都要同步维护一份可直接用于初始化的\u201C创作简报\u201D。",
-    "reply 字段可以使用 Markdown，便于用标题、列表等方式提高可读性；brief 字段继续输出完整创作简报 Markdown。",
-    "输出必须是 JSON，对象结构如下：",
-    "{\"reply\":\"给作者的话\",\"brief\":\"完整创作简报Markdown\"}",
-    "不要用 Markdown 代码块包裹整个 JSON，不要输出额外解释。",
+    "每次都必须输出 <reply_md> 区块，里面写给作者看的 Markdown 正文。",
+    "只有当本轮形成了新的稳定设定、平台策略或明确结论，才更新创作简报；否则不要重写简报。",
+    "输出格式必须严格遵守以下标签协议：",
+    "<reply_md>",
+    "给作者看的 Markdown 回复",
+    "</reply_md>",
+    "",
+    "<brief_mode>",
+    "unchanged 或 replace",
+    "</brief_mode>",
+    "",
+    "只有当 brief_mode=replace 时，才额外输出：",
+    "<brief_md>",
+    "更新后的完整创作简报 Markdown",
+    "</brief_md>",
+    "",
+    "规则：",
+    "1. 不要输出 JSON。",
+    "2. 不要用 Markdown 代码块包裹整个回复。",
+    "3. 标签名必须完全一致：reply_md、brief_mode、brief_md。",
+    "4. reply_md / brief_md 内部都直接写 Markdown 原文，不要把换行写成 \\n，不要再次包装成 JSON 字符串。",
+    "5. 如果本轮只是追问、解释、闲聊、格式测试或复述已有结论，brief_mode 应为 unchanged。",
+    "6. 如果本轮要更新简报，brief_mode 必须为 replace，且 brief_md 必须是完整新版本，不是增量补丁。",
+    "7. 不要输出任何额外解释。",
     "",
     systemContext,
     initPathReference,
