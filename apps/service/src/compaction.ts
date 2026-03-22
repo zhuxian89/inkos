@@ -3,7 +3,7 @@
 // ---------------------------------------------------------------------------
 
 export interface CompactionConfig {
-  /** Total token budget for the entire message array. Default 50000. */
+  /** Total token budget for the entire message array. Default 30000. */
   readonly totalBudget: number;
   /** Number of recent turn-pairs to keep verbatim. Default 6 (= 12 messages). */
   readonly tailTurns: number;
@@ -27,10 +27,26 @@ export interface CompactionResult {
 
 type ChatMessage = { readonly role: "system" | "user" | "assistant"; readonly content: string };
 
+function readEnvInt(name: string, fallback: number, min: number, max?: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  const clamped = Math.max(parsed, min);
+  return typeof max === "number" ? Math.min(clamped, max) : clamped;
+}
+
+const ENV_TOTAL_BUDGET = readEnvInt("INKOS_COMPACTION_TOTAL_BUDGET", 30000, 2000);
+const ENV_TAIL_TURNS = readEnvInt("INKOS_COMPACTION_TAIL_TURNS", 6, 1, 30);
+const ENV_CONTEXT_BUDGET = Math.min(
+  readEnvInt("INKOS_COMPACTION_CONTEXT_BUDGET", 16000, 1000),
+  ENV_TOTAL_BUDGET,
+);
+
 const DEFAULT_CONFIG: CompactionConfig = {
-  totalBudget: 50000,
-  tailTurns: 6,
-  contextBudget: 16000,
+  totalBudget: ENV_TOTAL_BUDGET,
+  tailTurns: ENV_TAIL_TURNS,
+  contextBudget: ENV_CONTEXT_BUDGET,
   mode: "chapter",
 };
 

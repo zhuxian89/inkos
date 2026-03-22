@@ -7,6 +7,10 @@ services:
       PORT: 4010
       INKOS_PROJECT_ROOT: /data/project
       INKOS_HOME: /root/.inkos
+      INKOS_COMPACTION_TOTAL_BUDGET: 30000
+      # Optional:
+      # INKOS_COMPACTION_CONTEXT_BUDGET: 16000
+      # INKOS_COMPACTION_TAIL_TURNS: 6
       # Do not hardcode INKOS_LLM_* here.
       # The service re-reads LLM config from the mounted files below:
       # - /root/.inkos/.env

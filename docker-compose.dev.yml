@@ -6,6 +6,10 @@ services:
       PORT: 4010
       INKOS_PROJECT_ROOT: /data/project
       INKOS_HOME: /root/.inkos
+      INKOS_COMPACTION_TOTAL_BUDGET: 30000
+      # Optional:
+      # INKOS_COMPACTION_CONTEXT_BUDGET: 16000
+      # INKOS_COMPACTION_TAIL_TURNS: 6
       CHOKIDAR_USEPOLLING: "1"
       WATCHPACK_POLLING: "true"
     volumes:
