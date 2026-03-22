@@ -1997,11 +1997,27 @@ function tryParseInitPayload(text: string): { reply: string; brief: string } | u
   return { reply, brief };
 }
 
+function normalizeInitAssistantReplyMarkdown(text: string): string {
+  const normalized = text.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return normalized;
+
+  let next = normalized;
+
+  // Put common block markers on their own lines so ReactMarkdown can render them stably.
+  next = next.replace(/\s+---\s+/g, "\n\n---\n\n");
+  next = next.replace(/([^\n])\s+(#{1,6}\s+)/g, "$1\n\n$2");
+  next = next.replace(/([：:])\s+-\s+/g, "$1\n- ");
+  next = next.replace(/([^\n])\s+(\d+\.\s+)/g, "$1\n$2");
+  next = next.replace(/\n{3,}/g, "\n\n");
+
+  return next.trim();
+}
+
 function parseInitAssistantPayload(raw: string, currentBrief?: string): { reply: string; brief: string } {
   const tagged = tryParseTaggedInitPayload(raw, currentBrief);
   if (tagged) {
     return {
-      reply: tagged.reply || "我已经整理好了当前方向，你可以继续补充人物、冲突或结局。",
+      reply: normalizeInitAssistantReplyMarkdown(tagged.reply || "我已经整理好了当前方向，你可以继续补充人物、冲突或结局。"),
       brief: tagged.brief || currentBrief?.trim() || "",
     };
   }
@@ -2019,13 +2035,13 @@ function parseInitAssistantPayload(raw: string, currentBrief?: string): { reply:
     }
 
     return {
-      reply: reply || "我已经整理好了当前方向，你可以继续补充人物、冲突或结局。",
+      reply: normalizeInitAssistantReplyMarkdown(reply || "我已经整理好了当前方向，你可以继续补充人物、冲突或结局。"),
       brief: brief || currentBrief?.trim() || "",
     };
   }
 
   return {
-    reply: raw.trim(),
+    reply: normalizeInitAssistantReplyMarkdown(raw.trim()),
     brief: currentBrief?.trim() || "",
   };
 }
