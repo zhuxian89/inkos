@@ -1,6 +1,6 @@
 "use client";
 
-import { Button, Card, Descriptions, Space, Typography } from "antd";
+import { Button, Card, Descriptions, Space, Typography, message } from "antd";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { IssueTags } from "./issue-tags";
@@ -11,6 +11,7 @@ interface DetailResponse {
   readonly chapter?: number;
   readonly title?: string;
   readonly filePath?: string;
+  readonly rawContent?: string;
   readonly content?: string;
   readonly meta?: {
     readonly status: string;
@@ -24,6 +25,7 @@ interface DetailResponse {
 export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: string }>) {
   const { bookId, chapter } = props;
   const [data, setData] = useState<DetailResponse | null>(null);
+  const [messageApi, contextHolder] = message.useMessage();
 
   useEffect(() => {
     void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${encodeURIComponent(chapter)}`, { cache: "no-store" })
@@ -31,8 +33,25 @@ export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: str
       .then((json: DetailResponse) => setData(json));
   }, [bookId, chapter]);
 
+  function copyChapterContent(): void {
+    const content = data?.rawContent ?? data?.content;
+    if (!content) {
+      void messageApi.warning("当前没有可复制的 Markdown 源文");
+      return;
+    }
+    void navigator.clipboard.writeText(content).then(
+      () => {
+        void messageApi.success("已复制 Markdown 源文到剪贴板");
+      },
+      () => {
+        void messageApi.error("复制失败，请稍后重试");
+      },
+    );
+  }
+
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
+      {contextHolder}
       <Card
         style={{
           borderRadius: 24,
@@ -66,6 +85,11 @@ export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: str
 
       <Card
         title="正文"
+        extra={(
+          <Button onClick={copyChapterContent} disabled={!data?.rawContent && !data?.content}>
+            复制 Markdown 源文
+          </Button>
+        )}
         bodyStyle={{
           padding: 0,
           background:

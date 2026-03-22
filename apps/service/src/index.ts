@@ -2698,6 +2698,7 @@ app.get("/api/books/:bookId/chapters/:chapter", async (req, res) => {
       chapter: chapterNumber,
       title,
       filePath: chapterFile,
+      rawContent: raw,
       content,
       meta: chapterMeta ?? null,
     });
