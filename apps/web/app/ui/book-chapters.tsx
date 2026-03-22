@@ -382,7 +382,13 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         <Space>
           <Button size="small" loading={openingChapter === row.number} onClick={() => loadChapterDetail(row.number)}>打开</Button>
           <Button size="small" onClick={() => openChapterChat(row)}>对话</Button>
-          <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}><Button size="small" type="link">详情</Button></Link>
+          <Link
+            href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            <Button size="small" type="link">详情</Button>
+          </Link>
           <ChapterActions
             bookId={bookId}
             chapter={row.number}
@@ -447,7 +453,11 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
                     <Button loading={openingChapter === row.number} onClick={() => loadChapterDetail(row.number)}>打开</Button>
                     <Button onClick={() => openChapterChat(row)}>对话</Button>
-                    <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}>
+                    <Link
+                      href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
                       <Button block>详情</Button>
                     </Link>
                   </div>
