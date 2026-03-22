@@ -1882,8 +1882,15 @@ async function buildExistingBookContext(bookId: string): Promise<{
 }
 
 function extractJsonBlock(text: string): string {
+  // 1. Try fenced code block: ```json ... ```
   const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
   if (fenced?.[1]) return fenced[1].trim();
+  // 2. Try extracting a raw JSON object (possibly preceded by preamble text)
+  const jsonStart = text.indexOf("{");
+  const jsonEnd = text.lastIndexOf("}");
+  if (jsonStart !== -1 && jsonEnd > jsonStart) {
+    return text.slice(jsonStart, jsonEnd + 1);
+  }
   return text.trim();
 }
 
