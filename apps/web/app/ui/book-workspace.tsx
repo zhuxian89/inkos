@@ -145,6 +145,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const [assistantMessages, setAssistantMessages] = useState<ReadonlyArray<InitAssistantMessage>>([]);
   const [assistantDraft, setAssistantDraft] = useState("");
   const [chatting, setChatting] = useState(false);
+  const [assistantJobId, setAssistantJobId] = useState<string | null>(null);
   const [assistantModalOpen, setAssistantModalOpen] = useState(false);
   const [assistantUseStream, setAssistantUseStream] = useState(true);
   const [assistantIncludeReasoning, setAssistantIncludeReasoning] = useState(false);
@@ -266,6 +267,13 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
             resolve(job.result);
             return;
           }
+          if (job.status === "cancelled") {
+            clearInterval(timer);
+            const error = new Error(job.error ?? "任务已取消");
+            (error as Error & { code?: string }).code = "JOB_CANCELLED";
+            reject(error);
+            return;
+          }
           if (job.status === "error") {
             clearInterval(timer);
             reject(new Error(job.error ?? "任务执行失败"));
@@ -276,6 +284,35 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         }
       }, 3000);
     });
+  }
+
+  function isCancelledError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const maybe = error as { code?: unknown; message?: unknown; name?: unknown };
+    if (maybe.code === "JOB_CANCELLED") return true;
+    if (maybe.name === "AbortError") return true;
+    return typeof maybe.message === "string" && maybe.message.includes("取消");
+  }
+
+  function stopInitAssistantMessage(): void {
+    if (!assistantJobId || !chatting) return;
+    void fetch(`/api/inkos/jobs/${encodeURIComponent(assistantJobId)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "用户停止生成" }),
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || !data?.ok) {
+          throw new Error(data?.error ?? "停止失败");
+        }
+        setChatting(false);
+        setAssistantJobId(null);
+        void message.success("已停止本次生成");
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      });
   }
 
   function clearAssistantConversation(): void {
@@ -579,7 +616,9 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         if (!response.ok || !data.ok || !data.jobId) {
           throw new Error(data.error ?? "智能初始化对话失败");
         }
-        const result = (await pollJob(String(data.jobId))) as InitAssistantResult;
+        const jobId = String(data.jobId);
+        setAssistantJobId(jobId);
+        const result = (await pollJob(jobId)) as InitAssistantResult;
         const updatedMessages = [
           ...nextMessages,
           {
@@ -596,9 +635,13 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         }
       })
       .catch((error: unknown) => {
+        if (isCancelledError(error)) return;
         void message.error(error instanceof Error ? error.message : String(error));
       })
-      .finally(() => setChatting(false));
+      .finally(() => {
+        setChatting(false);
+        setAssistantJobId(null);
+      });
   }
 
   const tabs = [
@@ -950,6 +993,9 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               <>
                 <Button onClick={clearAssistantConversation} disabled={chatting || isSavingBrief}>
                   清空对话
+                </Button>
+                <Button danger onClick={stopInitAssistantMessage} disabled={!chatting || !assistantJobId}>
+                  停止
                 </Button>
                 <Button onClick={saveAuthorBrief} loading={isSavingBrief}>
                   保存长期创作约束

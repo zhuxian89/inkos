@@ -55,11 +55,13 @@ let nextServiceLogId = 1;
 interface Job {
   readonly id: string;
   readonly type: "write-next" | "create-book" | "command" | "audit" | "revise" | "chapter-chat" | "init-assistant-chat";
-  status: "running" | "done" | "error";
+  status: "running" | "done" | "error" | "cancelled";
   step: string;
   bookId?: string;
   result?: unknown;
   error?: string;
+  cancelRequested?: boolean;
+  abortController?: AbortController;
   createdAt: number;
 }
 
@@ -313,11 +315,13 @@ function startJob(job: Job, meta?: Record<string, unknown>): void {
 }
 
 function updateJobStep(job: Job, step: string, meta?: Record<string, unknown>): void {
+  if (job.status !== "running") return;
   job.step = step;
   logInfo("job.step", { jobId: job.id, type: job.type, bookId: job.bookId, step, ...meta });
 }
 
 function finishJob(job: Job, result?: Record<string, unknown>): void {
+  if (job.status !== "running") return;
   job.status = "done";
   job.step = "已完成";
   logInfo("job.done", {
@@ -330,6 +334,7 @@ function finishJob(job: Job, result?: Record<string, unknown>): void {
 }
 
 function failJob(job: Job, error: unknown): void {
+  if (job.status !== "running") return;
   job.status = "error";
   job.error = describeError(error);
   job.step = "失败";
@@ -340,6 +345,51 @@ function failJob(job: Job, error: unknown): void {
     durationMs: Date.now() - job.createdAt,
     error: job.error,
   });
+}
+
+function cancelJob(job: Job, reason = "用户取消"): void {
+  if (job.status !== "running") return;
+  job.status = "cancelled";
+  job.error = reason;
+  job.step = "已取消";
+  logInfo("job.cancelled", {
+    jobId: job.id,
+    type: job.type,
+    bookId: job.bookId,
+    durationMs: Date.now() - job.createdAt,
+    reason,
+  });
+}
+
+function ensureJobAbortController(job: Job): AbortController {
+  if (!job.abortController) {
+    job.abortController = new AbortController();
+  }
+  return job.abortController;
+}
+
+function requestJobCancellation(job: Job, reason = "用户取消"): void {
+  if (job.status !== "running") return;
+  job.cancelRequested = true;
+  const controller = ensureJobAbortController(job);
+  if (!controller.signal.aborted) {
+    controller.abort(reason);
+  }
+  cancelJob(job, reason);
+}
+
+function isAbortLikeError(error: unknown): boolean {
+  if (!error) return false;
+  if (typeof error === "object") {
+    const maybe = error as { name?: unknown; message?: unknown; code?: unknown };
+    if (maybe.name === "AbortError") return true;
+    if (maybe.code === "ABORT_ERR") return true;
+    const message = typeof maybe.message === "string" ? maybe.message.toLowerCase() : "";
+    if (message.includes("abort")) return true;
+    if (message.includes("cancel")) return true;
+  }
+  const text = String(error).toLowerCase();
+  return text.includes("abort") || text.includes("cancel");
 }
 
 function createJob(params: {
@@ -1282,6 +1332,7 @@ async function runProfileChatWithTools(
     readonly includeReasoning?: boolean;
     readonly onTextDelta?: (delta: string) => void;
     readonly onReasoningDelta?: (delta: string) => void;
+    readonly abortSignal?: AbortSignal;
   },
   ): Promise<{
   readonly content: string;
@@ -1304,6 +1355,7 @@ async function runProfileChatWithTools(
     includeReasoning: options?.includeReasoning,
     onTextDelta: options?.onTextDelta,
     onReasoningDelta: options?.onReasoningDelta,
+    abortSignal: options?.abortSignal,
     logToolCall: (name, args) => {
       logInfo("llm_profiles.chat.tool", { profileId, tool: name, args: sanitizeForLog(args) as Record<string, unknown> });
     },
@@ -1320,6 +1372,7 @@ async function runToolEnabledConversation(
     readonly includeReasoning?: boolean;
     readonly onTextDelta?: (delta: string) => void;
     readonly onReasoningDelta?: (delta: string) => void;
+    readonly abortSignal?: AbortSignal;
     readonly logToolCall?: (name: string, args: Record<string, unknown>) => void;
     readonly tools?: ReadonlyArray<ToolDefinition>;
     readonly executeTool?: (name: string, args: Record<string, unknown>) => Promise<string>;
@@ -1337,15 +1390,26 @@ async function runToolEnabledConversation(
     content: message.content,
   })) as AgentMessage[];
 
+  const throwIfAborted = (): void => {
+    if (options?.abortSignal?.aborted) {
+      const error = new Error("Job cancelled by user");
+      (error as { name?: string }).name = "AbortError";
+      throw error;
+    }
+  };
+
   let lastAssistantMessage = "";
   let lastAssistantReasoning = "";
   for (let turn = 0; turn < (options?.maxTurns ?? 8); turn++) {
+    throwIfAborted();
     const result = await chatWithTools(client, model, conversation, tools, {
       useStream: options?.useStream,
       includeReasoning: options?.includeReasoning,
       onTextDelta: options?.onTextDelta,
       onReasoningDelta: options?.onReasoningDelta,
+      abortSignal: options?.abortSignal,
     });
+    throwIfAborted();
     conversation.push({
       role: "assistant",
       content: result.content || null,
@@ -1363,10 +1427,12 @@ async function runToolEnabledConversation(
     }
 
     for (const toolCall of result.toolCalls) {
+      throwIfAborted();
       const args = parseToolArguments(toolCall.arguments);
       toolTrace.push({ name: toolCall.name, args });
       options?.logToolCall?.(toolCall.name, args);
       const toolResult = await executeTool(toolCall.name, args);
+      throwIfAborted();
       conversation.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
     }
   }
@@ -2137,6 +2203,7 @@ async function runInitAssistant(input: {
   readonly useStream?: boolean;
   readonly includeReasoning?: boolean;
   readonly profileId?: string;
+  readonly abortSignal?: AbortSignal;
 }): Promise<{ reply: string; brief: string; reasoning?: string; model: string; profileId?: string }> {
   const llm = await createClientFromOptionalProfile(input.profileId);
   logInfo("init_assistant.llm.start", {
@@ -2261,6 +2328,7 @@ async function runInitAssistant(input: {
     maxTurns: 8,
     useStream: input.useStream,
     includeReasoning: input.includeReasoning,
+    abortSignal: input.abortSignal,
     logToolCall: (name, args) => {
       logInfo("init_assistant.chat.tool", { tool: name, args: sanitizeForLog(args) as Record<string, unknown> });
     },
@@ -2337,6 +2405,7 @@ async function runChapterAssistant(input: {
   readonly useStream?: boolean;
   readonly includeReasoning?: boolean;
   readonly profileId?: string;
+  readonly abortSignal?: AbortSignal;
 }): Promise<{ reply: string; reasoning?: string; model: string; profileId?: string }> {
   const config = await loadProjectConfig(projectRoot);
   const state = new StateManager(projectRoot);
@@ -2452,6 +2521,7 @@ async function runChapterAssistant(input: {
       maxTurns: 8,
       useStream: input.useStream,
       includeReasoning: input.includeReasoning,
+      abortSignal: input.abortSignal,
       tools: CHAPTER_CHAT_TOOLS,
       executeTool: (name, args) => executeChapterChatTool(
         { bookId: input.bookId, chapterNumber: input.chapterNumber },
@@ -2896,10 +2966,12 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
         step: `ch${chapterNumber}:chat:queued`,
         bookId,
       });
+      const abortController = ensureJobAbortController(job);
       startJob(job, { chapter: chapterNumber, profileId: input.profileId ?? null });
       void (async () => {
         try {
           updateJobStep(job, `ch${chapterNumber}:chat:start`, { chapter: chapterNumber, profileId: input.profileId ?? null });
+          if (job.status !== "running") return;
           const result = await runChapterAssistant({
             bookId,
             chapterNumber,
@@ -2907,7 +2979,9 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
             useStream: execution.useStream,
             includeReasoning: execution.includeReasoning,
             profileId: input.profileId,
+            abortSignal: abortController.signal,
           });
+          if (job.status !== "running") return;
           job.result = { ok: true, ...result };
           updateJobStep(job, `ch${chapterNumber}:chat:done`, {
             chapter: chapterNumber,
@@ -2923,6 +2997,10 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
           });
           finishJob(job, { chapter: chapterNumber, model: result.model });
         } catch (error) {
+          if (job.status === "cancelled" || isAbortLikeError(error)) {
+            requestJobCancellation(job, "用户停止了章节对话");
+            return;
+          }
           failJob(job, error);
           logError("chapter.chat.error", {
             bookId,
@@ -3551,15 +3629,19 @@ app.post("/api/init-assistant/chat", async (req, res) => {
         step: `init-assistant:queued`,
         bookId: input.bookId,
       });
+      const abortController = ensureJobAbortController(job);
       startJob(job, { title: input.title, profileId: input.profileId ?? null });
       void (async () => {
         try {
           updateJobStep(job, "init-assistant:start", { title: input.title, profileId: input.profileId ?? null });
+          if (job.status !== "running") return;
           const result = await runInitAssistant({
             ...input,
             useStream: execution.useStream,
             includeReasoning: execution.includeReasoning,
+            abortSignal: abortController.signal,
           });
+          if (job.status !== "running") return;
           job.result = { ok: true, ...result };
           updateJobStep(job, "init-assistant:done", {
             briefLength: result.brief.length,
@@ -3577,6 +3659,10 @@ app.post("/api/init-assistant/chat", async (req, res) => {
           });
           finishJob(job, { model: result.model });
         } catch (error) {
+          if (job.status === "cancelled" || isAbortLikeError(error)) {
+            requestJobCancellation(job, "用户停止了智能初始化对话");
+            return;
+          }
           failJob(job, error);
           logError("init_assistant.chat.error", { jobId: job.id, error: describeError(error) });
         }
@@ -3813,6 +3899,49 @@ app.get("/api/jobs/:jobId", (req, res) => {
     result: job.result,
     error: job.error,
     elapsed: Date.now() - job.createdAt,
+  });
+});
+
+app.post("/api/jobs/:jobId/cancel", (req, res) => {
+  const job = jobs.get(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ ok: false, error: "任务不存在" });
+    return;
+  }
+
+  if (job.type !== "chapter-chat" && job.type !== "init-assistant-chat") {
+    res.status(400).json({
+      ok: false,
+      error: `当前任务类型不支持取消：${job.type}`,
+      id: job.id,
+      type: job.type,
+      status: job.status,
+    });
+    return;
+  }
+
+  if (job.status !== "running") {
+    res.json({
+      ok: true,
+      id: job.id,
+      type: job.type,
+      status: job.status,
+      step: job.step,
+      alreadyFinal: true,
+    });
+    return;
+  }
+
+  const reason = typeof req.body?.reason === "string" && req.body.reason.trim()
+    ? req.body.reason.trim()
+    : "用户取消";
+  requestJobCancellation(job, reason);
+  res.json({
+    ok: true,
+    id: job.id,
+    type: job.type,
+    status: job.status,
+    step: job.step,
   });
 });
 

@@ -65,6 +65,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [chatMessages, setChatMessages] = useState<ReadonlyArray<ChapterChatMessage>>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [chatting, setChatting] = useState(false);
+  const [chatJobId, setChatJobId] = useState<string | null>(null);
   const [chatUseStream, setChatUseStream] = useState(true);
   const [chatIncludeReasoning, setChatIncludeReasoning] = useState(false);
   const [chatProfiles, setChatProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
@@ -175,6 +176,13 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
             resolve(job.result);
             return;
           }
+          if (job.status === "cancelled") {
+            clearInterval(timer);
+            const error = new Error(job.error ?? "任务已取消");
+            (error as Error & { code?: string }).code = "JOB_CANCELLED";
+            reject(error);
+            return;
+          }
           if (job.status === "error") {
             clearInterval(timer);
             reject(new Error(job.error ?? "任务执行失败"));
@@ -185,6 +193,35 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         }
       }, 3000);
     });
+  }
+
+  function isCancelledError(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const maybe = error as { code?: unknown; message?: unknown; name?: unknown };
+    if (maybe.code === "JOB_CANCELLED") return true;
+    if (maybe.name === "AbortError") return true;
+    return typeof maybe.message === "string" && maybe.message.includes("取消");
+  }
+
+  function stopChapterChat(): void {
+    if (!chatJobId || !chatting) return;
+    void fetch(`/api/inkos/jobs/${encodeURIComponent(chatJobId)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "用户停止生成" }),
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || !data?.ok) {
+          throw new Error(data?.error ?? "停止失败");
+        }
+        setChatting(false);
+        setChatJobId(null);
+        void message.success("已停止本次章节对话");
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
+      });
   }
 
   async function loadChapters(): Promise<void> {
@@ -274,7 +311,9 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         if (!response.ok || !data?.ok || !data?.jobId) {
           throw new Error(data?.error ?? "章节对话失败");
         }
-        const result = await pollJob(String(data.jobId)) as {
+        const jobId = String(data.jobId);
+        setChatJobId(jobId);
+        const result = await pollJob(jobId) as {
           ok?: boolean;
           reply?: string;
           reasoning?: string;
@@ -293,9 +332,13 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         });
       })
       .catch((error: unknown) => {
+        if (isCancelledError(error)) return;
         void message.error(error instanceof Error ? error.message : String(error));
       })
-      .finally(() => setChatting(false));
+      .finally(() => {
+        setChatting(false);
+        setChatJobId(null);
+      });
   }
 
   function latestAssistantReply(): string {
@@ -569,11 +612,16 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
               </Space>
             )}
             footerRight={(
-              <Dropdown menu={{ items: chatMenuItems }} trigger={["click"]}>
-                <Button icon={<MoreOutlined />} disabled={chatting || replacingChapter}>
-                  更多
+              <Space>
+                <Button danger onClick={stopChapterChat} disabled={!chatting || !chatJobId}>
+                  停止
                 </Button>
-              </Dropdown>
+                <Dropdown menu={{ items: chatMenuItems }} trigger={["click"]}>
+                  <Button icon={<MoreOutlined />} disabled={chatting || replacingChapter}>
+                    更多
+                  </Button>
+                </Dropdown>
+              </Space>
             )}
             containerStyle={{ flex: 1, minHeight: 0 }}
           />

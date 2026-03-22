@@ -268,6 +268,7 @@ export async function chatWithTools(
     readonly includeReasoning?: boolean;
     readonly onTextDelta?: (delta: string) => void;
     readonly onReasoningDelta?: (delta: string) => void;
+    readonly abortSignal?: AbortSignal;
   },
 ): Promise<ChatWithToolsResult> {
   const resolved = {
@@ -286,19 +287,20 @@ export async function chatWithTools(
     maxTokens: resolved.maxTokens,
     temperature: resolved.temperature,
     useStream: resolved.useStream,
-    includeReasoning: resolved.includeReasoning,
-    baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
-    hasAnthropicClient: Boolean(client._anthropic),
-    hasOpenAIClient: Boolean(client._openai),
+      includeReasoning: resolved.includeReasoning,
+      abortSignal: options?.abortSignal ? "provided" : "none",
+      baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
+      hasAnthropicClient: Boolean(client._anthropic),
+      hasOpenAIClient: Boolean(client._openai),
   });
   try {
     if (client.provider === "anthropic") {
       return await chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget);
     }
     if (client.apiFormat === "responses") {
-      return await chatWithToolsOpenAIResponses(client._openai!, model, messages, tools, resolved);
+      return await chatWithToolsOpenAIResponses(client._openai!, model, messages, tools, resolved, options?.abortSignal);
     }
-    return await chatWithToolsOpenAIChat(client._openai!, model, messages, tools, resolved);
+    return await chatWithToolsOpenAIChat(client._openai!, model, messages, tools, resolved, options?.abortSignal);
   } catch (error) {
     logLLMDiagnostic("llm.request.error", {
       kind: "chat_with_tools",
@@ -427,6 +429,7 @@ async function chatWithToolsOpenAIChat(
     readonly onTextDelta?: (delta: string) => void;
     readonly onReasoningDelta?: (delta: string) => void;
   },
+  abortSignal?: AbortSignal,
 ): Promise<ChatWithToolsResult> {
   const openaiMessages = agentMessagesToOpenAIChat(messages);
   const openaiTools: OpenAI.Chat.Completions.ChatCompletionTool[] = tools.map((t) => ({
@@ -448,7 +451,7 @@ async function chatWithToolsOpenAIChat(
       temperature: options.temperature,
       max_tokens: options.maxTokens,
       stream: true,
-    });
+    }, { signal: abortSignal });
 
     let content = "";
     let reasoning = "";
@@ -511,7 +514,7 @@ async function chatWithToolsOpenAIChat(
     temperature: options.temperature,
     max_tokens: options.maxTokens,
     stream: false,
-  });
+  }, { signal: abortSignal });
 
   const message = completion.choices[0]?.message as {
     content?: unknown;
@@ -680,6 +683,7 @@ async function chatWithToolsOpenAIResponses(
     readonly onTextDelta?: (delta: string) => void;
     readonly onReasoningDelta?: (delta: string) => void;
   },
+  abortSignal?: AbortSignal,
 ): Promise<ChatWithToolsResult> {
   const input = agentMessagesToResponsesInput(messages);
   const responsesTools: OpenAI.Responses.Tool[] = tools.map((t) => ({
@@ -697,7 +701,7 @@ async function chatWithToolsOpenAIResponses(
     temperature: options.temperature,
     max_output_tokens: options.maxTokens,
     stream: true,
-  });
+  }, { signal: abortSignal });
 
   let content = "";
   const toolCalls: ToolCall[] = [];
