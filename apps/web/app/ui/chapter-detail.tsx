@@ -33,20 +33,51 @@ export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: str
       .then((json: DetailResponse) => setData(json));
   }, [bookId, chapter]);
 
+  async function copyToClipboard(text: string): Promise<boolean> {
+    if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        // Fallback below.
+      }
+    }
+
+    if (typeof document === "undefined") return false;
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    textarea.style.pointerEvents = "none";
+    textarea.style.left = "-9999px";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    textarea.setSelectionRange(0, textarea.value.length);
+
+    try {
+      return document.execCommand("copy");
+    } catch {
+      return false;
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
+
   function copyChapterContent(): void {
     const content = data?.rawContent ?? data?.content;
     if (!content) {
       void messageApi.warning("当前没有可复制的 Markdown 源文");
       return;
     }
-    void navigator.clipboard.writeText(content).then(
-      () => {
+    void copyToClipboard(content).then((ok) => {
+      if (ok) {
         void messageApi.success("已复制 Markdown 源文到剪贴板");
-      },
-      () => {
+      } else {
         void messageApi.error("复制失败，请稍后重试");
-      },
-    );
+      }
+    });
   }
 
   return (
