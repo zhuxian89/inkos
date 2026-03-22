@@ -1951,18 +1951,36 @@ function extractJsonBlock(text: string): string {
   return trimmed;
 }
 
+function tryParseInitPayload(text: string): { reply: string; brief: string } | undefined {
+  const candidate = extractJsonBlock(text);
+  let parsed = safeParseJson(candidate);
+  if (typeof parsed === "string") {
+    parsed = safeParseJson(parsed);
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const reply = "reply" in parsed ? String((parsed as { reply?: unknown }).reply ?? "").trim() : "";
+  const brief = "brief" in parsed ? String((parsed as { brief?: unknown }).brief ?? "").trim() : "";
+  if (!reply && !brief) return undefined;
+  return { reply, brief };
+}
+
 function parseInitAssistantPayload(raw: string, currentBrief?: string): { reply: string; brief: string } {
-  const candidate = extractJsonBlock(raw);
-  const parsed = safeParseJson(candidate);
-  if (parsed && typeof parsed === "object") {
-    const reply = "reply" in parsed ? String((parsed as { reply?: unknown }).reply ?? "").trim() : "";
-    const brief = "brief" in parsed ? String((parsed as { brief?: unknown }).brief ?? "").trim() : "";
-    if (reply || brief) {
-      return {
-        reply: reply || "我已经整理好了当前方向，你可以继续补充人物、冲突或结局。",
-        brief: brief || currentBrief?.trim() || "",
-      };
+  const parsed = tryParseInitPayload(raw);
+  if (parsed) {
+    let reply = parsed.reply;
+    let brief = parsed.brief;
+
+    // Some models put another JSON payload in `reply` as a string.
+    const nested = reply ? tryParseInitPayload(reply) : undefined;
+    if (nested) {
+      if (nested.reply) reply = nested.reply;
+      if (!brief && nested.brief) brief = nested.brief;
     }
+
+    return {
+      reply: reply || "我已经整理好了当前方向，你可以继续补充人物、冲突或结局。",
+      brief: brief || currentBrief?.trim() || "",
+    };
   }
 
   return {
