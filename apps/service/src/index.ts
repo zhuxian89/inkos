@@ -1882,16 +1882,73 @@ async function buildExistingBookContext(bookId: string): Promise<{
 }
 
 function extractJsonBlock(text: string): string {
-  // 1. Try fenced code block: ```json ... ```
-  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fenced?.[1]) return fenced[1].trim();
-  // 2. Try extracting a raw JSON object (possibly preceded by preamble text)
-  const jsonStart = text.indexOf("{");
-  const jsonEnd = text.lastIndexOf("}");
-  if (jsonStart !== -1 && jsonEnd > jsonStart) {
-    return text.slice(jsonStart, jsonEnd + 1);
+  const candidates: string[] = [];
+  const fencedRegex = /```(?:json)?\s*([\s\S]*?)```/gi;
+  for (let match = fencedRegex.exec(text); match !== null; match = fencedRegex.exec(text)) {
+    const block = match[1]?.trim();
+    if (block) candidates.push(block);
   }
-  return text.trim();
+
+  const balancedObjects: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (char === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') {
+      inString = true;
+      continue;
+    }
+    if (char === "{") {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+    if (char === "}" && depth > 0) {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        balancedObjects.push(text.slice(start, i + 1).trim());
+        start = -1;
+      }
+    }
+  }
+  candidates.push(...balancedObjects);
+
+  const trimmed = text.trim();
+  if (trimmed) candidates.push(trimmed);
+
+  const uniqueCandidates = candidates.filter((candidate, index) => candidates.indexOf(candidate) === index);
+
+  for (const candidate of uniqueCandidates) {
+    const parsed = safeParseJson(candidate);
+    if (parsed && typeof parsed === "object" && ("reply" in parsed || "brief" in parsed)) {
+      return candidate;
+    }
+  }
+
+  for (const candidate of uniqueCandidates) {
+    const parsed = safeParseJson(candidate);
+    if (parsed && typeof parsed === "object") {
+      return candidate;
+    }
+  }
+
+  return trimmed;
 }
 
 function parseInitAssistantPayload(raw: string, currentBrief?: string): { reply: string; brief: string } {
