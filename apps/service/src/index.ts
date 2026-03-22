@@ -36,6 +36,7 @@ const webCommandTimeoutMs = parseInt(process.env.INKOS_WEB_COMMAND_TIMEOUT_MS ??
 const app = express();
 const LOG_STRING_PREVIEW_LIMIT = 120;
 const LOG_BUFFER_LIMIT = Math.max(parseInt(process.env.INKOS_LOG_BUFFER_LIMIT ?? "1500", 10), 200);
+const REQUEST_LOG_SKIP_PREFIXES = ["/api/jobs/", "/api/logs"];
 
 interface ServiceLogEntry {
   readonly id: number;
@@ -218,7 +219,7 @@ setInterval(() => {
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use((req, res, next) => {
-  if (req.path.startsWith("/api/jobs/")) {
+  if (REQUEST_LOG_SKIP_PREFIXES.some((prefix) => req.path.startsWith(prefix))) {
     next();
     return;
   }
