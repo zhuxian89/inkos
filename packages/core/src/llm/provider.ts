@@ -266,6 +266,8 @@ export async function chatWithTools(
     readonly maxTokens?: number;
     readonly useStream?: boolean;
     readonly includeReasoning?: boolean;
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
   },
 ): Promise<ChatWithToolsResult> {
   const resolved = {
@@ -422,6 +424,8 @@ async function chatWithToolsOpenAIChat(
     readonly maxTokens: number;
     readonly useStream: boolean;
     readonly includeReasoning: boolean;
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
   },
 ): Promise<ChatWithToolsResult> {
   const openaiMessages = agentMessagesToOpenAIChat(messages);
@@ -465,13 +469,19 @@ async function chatWithToolsOpenAIChat(
         }>;
       } | undefined;
       const contentDelta = extractTextValue(delta?.content);
-      if (contentDelta) content += contentDelta;
+      if (contentDelta) {
+        content += contentDelta;
+        options.onTextDelta?.(contentDelta);
+      }
 
       if (options.includeReasoning) {
         const reasoningDelta = extractTextValue(
           moonshotCompat ? (delta?.reasoning_content ?? delta?.reasoning) : delta?.reasoning,
         );
-        if (reasoningDelta) reasoning += reasoningDelta;
+        if (reasoningDelta) {
+          reasoning += reasoningDelta;
+          options.onReasoningDelta?.(reasoningDelta);
+        }
       }
 
       if (delta?.tool_calls) {
@@ -667,6 +677,8 @@ async function chatWithToolsOpenAIResponses(
     readonly maxTokens: number;
     readonly useStream: boolean;
     readonly includeReasoning: boolean;
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
   },
 ): Promise<ChatWithToolsResult> {
   const input = agentMessagesToResponsesInput(messages);
@@ -693,6 +705,7 @@ async function chatWithToolsOpenAIResponses(
   for await (const event of stream) {
     if (event.type === "response.output_text.delta") {
       content += event.delta;
+      options.onTextDelta?.(event.delta);
     }
     if (event.type === "response.output_item.done" && event.item.type === "function_call") {
       toolCalls.push({
@@ -811,7 +824,12 @@ async function chatWithToolsAnthropic(
   model: string,
   messages: ReadonlyArray<AgentMessage>,
   tools: ReadonlyArray<ToolDefinition>,
-  options: { readonly temperature: number; readonly maxTokens: number },
+  options: {
+    readonly temperature: number;
+    readonly maxTokens: number;
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
+  },
   thinkingBudget: number = 0,
 ): Promise<ChatWithToolsResult> {
   const systemText = messages
@@ -854,6 +872,7 @@ async function chatWithToolsAnthropic(
     if (event.type === "content_block_delta") {
       if (event.delta.type === "text_delta") {
         content += event.delta.text;
+        options.onTextDelta?.(event.delta.text);
       }
       if (event.delta.type === "input_json_delta" && currentBlock) {
         currentBlock.input += event.delta.partial_json;

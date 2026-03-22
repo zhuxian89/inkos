@@ -112,6 +112,14 @@ interface StoredProfileChatSession {
   readonly includeReasoning?: boolean;
 }
 
+interface ProfileChatStreamEvent {
+  readonly type: "start" | "delta" | "reasoning_delta" | "final" | "error" | "done";
+  readonly delta?: string;
+  readonly content?: string;
+  readonly reasoning?: string;
+  readonly error?: string;
+}
+
 export function SetupWorkspace() {
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
@@ -348,83 +356,194 @@ export function SetupWorkspace() {
     });
   }
 
+  function parseSseEventBlock(block: string): ProfileChatStreamEvent | null {
+    const lines = block.split(/\r?\n/);
+    const dataLines = lines
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart());
+    if (dataLines.length === 0) return null;
+    try {
+      return JSON.parse(dataLines.join("\n")) as ProfileChatStreamEvent;
+    } catch {
+      return null;
+    }
+  }
+
+  async function consumeProfileChatStream(
+    response: Response,
+    baseMessages: ReadonlyArray<ProfileChatMessage>,
+  ): Promise<{ content: string; reasoning?: string }> {
+    if (!response.body) {
+      throw new Error("流式响应不可用");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let assistantContent = "";
+    let assistantReasoning = "";
+
+    const renderFrame = (): void => {
+      setProfileChatMessages([
+        ...baseMessages,
+        {
+          role: "assistant",
+          content: assistantContent,
+          reasoning: assistantReasoning || undefined,
+        },
+      ]);
+    };
+
+    renderFrame();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+
+      let delimiterIndex = buffer.indexOf("\n\n");
+      while (delimiterIndex >= 0) {
+        const block = buffer.slice(0, delimiterIndex);
+        buffer = buffer.slice(delimiterIndex + 2);
+        const event = parseSseEventBlock(block);
+        if (!event) {
+          delimiterIndex = buffer.indexOf("\n\n");
+          continue;
+        }
+
+        if (event.type === "delta" && typeof event.delta === "string") {
+          assistantContent += event.delta;
+          renderFrame();
+        } else if (event.type === "reasoning_delta" && typeof event.delta === "string") {
+          assistantReasoning += event.delta;
+          renderFrame();
+        } else if (event.type === "final") {
+          if (typeof event.content === "string") {
+            assistantContent = event.content;
+          }
+          if (typeof event.reasoning === "string") {
+            assistantReasoning = event.reasoning;
+          }
+          renderFrame();
+        } else if (event.type === "error") {
+          throw new Error(event.error ?? "对话失败");
+        }
+
+        delimiterIndex = buffer.indexOf("\n\n");
+      }
+
+      if (done) break;
+    }
+
+    return {
+      content: assistantContent,
+      reasoning: assistantReasoning || undefined,
+    };
+  }
+
   function sendProfileChat(): void {
     if (!chatProfile || chattingProfileId) return;
+    const activeProfile = chatProfile;
+    const activeProfileId = activeProfile.id;
     const input = profileChatInput.trim();
     if (!input) return;
+    const chatOptionsSnapshot = {
+      genre: profileChatGenre,
+      platform: profileChatPlatform,
+      useStream: profileChatUseStream,
+      includeReasoning: profileChatIncludeReasoning,
+    };
 
     const nextMessages: ReadonlyArray<ProfileChatMessage> = [
       ...profileChatMessages,
       { role: "user", content: input },
     ];
     setProfileChatMessages(nextMessages);
-    persistProfileChat(chatProfile.id, {
+    persistProfileChat(activeProfileId, {
       messages: nextMessages,
-      genre: profileChatGenre,
-      platform: profileChatPlatform,
-      useStream: profileChatUseStream,
-      includeReasoning: profileChatIncludeReasoning,
+      ...chatOptionsSnapshot,
     });
     setProfileChatInput("");
-    setChattingProfileId(chatProfile.id);
+    setChattingProfileId(activeProfileId);
 
-    void fetch(`/api/inkos/llm-profiles/${chatProfile.id}/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        messages: nextMessages,
-        genre: profileChatGenre,
-        platform: profileChatPlatform,
-        useStream: profileChatUseStream,
-        includeReasoning: profileChatIncludeReasoning,
-      }),
-    })
-      .then((response) => response.json())
-      .then((data) => {
+    void (async () => {
+      try {
+        const endpoint = chatOptionsSnapshot.useStream
+          ? `/api/inkos/llm-profiles/${activeProfileId}/chat-stream`
+          : `/api/inkos/llm-profiles/${activeProfileId}/chat`;
+        const response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            messages: nextMessages,
+            genre: chatOptionsSnapshot.genre,
+            platform: chatOptionsSnapshot.platform,
+            useStream: chatOptionsSnapshot.useStream,
+            includeReasoning: chatOptionsSnapshot.includeReasoning,
+          }),
+        });
+
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || "对话失败");
+        }
+
+        if (chatOptionsSnapshot.useStream && contentType.includes("text/event-stream")) {
+          const streamed = await consumeProfileChatStream(response, nextMessages);
+          const updated = [
+            ...nextMessages,
+            {
+              role: "assistant" as const,
+              content: streamed.content.trim() || "（模型未返回正文内容）",
+              reasoning: typeof streamed.reasoning === "string" && streamed.reasoning.trim()
+                ? streamed.reasoning
+                : undefined,
+            },
+          ];
+          setProfileChatMessages(updated);
+          persistProfileChat(activeProfileId, {
+            messages: updated,
+            ...chatOptionsSnapshot,
+          });
+          return;
+        }
+
+        const data = await response.json();
         if (!data?.ok) {
           throw new Error(data?.error ?? "对话失败");
         }
-        setProfileChatMessages((current) => {
-          const updated = [
-            ...current,
-            {
-              role: "assistant" as const,
-              content: typeof data?.content === "string" ? data.content : "",
-              reasoning: typeof data?.reasoning === "string" ? data.reasoning : undefined,
-            },
-          ];
-          persistProfileChat(chatProfile.id, {
-            messages: updated,
-            genre: profileChatGenre,
-            platform: profileChatPlatform,
-            useStream: profileChatUseStream,
-            includeReasoning: profileChatIncludeReasoning,
-          });
-          return updated;
+        const updated = [
+          ...nextMessages,
+          {
+            role: "assistant" as const,
+            content: typeof data?.content === "string" ? data.content : "",
+            reasoning: typeof data?.reasoning === "string" ? data.reasoning : undefined,
+          },
+        ];
+        setProfileChatMessages(updated);
+        persistProfileChat(activeProfileId, {
+          messages: updated,
+          ...chatOptionsSnapshot,
         });
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        setProfileChatMessages((current) => {
-          const updated = [
-            ...current,
-            {
-              role: "assistant" as const,
-              content: `请求失败：${errorMessage}`,
-            },
-          ];
-          persistProfileChat(chatProfile.id, {
-            messages: updated,
-            genre: profileChatGenre,
-            platform: profileChatPlatform,
-            useStream: profileChatUseStream,
-            includeReasoning: profileChatIncludeReasoning,
-          });
-          return updated;
+        const updated = [
+          ...nextMessages,
+          {
+            role: "assistant" as const,
+            content: `请求失败：${errorMessage}`,
+          },
+        ];
+        setProfileChatMessages(updated);
+        persistProfileChat(activeProfileId, {
+          messages: updated,
+          ...chatOptionsSnapshot,
         });
         void message.error(errorMessage);
-      })
-      .finally(() => setChattingProfileId(null));
+      } finally {
+        setChattingProfileId(null);
+      }
+    })();
   }
 
   function toggleDaemon(action: "up" | "down"): void {

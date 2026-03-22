@@ -1246,6 +1246,8 @@ async function runProfileChatWithTools(
   options?: {
     readonly useStream?: boolean;
     readonly includeReasoning?: boolean;
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
   },
 ): Promise<{
   readonly content: string;
@@ -1256,6 +1258,8 @@ async function runProfileChatWithTools(
     maxTurns: 8,
     useStream: options?.useStream,
     includeReasoning: options?.includeReasoning,
+    onTextDelta: options?.onTextDelta,
+    onReasoningDelta: options?.onReasoningDelta,
     logToolCall: (name, args) => {
       logInfo("llm_profiles.chat.tool", { profileId, tool: name, args: sanitizeForLog(args) as Record<string, unknown> });
     },
@@ -1270,6 +1274,8 @@ async function runToolEnabledConversation(
     readonly maxTurns?: number;
     readonly useStream?: boolean;
     readonly includeReasoning?: boolean;
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
     readonly logToolCall?: (name: string, args: Record<string, unknown>) => void;
     readonly tools?: ReadonlyArray<ToolDefinition>;
     readonly executeTool?: (name: string, args: Record<string, unknown>) => Promise<string>;
@@ -1293,6 +1299,8 @@ async function runToolEnabledConversation(
     const result = await chatWithTools(client, model, conversation, tools, {
       useStream: options?.useStream,
       includeReasoning: options?.includeReasoning,
+      onTextDelta: options?.onTextDelta,
+      onReasoningDelta: options?.onReasoningDelta,
     });
     conversation.push({
       role: "assistant",
@@ -2062,6 +2070,23 @@ async function runInitAssistant(input: {
   };
 }
 
+function resolveChatExecutionOptions(
+  input: {
+    readonly useStream?: boolean;
+    readonly includeReasoning?: boolean;
+    readonly async?: boolean;
+  },
+): { readonly useStream: boolean; readonly includeReasoning: boolean } {
+  if (input.async === true) {
+    // Async job mode returns only final payload, so stream/reasoning flags bring little value.
+    return { useStream: false, includeReasoning: false };
+  }
+  return {
+    useStream: input.useStream !== false,
+    includeReasoning: input.includeReasoning === true,
+  };
+}
+
 async function updateProjectModelOverrides(updates: Record<string, string | null | undefined>): Promise<Record<string, unknown>> {
   const configPath = join(projectRoot, "inkos.json");
   const raw = await readFile(configPath, "utf-8");
@@ -2606,12 +2631,13 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
       throw new Error(`Invalid chapter number: ${req.params.chapter}`);
     }
     const input = schema.parse(req.body ?? {});
+    const execution = resolveChatExecutionOptions(input);
     logInfo("chapter.chat.start", {
       bookId,
       chapterNumber,
       messageCount: input.messages.length,
-      useStream: input.useStream !== false,
-      includeReasoning: input.includeReasoning === true,
+      useStream: execution.useStream,
+      includeReasoning: execution.includeReasoning,
       profileId: input.profileId ?? null,
       async: input.async === true,
     });
@@ -2629,8 +2655,8 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
             bookId,
             chapterNumber,
             messages: input.messages,
-            useStream: input.useStream,
-            includeReasoning: input.includeReasoning,
+            useStream: execution.useStream,
+            includeReasoning: execution.includeReasoning,
             profileId: input.profileId,
           });
           job.result = { ok: true, ...result };
@@ -2664,8 +2690,8 @@ app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
       bookId,
       chapterNumber,
       messages: input.messages,
-      useStream: input.useStream,
-      includeReasoning: input.includeReasoning,
+      useStream: execution.useStream,
+      includeReasoning: execution.includeReasoning,
       profileId: input.profileId,
     });
     logInfo("chapter.chat.done", {
@@ -2938,7 +2964,10 @@ app.post("/api/llm-profiles/:id/chat", async (req, res) => {
       thinkingBudget: profile.thinking_budget ?? 0,
       apiFormat: profile.api_format ?? "chat",
     });
-    const result = await runProfileChatWithTools(profileId, client, profile.model, normalizedMessages);
+    const result = await runProfileChatWithTools(profileId, client, profile.model, normalizedMessages, {
+      useStream,
+      includeReasoning,
+    });
     logInfo("llm_profiles.chat.done", {
       profileId,
       provider: profile.provider,
@@ -2949,6 +2978,128 @@ app.post("/api/llm-profiles/:id/chat", async (req, res) => {
   } catch (error) {
     logError("llm_profiles.chat.error", { profileId: req.params.id, error: describeError(error) });
     res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.post("/api/llm-profiles/:id/chat-stream", async (req, res) => {
+  let streamOpened = false;
+  const sendEvent = (payload: Record<string, unknown>): void => {
+    if (!streamOpened || res.writableEnded) return;
+    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  };
+
+  try {
+    const profileId = req.params.id;
+    const incoming: unknown[] = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = incoming
+      .filter((item: unknown): item is { role?: unknown; content?: unknown } => Boolean(item) && typeof item === "object")
+      .map((item: { role?: unknown; content?: unknown }) => ({
+        role: item.role === "assistant" ? "assistant" : item.role === "system" ? "system" : "user",
+        content: typeof item.content === "string" ? item.content : "",
+      }))
+      .filter((item) => item.content.trim().length > 0) as Array<{ role: "system" | "user" | "assistant"; content: string }>;
+
+    if (messages.length === 0) {
+      res.status(400).json({ ok: false, error: "messages is required" });
+      return;
+    }
+
+    const genre = typeof req.body?.genre === "string" ? req.body.genre : undefined;
+    const platform = typeof req.body?.platform === "string" ? req.body.platform : undefined;
+    const includeReasoning = req.body?.includeReasoning === true;
+    const db = openProfilesDb();
+    let profile: LlmProfileRow | null = null;
+    try {
+      profile = getProfileById(db, profileId);
+    } finally {
+      db.close();
+    }
+
+    const systemPrompt = await buildProfileChatSystemPrompt({
+      genre,
+      platform,
+      provider: profile?.provider,
+      model: profile?.model,
+    });
+    const normalizedMessages = [
+      { role: "system" as const, content: systemPrompt },
+      ...messages.filter((item) => item.role !== "system"),
+    ];
+
+    if (!profile) {
+      throw new Error(`LLM profile not found: ${profileId}`);
+    }
+
+    logInfo("llm_profiles.chat_stream.start", {
+      profileId,
+      messageCount: normalizedMessages.length,
+      genre,
+      platform,
+      provider: profile.provider,
+      model: profile.model,
+      includeReasoning,
+    });
+
+    const client = createLLMClient({
+      provider: profile.provider,
+      baseUrl: profile.base_url,
+      apiKey: profile.api_key,
+      model: profile.model,
+      temperature: profile.temperature ?? 0.7,
+      maxTokens: profile.max_tokens ?? 16000,
+      thinkingBudget: profile.thinking_budget ?? 0,
+      apiFormat: profile.api_format ?? "chat",
+    });
+
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders();
+    streamOpened = true;
+    sendEvent({ type: "start", ok: true, profileId, model: profile.model });
+
+    const result = await runProfileChatWithTools(profileId, client, profile.model, normalizedMessages, {
+      useStream: true,
+      includeReasoning,
+      onTextDelta: (delta) => {
+        sendEvent({ type: "delta", delta });
+      },
+      onReasoningDelta: (delta) => {
+        sendEvent({ type: "reasoning_delta", delta });
+      },
+    });
+
+    sendEvent({
+      type: "final",
+      ok: true,
+      content: result.content,
+      reasoning: result.reasoning,
+      toolCalls: result.toolTrace.length,
+    });
+    sendEvent({ type: "done" });
+
+    logInfo("llm_profiles.chat_stream.done", {
+      profileId,
+      provider: profile.provider,
+      model: profile.model,
+      toolCalls: result.toolTrace.length,
+      contentLength: result.content.length,
+    });
+  } catch (error) {
+    const message = describeError(error);
+    if (streamOpened) {
+      sendEvent({ type: "error", ok: false, error: message });
+      logError("llm_profiles.chat_stream.error", { profileId: req.params.id, error: message });
+    } else {
+      logError("llm_profiles.chat_stream.error", { profileId: req.params.id, error: message });
+      res.status(400).json({ ok: false, error: message });
+      return;
+    }
+  } finally {
+    if (streamOpened && !res.writableEnded) {
+      res.end();
+    }
   }
 });
 
@@ -3133,14 +3284,15 @@ app.post("/api/init-assistant/chat", async (req, res) => {
 
   try {
     const input = schema.parse(req.body ?? {});
+    const execution = resolveChatExecutionOptions(input);
     logInfo("init_assistant.chat.start", {
       bookId: input.bookId ?? null,
       title: input.title,
       genre: input.genre,
       platform: input.platform,
       messageCount: input.messages.length,
-      useStream: input.useStream !== false,
-      includeReasoning: input.includeReasoning === true,
+      useStream: execution.useStream,
+      includeReasoning: execution.includeReasoning,
       profileId: input.profileId ?? null,
       async: input.async === true,
     });
@@ -3154,7 +3306,11 @@ app.post("/api/init-assistant/chat", async (req, res) => {
       void (async () => {
         try {
           updateJobStep(job, "init-assistant:start", { title: input.title, profileId: input.profileId ?? null });
-          const result = await runInitAssistant(input);
+          const result = await runInitAssistant({
+            ...input,
+            useStream: execution.useStream,
+            includeReasoning: execution.includeReasoning,
+          });
           job.result = { ok: true, ...result };
           updateJobStep(job, "init-assistant:done", {
             briefLength: result.brief.length,
@@ -3179,7 +3335,11 @@ app.post("/api/init-assistant/chat", async (req, res) => {
       res.json({ ok: true, jobId: job.id, queued: true });
       return;
     }
-    const result = await runInitAssistant(input);
+    const result = await runInitAssistant({
+      ...input,
+      useStream: execution.useStream,
+      includeReasoning: execution.includeReasoning,
+    });
     logInfo("init_assistant.chat.done", {
       bookId: input.bookId ?? null,
       title: input.title,
