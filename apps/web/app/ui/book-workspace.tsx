@@ -261,7 +261,6 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
 
   async function pollJob(jobId: string): Promise<unknown> {
     const intervalMs = 3000;
-    const maxTransientFailures = 12;
     const maxWaitMs = 30 * 60 * 1000;
     const startedAt = Date.now();
     let transientFailures = 0;
@@ -274,13 +273,14 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
       if (!error || typeof error !== "object") return false;
       const maybe = error as { code?: unknown; message?: unknown; name?: unknown };
       if (maybe.code === "TRANSIENT_POLL") return true;
-      if (maybe.name === "TypeError") return true;
+      if (maybe.name === "TypeError" || maybe.name === "SyntaxError" || maybe.name === "NetworkError") return true;
       if (typeof maybe.message !== "string") return false;
       const message = maybe.message.toLowerCase();
       return message.includes("failed to fetch")
         || message.includes("networkerror")
         || message.includes("network request failed")
-        || message.includes("load failed");
+        || message.includes("load failed")
+        || message.includes("unexpected end of json input");
     };
 
     while (true) {
@@ -297,7 +297,13 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
           throw new Error(data?.error ?? `任务状态读取失败(${response.status})`);
         }
 
-        const job = await response.json() as { status?: string; result?: unknown; error?: string };
+        const raw = await response.text();
+        if (!raw.trim()) {
+          const error = new Error("任务状态返回空响应");
+          (error as Error & { code?: string }).code = "TRANSIENT_POLL";
+          throw error;
+        }
+        const job = JSON.parse(raw) as { status?: string; result?: unknown; error?: string };
         if (job.status === "done") {
           return job.result;
         }
@@ -313,7 +319,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         transientFailures = 0;
       } catch (error) {
         if (isCancelledError(error)) throw error;
-        if (isTransientPollError(error) && transientFailures < maxTransientFailures) {
+        if (isTransientPollError(error)) {
           transientFailures += 1;
           await wait(Math.min(intervalMs + transientFailures * 300, 6000));
           continue;
