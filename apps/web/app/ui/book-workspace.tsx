@@ -535,6 +535,23 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
       .finally(() => setToolAction(null));
   }
 
+  function downloadBookExport(values: ExportValues): void {
+    const format = values.format === "md" ? "md" : "txt";
+    const params = new URLSearchParams({ format });
+    if (values.approvedOnly) {
+      params.set("approvedOnly", "true");
+    }
+    const href = `/api/inkos/books/${encodeURIComponent(bookId)}/export?${params.toString()}`;
+    if (typeof window === "undefined") return;
+    const link = document.createElement("a");
+    link.href = href;
+    link.rel = "noopener";
+    link.style.display = "none";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
   async function importStyle(values: StyleImportValues): Promise<void> {
     if (toolAction || !styleFile) {
       if (!styleFile) {
@@ -722,7 +739,14 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                 <Form.Item name="approvedOnly" valuePropName="checked">
                   <Checkbox>只导出已通过章节</Checkbox>
                 </Form.Item>
-                <Button type="primary" htmlType="submit" loading={toolAction === "export"}>导出</Button>
+                <Space>
+                  <Button type="primary" htmlType="submit" loading={toolAction === "export"}>
+                    导出到服务器
+                  </Button>
+                  <Button onClick={() => downloadBookExport(exportForm.getFieldsValue() as ExportValues)}>
+                    下载到本地
+                  </Button>
+                </Space>
               </Form>
             </Card>
           </Col>

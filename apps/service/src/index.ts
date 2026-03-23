@@ -292,6 +292,15 @@ function sanitizeFilename(filename: string): string {
     .slice(0, 120);
 }
 
+function encodeRFC5987ValueChars(value: string): string {
+  return encodeURIComponent(value)
+    .replace(/'/g, "%27")
+    .replace(/\(/g, "%28")
+    .replace(/\)/g, "%29")
+    .replace(/\*/g, "%2A")
+    .replace(/%(7C|60|5E)/g, (match) => match.toLowerCase());
+}
+
 function sanitizeForLog(value: unknown): unknown {
   if (typeof value === "string") {
     if (value.length <= LOG_STRING_PREVIEW_LIMIT) return value;
@@ -2805,6 +2814,72 @@ app.get("/api/books/:bookId/analytics", async (req, res) => {
     res.json({ ok: true, analytics: computeAnalytics(bookId, chapters) });
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
+  }
+});
+
+app.get("/api/books/:bookId/export", async (req, res) => {
+  const querySchema = z.object({
+    format: z.enum(["txt", "md"]).default("txt"),
+    approvedOnly: z.union([z.literal("true"), z.literal("false")]).optional(),
+  });
+
+  try {
+    const state = new StateManager(projectRoot);
+    const bookId = await resolveBookId(projectRoot, req.params.bookId);
+    const query = querySchema.parse(req.query);
+    const format = query.format;
+    const approvedOnly = query.approvedOnly === "true";
+
+    const book = await state.loadBookConfig(bookId);
+    const index = await state.loadChapterIndex(bookId);
+    const chapters = approvedOnly
+      ? index.filter((chapter) => chapter.status === "approved")
+      : [...index];
+    chapters.sort((a, b) => a.number - b.number);
+
+    if (chapters.length === 0) {
+      throw new Error(approvedOnly ? "没有可导出的已通过章节" : "没有可导出的章节");
+    }
+
+    const chaptersDir = join(state.bookDir(bookId), "chapters");
+    const chapterFiles = await readdir(chaptersDir).catch(() => []);
+    const parts: string[] = [];
+
+    if (format === "md") {
+      parts.push(`# ${book.title}\n`);
+      parts.push("---\n");
+    } else {
+      parts.push(`${book.title}\n\n`);
+    }
+
+    let exportedCount = 0;
+    for (const chapter of chapters) {
+      const prefix = String(chapter.number).padStart(4, "0");
+      const match = chapterFiles.find((fileName) => fileName.startsWith(prefix));
+      if (!match) continue;
+      const raw = await readFile(join(chaptersDir, match), "utf-8");
+      parts.push(raw);
+      parts.push("\n\n");
+      exportedCount += 1;
+    }
+
+    if (exportedCount === 0) {
+      throw new Error("未找到可导出的章节文件");
+    }
+
+    const fileName = `${sanitizeFilename(book.title || bookId) || bookId}_export.${format}`;
+    const content = parts.join("\n");
+    res.setHeader("Content-Type", format === "md" ? "text/markdown; charset=utf-8" : "text/plain; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="book_export.${format}"; filename*=UTF-8''${encodeRFC5987ValueChars(fileName)}`,
+    );
+    res.setHeader("Cache-Control", "no-store");
+    logInfo("books.export.download", { bookId, format, approvedOnly, chapters: exportedCount, fileName });
+    res.send(content);
+  } catch (error) {
+    logError("books.export.download.error", { bookId: req.params.bookId, error: describeError(error) });
+    res.status(400).json({ ok: false, error: describeError(error) });
   }
 });
 
