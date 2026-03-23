@@ -146,6 +146,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const [assistantDraft, setAssistantDraft] = useState("");
   const [chatting, setChatting] = useState(false);
   const [assistantJobId, setAssistantJobId] = useState<string | null>(null);
+  const [assistantChatError, setAssistantChatError] = useState<string | null>(null);
   const [assistantModalOpen, setAssistantModalOpen] = useState(false);
   const [assistantUseStream, setAssistantUseStream] = useState(true);
   const [assistantIncludeReasoning, setAssistantIncludeReasoning] = useState(false);
@@ -308,10 +309,14 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         }
         setChatting(false);
         setAssistantJobId(null);
+        setAssistantChatError(null);
         void message.success("已停止本次生成");
       })
       .catch((error: unknown) => {
-        void message.error(error instanceof Error ? error.message : String(error));
+        const errorText = error instanceof Error ? error.message : String(error);
+        setAssistantChatError(errorText);
+        setResult({ ok: false, scope: "init-assistant-chat", error: errorText });
+        void message.error(errorText);
       });
   }
 
@@ -608,6 +613,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     persistAssistantMessages(nextMessages);
     setAssistantDraft("");
     setChatting(true);
+    setAssistantChatError(null);
 
     void fetch("/api/inkos/init-assistant/chat", {
       method: "POST",
@@ -653,7 +659,10 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
       })
       .catch((error: unknown) => {
         if (isCancelledError(error)) return;
-        void message.error(error instanceof Error ? error.message : String(error));
+        const errorText = error instanceof Error ? error.message : String(error);
+        setAssistantChatError(errorText);
+        setResult({ ok: false, scope: "init-assistant-chat", error: errorText });
+        void message.error(errorText);
       })
       .finally(() => {
         setChatting(false);
@@ -956,6 +965,16 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
           <Typography.Text type="secondary" style={{ flexShrink: 0 }}>
             这里继续补强书名、主线、角色、阶段高潮和结局。助手会自动读取当前书籍的 `story` 路径、已保存简报、状态卡、伏笔池和章节摘要。
           </Typography.Text>
+          {assistantChatError ? (
+            <Alert
+              type="error"
+              showIcon
+              closable
+              onClose={() => setAssistantChatError(null)}
+              message="智能初始化对话执行失败"
+              description={assistantChatError}
+            />
+          ) : null}
           <ChatPanel
             messages={assistantMessages}
             value={assistantDraft}

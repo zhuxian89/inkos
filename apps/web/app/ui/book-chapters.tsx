@@ -66,6 +66,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [chatDraft, setChatDraft] = useState("");
   const [chatting, setChatting] = useState(false);
   const [chatJobId, setChatJobId] = useState<string | null>(null);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [chatUseStream, setChatUseStream] = useState(true);
   const [chatIncludeReasoning, setChatIncludeReasoning] = useState(false);
   const [chatProfiles, setChatProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
@@ -217,10 +218,14 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         }
         setChatting(false);
         setChatJobId(null);
+        setChatError(null);
         void message.success("已停止本次章节对话");
       })
       .catch((error: unknown) => {
-        void message.error(error instanceof Error ? error.message : String(error));
+        const errorText = error instanceof Error ? error.message : String(error);
+        setChatError(errorText);
+        setActionResult({ ok: false, scope: "chapter-chat", error: errorText });
+        void message.error(errorText);
       });
   }
 
@@ -274,6 +279,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
 
   function openChapterChat(row: ChapterMeta): void {
     setChatChapter(row);
+    setChatError(null);
     setChatMessages(loadStoredChapterChat(row.number));
     void loadPersistedChatSession("chapter-chat", chapterSessionKey(row.number)).then((messages) => {
       if (Array.isArray(messages) && messages.length > 0) {
@@ -295,6 +301,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
     persistChapterChat(chapterNumber, nextMessages);
     setChatDraft("");
     setChatting(true);
+    setChatError(null);
     void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chapterNumber}/chat`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -333,7 +340,10 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       })
       .catch((error: unknown) => {
         if (isCancelledError(error)) return;
-        void message.error(error instanceof Error ? error.message : String(error));
+        const errorText = error instanceof Error ? error.message : String(error);
+        setChatError(errorText);
+        setActionResult({ ok: false, scope: "chapter-chat", error: errorText });
+        void message.error(errorText);
       })
       .finally(() => {
         setChatting(false);
@@ -554,6 +564,16 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           <Typography.Text type="secondary" style={{ flexShrink: 0 }}>
             围绕本章讨论问题与修改方向。
           </Typography.Text>
+          {chatError ? (
+            <Alert
+              type="error"
+              showIcon
+              closable
+              onClose={() => setChatError(null)}
+              message="章节对话执行失败"
+              description={chatError}
+            />
+          ) : null}
           <ChatPanel
             messages={chatMessages}
             value={chatDraft}
