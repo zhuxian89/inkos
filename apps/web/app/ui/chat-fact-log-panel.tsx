@@ -1,6 +1,6 @@
 "use client";
 
-import { Alert, Button, Card, Space, Tag, Typography } from "antd";
+import { Alert, Button, Space, Tag, Typography } from "antd";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 interface ServiceLogEntry {
@@ -67,30 +67,53 @@ export function ChatFactLogPanel(props: Readonly<{
 
   useEffect(() => {
     if (!bodyRef.current) return;
-    bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    const id = window.requestAnimationFrame(() => {
+      if (!bodyRef.current) return;
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    });
+    return () => window.cancelAnimationFrame(id);
   }, [logs]);
 
   const rows = useMemo(() => logs.map((entry) => {
     const time = entry.timestamp.slice(11, 19);
-    const metaText = entry.meta ? ` ${JSON.stringify(entry.meta)}` : "";
-    return `${time} ${entry.level} ${entry.event}${metaText}`;
+    const metaText = entry.meta ? JSON.stringify(entry.meta, null, 2) : "";
+    return {
+      id: entry.id,
+      time,
+      level: entry.level,
+      event: entry.event,
+      metaText,
+    };
   }), [logs]);
 
   return (
-    <Card
-      size="small"
-      title={props.title}
-      styles={{
-        body: {
-          padding: 0,
-          height: "100%",
-          display: "flex",
-          flexDirection: "column",
-          minHeight: 0,
-        },
+    <div
+      style={{
+        height: "100%",
+        minHeight: 0,
+        display: "flex",
+        flexDirection: "column",
+        border: "1px solid rgba(72, 103, 104, 0.08)",
+        borderRadius: 18,
+        background: "linear-gradient(180deg, rgba(250,252,251,0.96) 0%, rgba(242,247,246,0.92) 100%)",
+        overflow: "hidden",
+        boxShadow: "0 14px 34px rgba(9, 17, 23, 0.08)",
       }}
-      style={{ height: "100%", minHeight: 0, overflow: "hidden", borderRadius: 14, background: "rgba(255,255,255,0.92)" }}
-      extra={(
+    >
+      <div
+        style={{
+          borderBottom: "1px solid rgba(72, 103, 104, 0.08)",
+          background: "rgba(255,255,255,0.86)",
+          padding: "10px 12px",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: 8,
+          flexWrap: "wrap",
+          flexShrink: 0,
+        }}
+      >
+        <Typography.Text strong style={{ fontSize: 16 }}>{props.title}</Typography.Text>
         <Space size={6}>
           <Tag color="blue">{`${logs.length} 条`}</Tag>
           <Button size="small" onClick={() => setPolling((value) => !value)}>
@@ -109,13 +132,12 @@ export function ChatFactLogPanel(props: Readonly<{
             刷新
           </Button>
         </Space>
-      )}
-    >
+      </div>
       {error ? (
         <Alert
           type="error"
           showIcon
-          style={{ margin: "10px 10px 0" }}
+          style={{ margin: "10px 10px 0", flexShrink: 0 }}
           message="日志读取失败"
           description={error}
         />
@@ -126,7 +148,7 @@ export function ChatFactLogPanel(props: Readonly<{
           flex: 1,
           minHeight: 0,
           margin: 10,
-          borderRadius: 10,
+          borderRadius: 12,
           padding: 10,
           background: "#0f1820",
           color: "#d8e8e4",
@@ -134,16 +156,33 @@ export function ChatFactLogPanel(props: Readonly<{
           fontSize: 12,
           lineHeight: 1.6,
           overflowY: "auto",
-          whiteSpace: "pre-wrap",
-          wordBreak: "break-word",
         }}
       >
-        {rows.length > 0 ? rows.join("\n") : (
+        {rows.length > 0 ? rows.map((row) => (
+          <div key={row.id} style={{ padding: "6px 0", borderBottom: "1px dashed rgba(216,232,228,0.15)" }}>
+            <div style={{ color: row.level === "ERROR" ? "#ff7875" : "#8ad4cb", fontWeight: 600 }}>
+              {row.time} {row.level} {row.event}
+            </div>
+            {row.metaText ? (
+              <pre
+                style={{
+                  margin: "4px 0 0",
+                  color: "#d8e8e4",
+                  whiteSpace: "pre-wrap",
+                  wordBreak: "break-word",
+                  lineHeight: 1.45,
+                }}
+              >
+                {row.metaText}
+              </pre>
+            ) : null}
+          </div>
+        )) : (
           <Typography.Text style={{ color: "rgba(216,232,228,0.78)" }}>
             暂无日志，等待新事件...
           </Typography.Text>
         )}
       </div>
-    </Card>
+    </div>
   );
 }

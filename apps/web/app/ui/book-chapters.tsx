@@ -647,7 +647,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
                 <Space>
                   {!isMobile ? (
                     <Button onClick={() => setChatLogOpen((value) => !value)}>
-                      {chatLogOpen ? "收起日志" : "事实日志"}
+                      {chatLogOpen ? "收起日志" : "实时日志"}
                     </Button>
                   ) : null}
                   <Button danger onClick={stopChapterChat} disabled={!chatting || !chatJobId}>
@@ -663,7 +663,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
               containerStyle={{ height: "100%", minHeight: 0 }}
             />
             {!isMobile && chatLogOpen ? (
-              <ChatFactLogPanel title="事实日志 · 章节对话" eventIncludes="chapter.chat" />
+              <ChatFactLogPanel title="实时日志 · 章节对话" eventIncludes="chapter.chat" />
             ) : null}
           </div>
         </div>

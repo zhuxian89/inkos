@@ -1045,7 +1045,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                 <>
                   {!isMobile ? (
                     <Button onClick={() => setAssistantLogOpen((value) => !value)}>
-                      {assistantLogOpen ? "收起日志" : "事实日志"}
+                      {assistantLogOpen ? "收起日志" : "实时日志"}
                     </Button>
                   ) : null}
                   <Button onClick={clearAssistantConversation} disabled={chatting || isSavingBrief}>
@@ -1059,7 +1059,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               containerStyle={{ height: "100%", minHeight: 0 }}
             />
             {!isMobile && assistantLogOpen ? (
-              <ChatFactLogPanel title="事实日志 · 初始化助手" eventIncludes="init_assistant" />
+              <ChatFactLogPanel title="实时日志 · 初始化助手" eventIncludes="init_assistant" />
             ) : null}
           </div>
         </div>
