@@ -144,6 +144,19 @@ export function ChatPanel(props: Readonly<{
   readonly containerStyle?: CSSProperties;
 }>) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
+  const frameSizeStyle: CSSProperties = (() => {
+    if (typeof props.maxHeight === "number") {
+      return { height: props.maxHeight, maxHeight: props.maxHeight };
+    }
+    if (typeof props.maxHeight === "string") {
+      const normalized = props.maxHeight.trim();
+      if (normalized === "100%") {
+        return {};
+      }
+      return { maxHeight: normalized };
+    }
+    return { height: 460, maxHeight: 460 };
+  })();
 
   useEffect(() => {
     if (!bodyRef.current) return;
@@ -165,8 +178,6 @@ export function ChatPanel(props: Readonly<{
         style={{
           flex: 1,
           minHeight: 0,
-          height: props.maxHeight ?? 460,
-          maxHeight: props.maxHeight ?? 460,
           display: "flex",
           flexDirection: "column",
           border: "1px solid rgba(72, 103, 104, 0.08)",
@@ -174,6 +185,7 @@ export function ChatPanel(props: Readonly<{
           background: "linear-gradient(180deg, rgba(250,252,251,0.96) 0%, rgba(242,247,246,0.92) 100%)",
           overflow: "hidden",
           boxShadow: "0 14px 34px rgba(9, 17, 23, 0.08)",
+          ...frameSizeStyle,
         }}
       >
         <div

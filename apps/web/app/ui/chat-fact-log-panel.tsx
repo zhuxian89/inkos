@@ -89,7 +89,7 @@ export function ChatFactLogPanel(props: Readonly<{
           minHeight: 0,
         },
       }}
-      style={{ height: "100%", borderRadius: 14, background: "rgba(255,255,255,0.92)" }}
+      style={{ height: "100%", minHeight: 0, overflow: "hidden", borderRadius: 14, background: "rgba(255,255,255,0.92)" }}
       extra={(
         <Space size={6}>
           <Tag color="blue">{`${logs.length} 条`}</Tag>

@@ -583,6 +583,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
               gap: 12,
               flex: 1,
               minHeight: 0,
+              overflow: "hidden",
             }}
           >
             <ChatPanel

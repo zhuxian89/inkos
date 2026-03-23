@@ -984,6 +984,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               gap: 12,
               flex: 1,
               minHeight: 0,
+              overflow: "hidden",
             }}
           >
             <ChatPanel
