@@ -6,6 +6,7 @@ import { MoreOutlined } from "@ant-design/icons";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { ChatFactLogPanel } from "./chat-fact-log-panel";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 import { IssueTags } from "./issue-tags";
@@ -67,6 +68,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [chatting, setChatting] = useState(false);
   const [chatJobId, setChatJobId] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
+  const [chatLogOpen, setChatLogOpen] = useState(false);
   const [chatUseStream, setChatUseStream] = useState(true);
   const [chatIncludeReasoning, setChatIncludeReasoning] = useState(false);
   const [chatProfiles, setChatProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
@@ -554,7 +556,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         footer={null}
         maskClosable={false}
         keyboard
-        width={isMobile ? "94vw" : CHAT_MODAL_WIDTH}
+        width={isMobile ? "94vw" : (chatLogOpen ? "min(1640px, 98vw)" : CHAT_MODAL_WIDTH)}
         style={{ top: isMobile ? 8 : 20 }}
         styles={{ body: { paddingTop: 8, height: isMobile ? "76vh" : CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnClose
@@ -574,77 +576,95 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
               description={chatError}
             />
           ) : null}
-          <ChatPanel
-            messages={chatMessages}
-            value={chatDraft}
-            onChange={setChatDraft}
-            onSend={sendChapterChat}
-            sending={chatting}
-            placeholder="例如：把第三段里‘八十九天’改成‘八十八天’，并同步修正 current_state.md 里的对应表述。"
-            emptyText="先说一句你想改什么，例如“把这一句改顺一点”“修一下 current_state.md 里的倒计时表述”。"
-            minHeight={220}
-            maxHeight="100%"
-            topBar={(
-              <Space wrap>
-                <Select
-                  style={{ minWidth: 280 }}
-                  value={chatProfileId}
-                  onChange={(value) => {
-                    if (!chatChapter) return;
-                    const next = value || undefined;
-                    setChatProfileId(next);
-                    persistChapterChatProfileId(chatChapter.number, next);
-                  }}
-                  placeholder="使用当前激活配置"
-                  options={chatProfiles.map((item) => ({
-                    value: item.id,
-                    label: item.isActive ? `${item.name} · ${item.model}（当前激活）` : `${item.name} · ${item.model}`,
-                  }))}
-                />
-                <Checkbox
-                  checked={chatUseStream}
-                  onChange={(event) => {
-                    if (!chatChapter) return;
-                    const next = event.target.checked;
-                    setChatUseStream(next);
-                    persistChapterChatOptions(chatChapter.number, {
-                      useStream: next,
-                      includeReasoning: chatIncludeReasoning,
-                    });
-                  }}
-                >
-                  使用流式
-                </Checkbox>
-                <Checkbox
-                  checked={chatIncludeReasoning}
-                  onChange={(event) => {
-                    if (!chatChapter) return;
-                    const next = event.target.checked;
-                    setChatIncludeReasoning(next);
-                    persistChapterChatOptions(chatChapter.number, {
-                      useStream: chatUseStream,
-                      includeReasoning: next,
-                    });
-                  }}
-                >
-                  展示 reasoning
-                </Checkbox>
-              </Space>
-            )}
-            footerRight={(
-              <Space>
-                <Button danger onClick={stopChapterChat} disabled={!chatting || !chatJobId}>
-                  停止
-                </Button>
-                <Dropdown menu={{ items: chatMenuItems }} trigger={["click"]}>
-                  <Button icon={<MoreOutlined />} disabled={chatting || replacingChapter}>
-                    更多
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: !isMobile && chatLogOpen ? "minmax(0,1fr) 420px" : "1fr",
+              gap: 12,
+              flex: 1,
+              minHeight: 0,
+            }}
+          >
+            <ChatPanel
+              messages={chatMessages}
+              value={chatDraft}
+              onChange={setChatDraft}
+              onSend={sendChapterChat}
+              sending={chatting}
+              placeholder="例如：把第三段里‘八十九天’改成‘八十八天’，并同步修正 current_state.md 里的对应表述。"
+              emptyText="先说一句你想改什么，例如“把这一句改顺一点”“修一下 current_state.md 里的倒计时表述”。"
+              minHeight={220}
+              maxHeight="100%"
+              topBar={(
+                <Space wrap>
+                  <Select
+                    style={{ minWidth: 280 }}
+                    value={chatProfileId}
+                    onChange={(value) => {
+                      if (!chatChapter) return;
+                      const next = value || undefined;
+                      setChatProfileId(next);
+                      persistChapterChatProfileId(chatChapter.number, next);
+                    }}
+                    placeholder="使用当前激活配置"
+                    options={chatProfiles.map((item) => ({
+                      value: item.id,
+                      label: item.isActive ? `${item.name} · ${item.model}（当前激活）` : `${item.name} · ${item.model}`,
+                    }))}
+                  />
+                  <Checkbox
+                    checked={chatUseStream}
+                    onChange={(event) => {
+                      if (!chatChapter) return;
+                      const next = event.target.checked;
+                      setChatUseStream(next);
+                      persistChapterChatOptions(chatChapter.number, {
+                        useStream: next,
+                        includeReasoning: chatIncludeReasoning,
+                      });
+                    }}
+                  >
+                    使用流式
+                  </Checkbox>
+                  <Checkbox
+                    checked={chatIncludeReasoning}
+                    onChange={(event) => {
+                      if (!chatChapter) return;
+                      const next = event.target.checked;
+                      setChatIncludeReasoning(next);
+                      persistChapterChatOptions(chatChapter.number, {
+                        useStream: chatUseStream,
+                        includeReasoning: next,
+                      });
+                    }}
+                  >
+                    展示 reasoning
+                  </Checkbox>
+                </Space>
+              )}
+              footerRight={(
+                <Space>
+                  {!isMobile ? (
+                    <Button onClick={() => setChatLogOpen((value) => !value)}>
+                      {chatLogOpen ? "收起日志" : "事实日志"}
+                    </Button>
+                  ) : null}
+                  <Button danger onClick={stopChapterChat} disabled={!chatting || !chatJobId}>
+                    停止
                   </Button>
-                </Dropdown>
-              </Space>
-            )}
-            containerStyle={{ flex: 1, minHeight: 0 }}
-          />
+                  <Dropdown menu={{ items: chatMenuItems }} trigger={["click"]}>
+                    <Button icon={<MoreOutlined />} disabled={chatting || replacingChapter}>
+                      更多
+                    </Button>
+                  </Dropdown>
+                </Space>
+              )}
+              containerStyle={{ height: "100%", minHeight: 0 }}
+            />
+            {!isMobile && chatLogOpen ? (
+              <ChatFactLogPanel title="事实日志 · 章节对话" eventIncludes="chapter.chat" />
+            ) : null}
+          </div>
         </div>
       </Modal>
 

@@ -26,6 +26,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { BookChapters } from "./book-chapters";
 import { ChatPanel } from "./chat-panel";
+import { ChatFactLogPanel } from "./chat-fact-log-panel";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 import { labelBookStatus, labelGenre, labelPlatform } from "./labels";
@@ -147,6 +148,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const [chatting, setChatting] = useState(false);
   const [assistantJobId, setAssistantJobId] = useState<string | null>(null);
   const [assistantChatError, setAssistantChatError] = useState<string | null>(null);
+  const [assistantLogOpen, setAssistantLogOpen] = useState(false);
   const [assistantModalOpen, setAssistantModalOpen] = useState(false);
   const [assistantUseStream, setAssistantUseStream] = useState(true);
   const [assistantIncludeReasoning, setAssistantIncludeReasoning] = useState(false);
@@ -957,7 +959,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         footer={null}
         maskClosable={false}
         keyboard
-        width={isMobile ? "94vw" : CHAT_MODAL_WIDTH}
+        width={isMobile ? "94vw" : (assistantLogOpen ? "min(1640px, 98vw)" : CHAT_MODAL_WIDTH)}
         styles={{ body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnHidden={false}
       >
@@ -975,72 +977,90 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               description={assistantChatError}
             />
           ) : null}
-          <ChatPanel
-            messages={assistantMessages}
-            value={assistantDraft}
-            onChange={setAssistantDraft}
-            onSend={sendInitAssistantMessage}
-            sending={chatting}
-            placeholder="例如：现在这本书的开篇还不够狠，帮我把前三章改成更强冲突的穿越翻盘局，同时给出两个更抓人的书名。"
-            emptyText="先说一句你要怎么改这本书，比如“把男主目标改得更强”“给我三个更狠的书名”“结局想更爽一点”。"
-            minHeight={260}
-            maxHeight="100%"
-            topBar={(
-              <Space wrap>
-                <Select
-                  style={{ minWidth: 280 }}
-                  value={assistantProfileId}
-                  onChange={(value) => {
-                    const next = value || undefined;
-                    setAssistantProfileId(next);
-                    persistAssistantProfileId(next);
-                  }}
-                  placeholder="使用当前激活配置"
-                  options={assistantProfiles.map((item) => ({
-                    value: item.id,
-                    label: item.isActive ? `${item.name} · ${item.model}（当前激活）` : `${item.name} · ${item.model}`,
-                  }))}
-                />
-                <Checkbox
-                  checked={assistantUseStream}
-                  onChange={(event) => {
-                    const next = event.target.checked;
-                    setAssistantUseStream(next);
-                    persistAssistantOptions({
-                      useStream: next,
-                      includeReasoning: assistantIncludeReasoning,
-                    });
-                  }}
-                >
-                  使用流式
-                </Checkbox>
-                <Checkbox
-                  checked={assistantIncludeReasoning}
-                  onChange={(event) => {
-                    const next = event.target.checked;
-                    setAssistantIncludeReasoning(next);
-                    persistAssistantOptions({
-                      useStream: assistantUseStream,
-                      includeReasoning: next,
-                    });
-                  }}
-                >
-                  展示 reasoning
-                </Checkbox>
-              </Space>
-            )}
-            footerRight={(
-              <>
-                <Button onClick={clearAssistantConversation} disabled={chatting || isSavingBrief}>
-                  清空对话
-                </Button>
-                <Button danger onClick={stopInitAssistantMessage} disabled={!chatting || !assistantJobId}>
-                  停止
-                </Button>
-              </>
-            )}
-            containerStyle={{ flex: 1, minHeight: 0 }}
-          />
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: !isMobile && assistantLogOpen ? "minmax(0,1fr) 420px" : "1fr",
+              gap: 12,
+              flex: 1,
+              minHeight: 0,
+            }}
+          >
+            <ChatPanel
+              messages={assistantMessages}
+              value={assistantDraft}
+              onChange={setAssistantDraft}
+              onSend={sendInitAssistantMessage}
+              sending={chatting}
+              placeholder="例如：现在这本书的开篇还不够狠，帮我把前三章改成更强冲突的穿越翻盘局，同时给出两个更抓人的书名。"
+              emptyText="先说一句你要怎么改这本书，比如“把男主目标改得更强”“给我三个更狠的书名”“结局想更爽一点”。"
+              minHeight={260}
+              maxHeight="100%"
+              topBar={(
+                <Space wrap>
+                  <Select
+                    style={{ minWidth: 280 }}
+                    value={assistantProfileId}
+                    onChange={(value) => {
+                      const next = value || undefined;
+                      setAssistantProfileId(next);
+                      persistAssistantProfileId(next);
+                    }}
+                    placeholder="使用当前激活配置"
+                    options={assistantProfiles.map((item) => ({
+                      value: item.id,
+                      label: item.isActive ? `${item.name} · ${item.model}（当前激活）` : `${item.name} · ${item.model}`,
+                    }))}
+                  />
+                  <Checkbox
+                    checked={assistantUseStream}
+                    onChange={(event) => {
+                      const next = event.target.checked;
+                      setAssistantUseStream(next);
+                      persistAssistantOptions({
+                        useStream: next,
+                        includeReasoning: assistantIncludeReasoning,
+                      });
+                    }}
+                  >
+                    使用流式
+                  </Checkbox>
+                  <Checkbox
+                    checked={assistantIncludeReasoning}
+                    onChange={(event) => {
+                      const next = event.target.checked;
+                      setAssistantIncludeReasoning(next);
+                      persistAssistantOptions({
+                        useStream: assistantUseStream,
+                        includeReasoning: next,
+                      });
+                    }}
+                  >
+                    展示 reasoning
+                  </Checkbox>
+                </Space>
+              )}
+              footerRight={(
+                <>
+                  {!isMobile ? (
+                    <Button onClick={() => setAssistantLogOpen((value) => !value)}>
+                      {assistantLogOpen ? "收起日志" : "事实日志"}
+                    </Button>
+                  ) : null}
+                  <Button onClick={clearAssistantConversation} disabled={chatting || isSavingBrief}>
+                    清空对话
+                  </Button>
+                  <Button danger onClick={stopInitAssistantMessage} disabled={!chatting || !assistantJobId}>
+                    停止
+                  </Button>
+                </>
+              )}
+              containerStyle={{ height: "100%", minHeight: 0 }}
+            />
+            {!isMobile && assistantLogOpen ? (
+              <ChatFactLogPanel title="事实日志 · 初始化助手" eventIncludes="init_assistant" />
+            ) : null}
+          </div>
         </div>
       </Modal>
     </Space>
