@@ -156,6 +156,10 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const [assistantProfileId, setAssistantProfileId] = useState<string | undefined>(undefined);
   const [styleFile, setStyleFile] = useState<File | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const draftPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [writeJobId, setWriteJobId] = useState<string | null>(null);
+
+  const POLL_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes max polling
   const [writeForm] = Form.useForm<WriteValues>();
   const [settingsForm] = Form.useForm<BookSettingsValues>();
   const [exportForm] = Form.useForm<ExportValues>();
@@ -464,14 +468,17 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = null;
+      if (draftPollRef.current) clearInterval(draftPollRef.current);
+      draftPollRef.current = null;
     };
   }, [bookId, canonForm, exportForm, settingsForm, styleForm, writeForm]);
 
   function writeNext(values: WriteValues): void {
-    if (isWriting) return;
+    if (isWriting || toolAction) return;
     setIsWriting(true);
     setWriteStep("提交中...");
     setResult(null);
+    setWriteJobId(null);
 
     void fetch("/api/inkos/writing/next", {
       method: "POST",
@@ -483,38 +490,86 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         context: values.context || undefined,
       }),
     })
-      .then((response) => response.json())
-      .then((data: { ok: boolean; jobId?: string; error?: string }) => {
+      .then(async (response) => {
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(text || `服务端错误 (${response.status})`);
+        }
+        return response.json() as Promise<{ ok: boolean; jobId?: string; error?: string }>;
+      })
+      .then((data) => {
         if (!data.ok || !data.jobId) {
           setResult(data);
+          void message.error(data.error ?? "续写启动失败");
           setIsWriting(false);
           setWriteStep(null);
           return;
         }
 
         const jobId = data.jobId;
+        setWriteJobId(jobId);
+        const pollStartedAt = Date.now();
         pollRef.current = setInterval(async () => {
           try {
-            const pollRes = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
-            const job = await pollRes.json();
-            setWriteStep(job.step ?? "执行中...");
-            if (job.status === "done" || job.status === "error") {
+            if (Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
               if (pollRef.current) clearInterval(pollRef.current);
               pollRef.current = null;
-              setResult(job.status === "done" ? job.result : { ok: false, error: job.error });
+              setResult({ ok: false, error: "轮询超时，请检查任务状态" });
+              void message.error("续写轮询超时（超过 20 分钟），请手动检查结果");
               setIsWriting(false);
               setWriteStep(null);
+              setWriteJobId(null);
+              return;
+            }
+            const pollRes = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+            if (!pollRes.ok) return; // transient error, keep polling
+            const job = await pollRes.json();
+            setWriteStep(job.step ?? "执行中...");
+            if (job.status === "done" || job.status === "error" || job.status === "cancelled") {
+              if (pollRef.current) clearInterval(pollRef.current);
+              pollRef.current = null;
+              if (job.status === "done") {
+                setResult(job.result);
+              } else {
+                setResult({ ok: false, error: job.error ?? "任务已取消" });
+                void message.error(job.error ?? "续写任务已取消");
+              }
+              setIsWriting(false);
+              setWriteStep(null);
+              setWriteJobId(null);
               await loadBookPanels();
             }
           } catch {
-            // keep polling
+            // transient network error, keep polling
           }
         }, 3000);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
+        const errorText = error instanceof Error ? error.message : String(error);
+        setResult({ ok: false, error: errorText });
+        void message.error(errorText || "续写请求失败");
         setIsWriting(false);
         setWriteStep(null);
+        setWriteJobId(null);
       });
+  }
+
+  function cancelWriteJob(): void {
+    if (!writeJobId) return;
+    void fetch(`/api/inkos/jobs/${encodeURIComponent(writeJobId)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ reason: "用户取消续写" }),
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok || !data?.ok) {
+          void message.error(data?.error ?? "取消失败");
+          return;
+        }
+        void message.success("已请求取消续写");
+      })
+      .catch(() => void message.error("取消请求发送失败"));
   }
 
   function draftOnly(values: WriteValues): void {
@@ -534,8 +589,14 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         },
       }),
     })
-      .then((response) => response.json())
-      .then(async (data: { ok?: boolean; jobId?: string; error?: string }) => {
+      .then(async (response) => {
+        if (!response.ok) {
+          const text = await response.text().catch(() => "");
+          throw new Error(text || `服务端错误 (${response.status})`);
+        }
+        return response.json() as Promise<{ ok?: boolean; jobId?: string; error?: string }>;
+      })
+      .then(async (data) => {
         if (!data?.ok || !data.jobId) {
           setResult(data);
           void message.error(data?.error ?? "草稿生成失败");
@@ -543,13 +604,26 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         }
 
         const jobId = data.jobId;
-        const timer = setInterval(async () => {
+        const pollStartedAt = Date.now();
+        if (draftPollRef.current) clearInterval(draftPollRef.current);
+        draftPollRef.current = setInterval(async () => {
           try {
+            if (Date.now() - pollStartedAt > POLL_TIMEOUT_MS) {
+              if (draftPollRef.current) clearInterval(draftPollRef.current);
+              draftPollRef.current = null;
+              setResult({ ok: false, error: "轮询超时，请检查任务状态" });
+              void message.error("草稿生成轮询超时（超过 20 分钟），请手动检查结果");
+              setToolAction(null);
+              setWriteStep(null);
+              return;
+            }
             const pollRes = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
+            if (!pollRes.ok) return; // transient error, keep polling
             const job = await pollRes.json();
             setWriteStep(job.step ?? "草稿生成中...");
-            if (job.status === "done" || job.status === "error") {
-              clearInterval(timer);
+            if (job.status === "done" || job.status === "error" || job.status === "cancelled") {
+              if (draftPollRef.current) clearInterval(draftPollRef.current);
+              draftPollRef.current = null;
               setResult(job.status === "done" ? job.result : { ok: false, error: job.error });
               if (job.status === "done") {
                 void message.success("草稿已生成");
@@ -561,7 +635,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               setWriteStep(null);
             }
           } catch {
-            // keep polling
+            // transient network error, keep polling
           }
         }, 3000);
       })
@@ -761,11 +835,16 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               <Form.Item name="context" label="本次续写要求（可选）">
                 <Input.TextArea rows={6} placeholder="只写这一章要发生什么，比如：推进主线冲突、加快节奏、结尾抛出钩子。" />
               </Form.Item>
-              <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", gap: 12, alignItems: isMobile ? "stretch" : "center" }}>
-                <Button type="primary" htmlType="submit" size="large" block={isMobile} loading={isWriting}>开始续写</Button>
-                <Button size="large" block={isMobile} loading={toolAction === "draft"} onClick={() => draftOnly(writeForm.getFieldsValue())}>
+              <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", gap: 12, alignItems: isMobile ? "stretch" : "center", flexWrap: "wrap" }}>
+                <Button type="primary" htmlType="submit" size="large" block={isMobile} loading={isWriting} disabled={!!toolAction}>开始续写</Button>
+                <Button size="large" block={isMobile} loading={toolAction === "draft"} disabled={isWriting} onClick={() => draftOnly(writeForm.getFieldsValue())}>
                   只写草稿
                 </Button>
+                {isWriting && writeJobId ? (
+                  <Button danger size="large" block={isMobile} onClick={cancelWriteJob}>
+                    取消续写
+                  </Button>
+                ) : null}
                 {writeStep ? <Typography.Text type="secondary">{writeStep}</Typography.Text> : null}
               </div>
             </Form>

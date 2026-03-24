@@ -3986,7 +3986,7 @@ app.post("/api/jobs/:jobId/cancel", (req, res) => {
     return;
   }
 
-  if (job.type !== "chapter-chat" && job.type !== "init-assistant-chat") {
+  if (job.type !== "chapter-chat" && job.type !== "init-assistant-chat" && job.type !== "write-next") {
     res.status(400).json({
       ok: false,
       error: `当前任务类型不支持取消：${job.type}`,
