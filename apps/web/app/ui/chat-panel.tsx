@@ -60,11 +60,10 @@ const assistantMarkdownComponents: Components = {
     </code>
   ),
   table: ({ children }) => (
-    <div style={{ margin: "0 0 12px", overflowX: "auto" }}>
+    <div style={{ margin: "0 0 12px", overflowX: "auto", maxWidth: "100%" }}>
       <table
         style={{
-          width: "max-content",
-          minWidth: "100%",
+          width: "100%",
           borderCollapse: "collapse",
           fontSize: 13,
         }}
@@ -103,6 +102,14 @@ const assistantMarkdownComponents: Components = {
     <a href={href} target="_blank" rel="noreferrer" style={{ color: "#1677ff", textDecoration: "underline", wordBreak: "break-all" }}>
       {children}
     </a>
+  ),
+  img: ({ src, alt, title }) => (
+    <img
+      src={src}
+      alt={alt}
+      title={title}
+      style={{ maxWidth: "100%", height: "auto", borderRadius: 8, display: "block", margin: "8px 0" }}
+    />
   ),
 };
 
@@ -170,7 +177,7 @@ export function ChatPanel(props: Readonly<{
       style={{
         display: "flex",
         flexDirection: "column",
-        gap: 16,
+        gap: isMobile ? 8 : 16,
         width: "100%",
         ...props.containerStyle,
       }}
@@ -194,12 +201,12 @@ export function ChatPanel(props: Readonly<{
           ref={bodyRef}
           style={{
             flex: 1,
-            minHeight: isMobile ? Math.min(props.minHeight ?? 320, 220) : (props.minHeight ?? 320),
+            minHeight: isMobile ? Math.min(props.minHeight ?? 320, 120) : (props.minHeight ?? 320),
             overflowY: "auto",
-            padding: 20,
+            padding: isMobile ? 12 : 20,
             display: "flex",
             flexDirection: "column",
-            gap: 14,
+            gap: isMobile ? 10 : 14,
           }}
         >
           {props.messages.length === 0 ? (
@@ -229,12 +236,13 @@ export function ChatPanel(props: Readonly<{
                     style={{
                       maxWidth: isMobile ? "92%" : "78%",
                       minWidth: 0,
+                      overflow: "hidden",
                       background: item.role === "user"
                         ? "linear-gradient(135deg, #4c7471 0%, #628f89 100%)"
                         : "rgba(255,255,255,0.94)",
                       color: item.role === "user" ? "#f6fffd" : "#262626",
-                      borderRadius: 18,
-                      padding: "14px 16px",
+                      borderRadius: isMobile ? 14 : 18,
+                      padding: isMobile ? "10px 12px" : "14px 16px",
                       whiteSpace: item.role === "user" ? "pre-wrap" : "normal",
                       lineHeight: 1.75,
                       overflowWrap: "anywhere",
@@ -270,17 +278,18 @@ export function ChatPanel(props: Readonly<{
           style={{
             borderTop: "1px solid rgba(72, 103, 104, 0.08)",
             background: "rgba(255,255,255,0.86)",
-            padding: 16,
+            padding: isMobile ? 10 : 16,
             backdropFilter: "blur(8px)",
           }}
         >
-          <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 8 : 12, width: "100%" }}>
             <Input.TextArea
               value={props.value}
               onChange={(event) => props.onChange(event.target.value)}
               placeholder={props.placeholder}
-              autoSize={{ minRows: props.inputMinRows ?? 3, maxRows: props.inputMaxRows ?? 8 }}
+              autoSize={{ minRows: isMobile ? (props.inputMinRows ?? 2) : (props.inputMinRows ?? 3), maxRows: props.inputMaxRows ?? 8 }}
               onPressEnter={(event) => {
+                if (isMobile) return; // 手机端保留软键盘回车的换行功能，不直接发送
                 if (!event.shiftKey) {
                   event.preventDefault();
                   props.onSend();
@@ -305,6 +314,7 @@ export function ChatPanel(props: Readonly<{
                   overflow: "hidden",
                   textOverflow: isMobile ? "clip" : "ellipsis",
                   whiteSpace: isMobile ? "normal" : "nowrap",
+                  display: isMobile && !props.footerLeft ? "none" : "block", // 移动端如果没有自定义左下角内容，则默认隐藏键盘提示
                 }}
               >
                 {props.footerLeft ?? <Typography.Text type="secondary">回车发送，Shift+回车换行。</Typography.Text>}

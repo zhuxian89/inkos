@@ -1009,10 +1009,12 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         styles={{ body: { height: isMobile ? "76vh" : CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnHidden={false}
       >
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", height: "100%", minHeight: 0 }}>
-          <Typography.Text type="secondary" style={{ flexShrink: 0 }}>
-            这里继续补强书名、主线、角色、阶段高潮和结局。助手会自动读取当前书籍的 `story` 路径、已保存简报、状态卡、伏笔池和章节摘要。
-          </Typography.Text>
+        <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 6 : 12, width: "100%", height: "100%", minHeight: 0 }}>
+          {!isMobile ? (
+            <Typography.Text type="secondary" style={{ flexShrink: 0 }}>
+              这里继续补强书名、主线、角色、阶段高潮和结局。助手会自动读取当前书籍的 `story` 路径、已保存简报、状态卡、伏笔池和章节摘要。
+            </Typography.Text>
+          ) : null}
           {assistantChatError ? (
             <Alert
               type="error"
@@ -1044,8 +1046,9 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               minHeight={260}
               maxHeight="100%"
               topBar={(
-                <Space wrap style={isMobile ? { width: "100%" } : undefined}>
+                <Space wrap size={isMobile ? 4 : 8} style={isMobile ? { width: "100%" } : undefined}>
                   <Select
+                    size={isMobile ? "small" : "middle"}
                     style={isMobile ? { width: "100%" } : { minWidth: 280 }}
                     value={assistantProfileId}
                     onChange={(value) => {
@@ -1070,7 +1073,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                       });
                     }}
                   >
-                    使用流式
+                    {isMobile ? "流式" : "使用流式"}
                   </Checkbox>
                   <Checkbox
                     checked={assistantIncludeReasoning}
@@ -1083,7 +1086,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                       });
                     }}
                   >
-                    展示 reasoning
+                    {isMobile ? "推理" : "展示 reasoning"}
                   </Checkbox>
                 </Space>
               )}
@@ -1094,10 +1097,10 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                       {assistantLogOpen ? "收起日志" : "实时日志"}
                     </Button>
                   ) : null}
-                  <Button onClick={clearAssistantConversation} disabled={chatting || isSavingBrief}>
+                  <Button size={isMobile ? "small" : "middle"} onClick={clearAssistantConversation} disabled={chatting || isSavingBrief}>
                     清空对话
                   </Button>
-                  <Button danger onClick={stopInitAssistantMessage} disabled={!chatting || !assistantJobId}>
+                  <Button size={isMobile ? "small" : "middle"} danger onClick={stopInitAssistantMessage} disabled={!chatting || !assistantJobId}>
                     停止
                   </Button>
                 </>
