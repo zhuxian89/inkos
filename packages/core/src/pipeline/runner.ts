@@ -20,6 +20,7 @@ import type { AgentContext } from "../agents/base.js";
 import type { AuditResult, AuditIssue } from "../agents/continuity.js";
 import type { RadarResult } from "../agents/radar.js";
 import { buildChapterFilename, extractChapterBody, resolveChapterFile, writeCanonicalChapterFile } from "../utils/chapter-files.js";
+import { countNovelWords } from "../utils/text-count.js";
 import { readFile, readdir, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -427,7 +428,7 @@ export class PipelineRunner {
 
       if (auditResult.issues.length === 0 && !instruction?.trim()) {
         this.debug("revise.skip.no_issues", { bookId, targetChapter, mode });
-        return { chapterNumber: targetChapter, wordCount: content.length, fixedIssues: ["没有需要修复的问题"] };
+        return { chapterNumber: targetChapter, wordCount: countNovelWords(content), fixedIssues: ["没有需要修复的问题"] };
       }
 
       const { profile: gp } = await this.loadGenreProfile(book.genre);

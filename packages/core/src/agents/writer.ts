@@ -7,6 +7,7 @@ import { readGenreProfile, readBookRules } from "./rules-reader.js";
 import { validatePostWrite, type PostWriteViolation } from "./post-write-validator.js";
 import { analyzeAITells } from "./ai-tells.js";
 import { buildChapterFilename } from "../utils/chapter-files.js";
+import { countNovelWords } from "../utils/text-count.js";
 import { extractTag } from "../utils/tag-parser.js";
 import { truncateMarkdownTable } from "../utils/truncate.js";
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
@@ -422,7 +423,7 @@ ${params.volumeOutline}
       chapterNumber,
       title: extract("CHAPTER_TITLE") || `第${chapterNumber}章`,
       content: chapterContent,
-      wordCount: chapterContent.length,
+      wordCount: countNovelWords(chapterContent),
       preWriteCheck: extract("PRE_WRITE_CHECK"),
       postSettlement: extract("POST_SETTLEMENT"),
       updatedState: extract("UPDATED_STATE") || "(状态卡未更新)",

@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import { WriterAgent } from "../agents/writer.js";
 import type { WriteChapterOutput } from "../agents/writer.js";
 import type { GenreProfile } from "../models/genre-profile.js";
+import { countNovelWords } from "../utils/text-count.js";
 
 const defaultGenreProfile: GenreProfile = {
   name: "测试",
@@ -86,11 +87,11 @@ describe("WriterAgent parseOutput", () => {
     expect(result.updatedHooks).toContain("H001");
   });
 
-  it("calculates wordCount as the length of chapter content", () => {
+  it("calculates wordCount with novel counting rules", () => {
     const result = callParseOutput(1, fullOutput);
     const expectedContent =
       "陈风站在悬崖边，俯视着脚下的万丈深渊。\n一股强烈的吸力从深渊中传来，仿佛有什么东西在召唤他。";
-    expect(result.wordCount).toBe(expectedContent.length);
+    expect(result.wordCount).toBe(countNovelWords(expectedContent));
   });
 
   // -------------------------------------------------------------------------
@@ -222,7 +223,6 @@ describe("WriterAgent parseOutput", () => {
     ].join("\n");
 
     const result = callParseOutput(1, output);
-    // wordCount is content.length which counts each character (including punctuation)
-    expect(result.wordCount).toBe(chineseContent.length);
+    expect(result.wordCount).toBe(countNovelWords(chineseContent));
   });
 });

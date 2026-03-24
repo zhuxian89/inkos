@@ -3,6 +3,7 @@ import {
   buildChapterFilename,
   chatCompletion,
   chatWithTools,
+  countNovelWords,
   createLLMClient,
   readGenreProfile,
   resolveChapterFile,
@@ -2961,6 +2962,7 @@ app.post("/api/books/:bookId/chapters/:chapter/replace", async (req, res) => {
     const nextBody = heading.startsWith("#")
       ? lines.slice(1).join("\n").trim()
       : withoutFence;
+    const nextWordCount = countNovelWords(nextBody);
 
     const writeResult = await writeCanonicalChapterFile({
       chaptersDir: join(bookDir, "chapters"),
@@ -2976,7 +2978,7 @@ app.post("/api/books/:bookId/chapters/:chapter/replace", async (req, res) => {
         ? {
             ...item,
             title: nextTitle,
-            wordCount: nextBody.length,
+            wordCount: nextWordCount,
             status: "drafted" as ChapterMeta["status"],
             updatedAt,
             auditIssues: [],
@@ -2993,9 +2995,9 @@ app.post("/api/books/:bookId/chapters/:chapter/replace", async (req, res) => {
       removedDuplicates: writeResult.removedDuplicates,
       canonicalFile: buildChapterFilename(chapterNumber, nextTitle),
       title: nextTitle,
-      wordCount: nextBody.length,
+      wordCount: nextWordCount,
     });
-    res.json({ ok: true, bookId, chapter: chapterNumber, filePath: writeResult.fullPath, title: nextTitle, wordCount: nextBody.length });
+    res.json({ ok: true, bookId, chapter: chapterNumber, filePath: writeResult.fullPath, title: nextTitle, wordCount: nextWordCount });
   } catch (error) {
     logError("chapter.replace.error", {
       bookId: req.params.bookId,

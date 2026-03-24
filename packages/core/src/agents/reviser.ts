@@ -3,6 +3,7 @@ import type { GenreProfile } from "../models/genre-profile.js";
 import type { BookRules } from "../models/book-rules.js";
 import type { AuditIssue } from "./continuity.js";
 import { readGenreProfile, readBookRules } from "./rules-reader.js";
+import { countNovelWords } from "../utils/text-count.js";
 import { extractTag } from "../utils/tag-parser.js";
 import { truncateMarkdownTable } from "../utils/truncate.js";
 import { readFile } from "node:fs/promises";
@@ -271,7 +272,7 @@ ${chapterContent}`;
 
     return {
       revisedContent,
-      wordCount: revisedContent.length,
+      wordCount: countNovelWords(revisedContent),
       fixedIssues: fixedRaw
         .split("\n")
         .map((l) => l.trim())
