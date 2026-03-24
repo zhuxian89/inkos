@@ -1,6 +1,6 @@
 "use client";
 
-import { Button, Input, Space, Typography } from "antd";
+import { Button, Grid, Input, Space, Typography } from "antd";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -143,6 +143,8 @@ export function ChatPanel(props: Readonly<{
   readonly sendText?: string;
   readonly containerStyle?: CSSProperties;
 }>) {
+  const screens = Grid.useBreakpoint();
+  const isMobile = !screens.md;
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const frameSizeStyle: CSSProperties = (() => {
     if (typeof props.maxHeight === "number") {
@@ -288,22 +290,44 @@ export function ChatPanel(props: Readonly<{
             <div
               style={{
                 display: "flex",
+                flexDirection: isMobile ? "column" : "row",
                 justifyContent: "space-between",
-                alignItems: "center",
+                alignItems: isMobile ? "stretch" : "center",
                 gap: 12,
                 width: "100%",
-                flexWrap: "wrap",
+                flexWrap: isMobile ? "nowrap" : "wrap",
               }}
             >
-              <div style={{ minWidth: 0, flex: "1 1 280px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div
+                style={{
+                  minWidth: 0,
+                  flex: isMobile ? undefined : "1 1 280px",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
                 {props.footerLeft ?? <Typography.Text type="secondary">回车发送，Shift+回车换行。</Typography.Text>}
               </div>
-              <Space style={{ marginLeft: "auto", flex: "0 1 auto", justifyContent: "flex-end", maxWidth: "100%" }} wrap>
-                <Button type="primary" onClick={props.onSend} loading={props.sending}>
-                  {props.sendText ?? "发送"}
-                </Button>
-                {props.footerRight}
-              </Space>
+              {isMobile ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%" }}>
+                  {props.footerRight ? (
+                    <Space wrap style={{ width: "100%", justifyContent: "flex-end" }}>
+                      {props.footerRight}
+                    </Space>
+                  ) : null}
+                  <Button type="primary" onClick={props.onSend} loading={props.sending} block>
+                    {props.sendText ?? "发送"}
+                  </Button>
+                </div>
+              ) : (
+                <Space style={{ marginLeft: "auto", flex: "0 1 auto", justifyContent: "flex-end", maxWidth: "100%" }} wrap>
+                  <Button type="primary" onClick={props.onSend} loading={props.sending}>
+                    {props.sendText ?? "发送"}
+                  </Button>
+                  {props.footerRight}
+                </Space>
+              )}
             </div>
           </div>
         </div>
