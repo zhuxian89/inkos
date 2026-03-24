@@ -206,7 +206,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
       title: bookConfigData?.book?.title ?? bookId,
       messages,
       meta: { source: "book-workspace" },
-    });
+    }).catch(() => void message.warning("对话记录远程同步失败，已保存到本地"));
   }
 
   function persistAssistantBrief(brief: string): void {
@@ -377,7 +377,8 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(assistantChatStorageKey());
     }
-    void clearPersistedChatSession("book-chat", assistantSessionKey());
+    void clearPersistedChatSession("book-chat", assistantSessionKey())
+      .catch(() => void message.warning("远程对话记录清除失败，请稍后重试"));
   }
 
   async function loadBookPanels(): Promise<void> {

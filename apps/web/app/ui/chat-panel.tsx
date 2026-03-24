@@ -5,12 +5,13 @@ import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { CSSProperties, ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export interface ChatPanelMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly reasoning?: string;
+  readonly id?: string;
 }
 
 const assistantMarkdownComponents: Components = {
@@ -132,6 +133,45 @@ function renderAssistantMarkdown(content?: string): ReactNode {
   );
 }
 
+function ReasoningBlock(props: Readonly<{
+  readonly reasoning: string;
+  readonly isAssistant: boolean;
+  readonly isUserBubble: boolean;
+}>) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div
+      style={{
+        marginTop: 10,
+        paddingTop: 10,
+        borderTop: props.isUserBubble ? "1px solid rgba(255,255,255,0.22)" : "1px solid #f0f0f0",
+        fontSize: 13,
+        opacity: 0.9,
+      }}
+    >
+      <div
+        onClick={() => setExpanded((v) => !v)}
+        style={{
+          fontWeight: 600,
+          marginBottom: expanded ? 6 : 0,
+          cursor: "pointer",
+          userSelect: "none",
+          display: "flex",
+          alignItems: "center",
+          gap: 4,
+          color: props.isUserBubble ? "rgba(255,255,255,0.85)" : "#666",
+        }}
+      >
+        <span style={{ display: "inline-block", transition: "transform 0.2s", transform: expanded ? "rotate(90deg)" : "rotate(0deg)", fontSize: 11 }}>▶</span>
+        Reasoning
+      </div>
+      {expanded ? (
+        <div>{props.isAssistant ? renderAssistantMarkdown(props.reasoning) : props.reasoning}</div>
+      ) : null}
+    </div>
+  );
+}
+
 export function ChatPanel(props: Readonly<{
   readonly messages: ReadonlyArray<ChatPanelMessage>;
   readonly value: string;
@@ -223,9 +263,10 @@ export function ChatPanel(props: Readonly<{
             </div>
           ) : (
             props.messages.map((item, index) => {
+              const stableKey = item.id ?? `${item.role}-${index}-${item.content.slice(0, 32)}`;
               return (
                 <div
-                  key={`${item.role}-${index}`}
+                  key={stableKey}
                   style={{
                     width: "100%",
                     display: "flex",
@@ -254,18 +295,11 @@ export function ChatPanel(props: Readonly<{
                   >
                     <div>{item.role === "assistant" ? renderAssistantMarkdown(item.content) : item.content}</div>
                     {item.reasoning ? (
-                      <div
-                        style={{
-                          marginTop: 10,
-                          paddingTop: 10,
-                          borderTop: item.role === "user" ? "1px solid rgba(255,255,255,0.22)" : "1px solid #f0f0f0",
-                          fontSize: 13,
-                          opacity: 0.9,
-                        }}
-                      >
-                        <div style={{ fontWeight: 600, marginBottom: 6 }}>Reasoning</div>
-                        <div>{item.role === "assistant" ? renderAssistantMarkdown(item.reasoning) : item.reasoning}</div>
-                      </div>
+                      <ReasoningBlock
+                        reasoning={item.reasoning}
+                        isAssistant={item.role === "assistant"}
+                        isUserBubble={item.role === "user"}
+                      />
                     ) : null}
                   </div>
                 </div>
