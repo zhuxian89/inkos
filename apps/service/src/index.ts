@@ -3938,6 +3938,13 @@ app.post("/api/writing/next", async (req, res) => {
     (async () => {
       try {
         for (let i = 0; i < input.count; i++) {
+          // Check if user has cancelled before starting next chapter
+          if (job.status !== "running" || job.cancelRequested) {
+            logInfo("writing.next.cancelled", { bookId, jobId: job.id, completedChapters: results.length, totalRequested: input.count });
+            job.result = { ok: true, bookId, results, cancelled: true, completedCount: results.length };
+            cancelJob(job, "用户取消续写");
+            return;
+          }
           updateJobStep(job, input.count > 1
             ? `章节 ${i + 1}/${input.count}：开始`
             : "开始", { chapterIndex: i + 1, total: input.count });
@@ -3951,6 +3958,10 @@ app.post("/api/writing/next", async (req, res) => {
         job.result = { ok: true, bookId, results };
         finishJob(job, { resultCount: results.length });
       } catch (error) {
+        // Preserve partial results so already-written chapters are not lost
+        if (results.length > 0) {
+          job.result = { ok: false, bookId, results, completedCount: results.length, error: describeError(error) };
+        }
         failJob(job, error);
       }
     })();

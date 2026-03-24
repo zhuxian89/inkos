@@ -632,11 +632,8 @@ export class PipelineRunner {
         // ignore progress handler errors
       }
     };
-    process.stderr.write(`[pipeline] [${bookId}] acquiring lock\n`);
-    safeProgress("acquiring-lock");
     this.debug("write_next.lock.acquire.start", { bookId });
     const releaseLock = await this.state.acquireBookLock(bookId);
-    process.stderr.write(`[pipeline] [${bookId}] lock acquired\n`);
     safeProgress("lock-acquired");
     this.debug("write_next.lock.acquire.done", { bookId });
     try {
@@ -653,7 +650,6 @@ export class PipelineRunner {
       return result;
     } finally {
       await releaseLock();
-      process.stderr.write(`[pipeline] [${bookId}] lock released\n`);
       safeProgress("lock-released");
       this.debug("write_next.lock.release.done", { bookId });
     }
@@ -683,7 +679,7 @@ export class PipelineRunner {
       pacingRule: gp.pacingRule,
     });
     const log = (step: string, msg: string) => {
-      process.stderr.write(`[pipeline] [ch${chapterNumber}] [${step}] ${msg}\n`);
+      this.debug(`write_next.progress.${step}`, { bookId, chapterNumber, message: msg });
       try {
         onProgress?.(`ch${chapterNumber}:${step}:${msg}`);
       } catch {
@@ -927,30 +923,38 @@ export class PipelineRunner {
     this.debug("write_next.snapshot.done", { bookId, chapterNumber });
     log("save", "done");
 
-    // 6. Send notification
-    if (this.config.notifyChannels && this.config.notifyChannels.length > 0) {
-      const statusEmoji = auditResult.passed ? "✅" : "⚠️";
-      await dispatchNotification(this.config.notifyChannels, {
-        title: `${statusEmoji} ${book.title} 第${chapterNumber}章`,
-        body: [
-          `**${output.title}** | ${finalWordCount}字`,
-          revised ? "📝 已自动修正" : "",
-          `审稿: ${auditResult.passed ? "通过" : "需人工审核"}`,
-          ...auditResult.issues
-            .filter((i) => i.severity !== "info")
-            .map((i) => `- [${i.severity}] ${i.description}`),
-        ]
-          .filter(Boolean)
-          .join("\n"),
+    // 6. Send notification (non-fatal — chapter is already saved)
+    try {
+      if (this.config.notifyChannels && this.config.notifyChannels.length > 0) {
+        const statusEmoji = auditResult.passed ? "✅" : "⚠️";
+        await dispatchNotification(this.config.notifyChannels, {
+          title: `${statusEmoji} ${book.title} 第${chapterNumber}章`,
+          body: [
+            `**${output.title}** | ${finalWordCount}字`,
+            revised ? "📝 已自动修正" : "",
+            `审稿: ${auditResult.passed ? "通过" : "需人工审核"}`,
+            ...auditResult.issues
+              .filter((i) => i.severity !== "info")
+              .map((i) => `- [${i.severity}] ${i.description}`),
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        });
+      }
+
+      await this.emitWebhook("pipeline-complete", bookId, chapterNumber, {
+        title: output.title,
+        wordCount: finalWordCount,
+        passed: auditResult.passed,
+        revised,
+      });
+    } catch (notifyError) {
+      this.debug("write_next.notify.error", {
+        bookId,
+        chapterNumber,
+        error: notifyError instanceof Error ? notifyError.message : String(notifyError),
       });
     }
-
-    await this.emitWebhook("pipeline-complete", bookId, chapterNumber, {
-      title: output.title,
-      wordCount: finalWordCount,
-      passed: auditResult.passed,
-      revised,
-    });
 
     return {
       chapterNumber,
