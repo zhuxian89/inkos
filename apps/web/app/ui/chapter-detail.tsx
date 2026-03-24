@@ -2,7 +2,7 @@
 
 import { Button, Card, Descriptions, Space, Typography, message } from "antd";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { IssueTags } from "./issue-tags";
 
 interface DetailResponse {
@@ -22,9 +22,19 @@ interface DetailResponse {
   readonly error?: string;
 }
 
+interface ChapterMeta {
+  readonly number: number;
+  readonly title: string;
+}
+
+interface ChaptersResponse {
+  readonly chapters?: ReadonlyArray<ChapterMeta>;
+}
+
 export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: string }>) {
   const { bookId, chapter } = props;
   const [data, setData] = useState<DetailResponse | null>(null);
+  const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>([]);
   const [messageApi, contextHolder] = message.useMessage();
 
   useEffect(() => {
@@ -32,6 +42,22 @@ export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: str
       .then((response) => response.json())
       .then((json: DetailResponse) => setData(json));
   }, [bookId, chapter]);
+
+  useEffect(() => {
+    void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters`, { cache: "no-store" })
+      .then((response) => response.json())
+      .then((json: ChaptersResponse) => setChapters(json.chapters ?? []));
+  }, [bookId]);
+
+  const currentChapterNumber = Number.parseInt(chapter, 10);
+  const currentChapterIndex = useMemo(
+    () => chapters.findIndex((item) => item.number === currentChapterNumber),
+    [chapters, currentChapterNumber],
+  );
+  const previousChapter = currentChapterIndex > 0 ? chapters[currentChapterIndex - 1] : null;
+  const nextChapter = currentChapterIndex >= 0 && currentChapterIndex < chapters.length - 1
+    ? chapters[currentChapterIndex + 1]
+    : null;
 
   async function copyToClipboard(text: string): Promise<boolean> {
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
@@ -90,7 +116,21 @@ export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: str
         }}
         title={<span style={{ color: "#21353b" }}>{`章节详情 · ${bookId} / ${chapter}`}</span>}
         extra={(
-          <Space>
+          <Space wrap>
+            {previousChapter ? (
+              <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${previousChapter.number}`}>
+                <Button>{`上一章 · ${previousChapter.number}`}</Button>
+              </Link>
+            ) : (
+              <Button disabled>上一章</Button>
+            )}
+            {nextChapter ? (
+              <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${nextChapter.number}`}>
+                <Button type="primary">{`下一章 · ${nextChapter.number}`}</Button>
+              </Link>
+            ) : (
+              <Button type="primary" disabled>下一章</Button>
+            )}
             <Link href={`/books/${encodeURIComponent(bookId)}`}><Button>返回工作台</Button></Link>
           </Space>
         )}
@@ -153,6 +193,32 @@ export function ChapterDetailPage(props: Readonly<{ bookId: string; chapter: str
           >
             {data?.content ?? data?.error ?? "正在加载正文..."}
           </Typography.Paragraph>
+
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              gap: 12,
+              marginTop: 32,
+              paddingTop: 24,
+              borderTop: "1px solid rgba(125,92,48,0.16)",
+            }}
+          >
+            {previousChapter ? (
+              <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${previousChapter.number}`}>
+                <Button>{`← 上一章 · ${previousChapter.number}`}</Button>
+              </Link>
+            ) : (
+              <Button disabled>{"← 上一章"}</Button>
+            )}
+            {nextChapter ? (
+              <Link href={`/books/${encodeURIComponent(bookId)}/chapters/${nextChapter.number}`}>
+                <Button type="primary">{`下一章 · ${nextChapter.number} →`}</Button>
+              </Link>
+            ) : (
+              <Button type="primary" disabled>{"下一章 →"}</Button>
+            )}
+          </div>
         </div>
       </Card>
     </Space>
