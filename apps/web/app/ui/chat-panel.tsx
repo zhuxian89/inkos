@@ -292,17 +292,17 @@ export function ChatPanel(props: Readonly<{
                 alignItems: "center",
                 gap: 12,
                 width: "100%",
-                flexWrap: "nowrap",
+                flexWrap: "wrap",
               }}
             >
-              <div style={{ minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              <div style={{ minWidth: 0, flex: "1 1 280px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                 {props.footerLeft ?? <Typography.Text type="secondary">回车发送，Shift+回车换行。</Typography.Text>}
               </div>
-              <Space style={{ marginLeft: "auto", flexShrink: 0, justifyContent: "flex-end" }} wrap>
-                {props.footerRight}
+              <Space style={{ marginLeft: "auto", flex: "0 1 auto", justifyContent: "flex-end", maxWidth: "100%" }} wrap>
                 <Button type="primary" onClick={props.onSend} loading={props.sending}>
                   {props.sendText ?? "发送"}
                 </Button>
+                {props.footerRight}
               </Space>
             </div>
           </div>
