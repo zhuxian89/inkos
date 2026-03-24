@@ -124,6 +124,26 @@ describe("validatePostWrite", () => {
     expect(findRule(result, "本书禁忌")).toBeDefined();
   });
 
+  it("detects obvious duplicated typo words", () => {
+    const content = "他在在门口停下，什么么也没说。";
+    const result = validatePostWrite(content, baseProfile, null);
+    const v = findRule(result, "错别字检查");
+    expect(v).toBeDefined();
+    expect(v!.severity).toBe("error");
+    expect(v!.description).toContain("在在");
+    expect(v!.description).toContain("什么么");
+  });
+
+  it("detects duplicated punctuation", () => {
+    const content = "他猛地回头，，却什么也没看到！！";
+    const result = validatePostWrite(content, baseProfile, null);
+    const v = findRule(result, "标点检查");
+    expect(v).toBeDefined();
+    expect(v!.severity).toBe("warning");
+    expect(v!.description).toContain("，，");
+    expect(v!.description).toContain("！！");
+  });
+
   it("does not flag allowed content", () => {
     // Content that is clean across all rules
     const content = `他站起来，环顾四周。窗外的月光洒在地板上，像一层薄薄的霜。\n\n\u201c走吧。\u201d她转身推开门。冷风从缝隙里钻进来，她裹紧了衣服。`;

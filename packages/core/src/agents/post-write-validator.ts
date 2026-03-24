@@ -46,6 +46,40 @@ const COLLECTIVE_SHOCK_PATTERNS = [
   /(?:全场|一片)[，,]?(?:寂静|哗然|沸腾|震动)/,
 ];
 
+/** 高频明显错别字/错词（只收最确定的） */
+const COMMON_TYPO_REPLACEMENTS: ReadonlyArray<{
+  readonly wrong: string;
+  readonly correct: string;
+}> = [
+  { wrong: "在在", correct: "在" },
+  { wrong: "了了", correct: "了" },
+  { wrong: "看看", correct: "看" },
+  { wrong: "的的", correct: "的" },
+  { wrong: "地地", correct: "地" },
+  { wrong: "得得", correct: "得" },
+  { wrong: "那那", correct: "那" },
+  { wrong: "一一", correct: "一" },
+  { wrong: "已经经", correct: "已经" },
+  { wrong: "如果果", correct: "如果" },
+  { wrong: "因为为", correct: "因为" },
+  { wrong: "但是是", correct: "但是" },
+  { wrong: "怎么么", correct: "怎么" },
+  { wrong: "什么么", correct: "什么" },
+];
+
+const DUPLICATE_PUNCTUATION_PATTERNS: ReadonlyArray<{
+  readonly pattern: RegExp;
+  readonly example: string;
+}> = [
+  { pattern: /，，+/g, example: "，，" },
+  { pattern: /。。+/g, example: "。。" },
+  { pattern: /！！+/g, example: "！！" },
+  { pattern: /？？+/g, example: "？？" },
+  { pattern: /，。|。，|,。|。,/g, example: "，。" },
+  { pattern: /！。|。！|!。|。!/g, example: "！。" },
+  { pattern: /？。|。？|\?。|。\?/g, example: "？。" },
+];
+
 // --- Validator ---
 
 export function validatePostWrite(
@@ -218,7 +252,39 @@ export function validatePostWrite(
     });
   }
 
-  // 11. Book-level prohibitions
+  // 11. 文字层：高确定性错别字/重复字
+  const foundTypos: Array<string> = [];
+  for (const item of COMMON_TYPO_REPLACEMENTS) {
+    if (content.includes(item.wrong)) {
+      foundTypos.push(`"${item.wrong}"→"${item.correct}"`);
+    }
+  }
+  if (foundTypos.length > 0) {
+    violations.push({
+      rule: "错别字检查",
+      severity: "error",
+      description: `检测到明显错别字/重复字：${foundTypos.join("、")}`,
+      suggestion: "仅修正这些明显错字、重复字，不改剧情和文风",
+    });
+  }
+
+  // 12. 文字层：重复标点 / 混乱标点
+  const foundPunctuationIssues: string[] = [];
+  for (const item of DUPLICATE_PUNCTUATION_PATTERNS) {
+    if (item.pattern.test(content)) {
+      foundPunctuationIssues.push(`"${item.example}"`);
+    }
+  }
+  if (foundPunctuationIssues.length > 0) {
+    violations.push({
+      rule: "标点检查",
+      severity: "warning",
+      description: `检测到重复或混乱标点：${foundPunctuationIssues.join("、")}`,
+      suggestion: "统一标点，只保留符合语气的单个标点",
+    });
+  }
+
+  // 13. Book-level prohibitions
   // Short prohibitions (2-30 chars): exact substring match
   // Long prohibitions (>30 chars): skip — these are conceptual rules for prompt-level enforcement only
   if (bookRules?.prohibitions) {
