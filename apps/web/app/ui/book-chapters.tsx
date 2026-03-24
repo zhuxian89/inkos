@@ -642,9 +642,9 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
               minHeight={220}
               maxHeight="100%"
               topBar={(
-                <Space wrap>
+                <Space wrap style={isMobile ? { width: "100%" } : undefined}>
                   <Select
-                    style={{ minWidth: 280 }}
+                    style={isMobile ? { width: "100%" } : { minWidth: 280 }}
                     value={chatProfileId}
                     onChange={(value) => {
                       if (!chatChapter) return;

@@ -1005,7 +1005,8 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         maskClosable={false}
         keyboard
         width={isMobile ? "94vw" : (assistantLogOpen ? "min(1640px, 98vw)" : CHAT_MODAL_WIDTH)}
-        styles={{ body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
+        style={{ top: isMobile ? 8 : 20 }}
+        styles={{ body: { height: isMobile ? "76vh" : CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnHidden={false}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", height: "100%", minHeight: 0 }}>
@@ -1043,9 +1044,9 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
               minHeight={260}
               maxHeight="100%"
               topBar={(
-                <Space wrap>
+                <Space wrap style={isMobile ? { width: "100%" } : undefined}>
                   <Select
-                    style={{ minWidth: 280 }}
+                    style={isMobile ? { width: "100%" } : { minWidth: 280 }}
                     value={assistantProfileId}
                     onChange={(value) => {
                       const next = value || undefined;

@@ -194,7 +194,7 @@ export function ChatPanel(props: Readonly<{
           ref={bodyRef}
           style={{
             flex: 1,
-            minHeight: props.minHeight ?? 320,
+            minHeight: isMobile ? Math.min(props.minHeight ?? 320, 220) : (props.minHeight ?? 320),
             overflowY: "auto",
             padding: 20,
             display: "flex",
@@ -227,7 +227,7 @@ export function ChatPanel(props: Readonly<{
                 >
                   <div
                     style={{
-                      maxWidth: "78%",
+                      maxWidth: isMobile ? "92%" : "78%",
                       minWidth: 0,
                       background: item.role === "user"
                         ? "linear-gradient(135deg, #4c7471 0%, #628f89 100%)"
@@ -303,8 +303,8 @@ export function ChatPanel(props: Readonly<{
                   minWidth: 0,
                   flex: isMobile ? undefined : "1 1 280px",
                   overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
+                  textOverflow: isMobile ? "clip" : "ellipsis",
+                  whiteSpace: isMobile ? "normal" : "nowrap",
                 }}
               >
                 {props.footerLeft ?? <Typography.Text type="secondary">回车发送，Shift+回车换行。</Typography.Text>}
