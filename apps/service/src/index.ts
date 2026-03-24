@@ -1410,7 +1410,9 @@ async function runToolEnabledConversation(
 
   let lastAssistantMessage = "";
   let lastAssistantReasoning = "";
-  for (let turn = 0; turn < (options?.maxTurns ?? 8); turn++) {
+  const maxTurns = options?.maxTurns ?? 8;
+  let reachedMaxTurns = false;
+  for (let turn = 0; turn < maxTurns; turn++) {
     throwIfAborted();
     const result = await chatWithTools(client, model, conversation, tools, {
       useStream: options?.useStream,
@@ -1445,6 +1447,39 @@ async function runToolEnabledConversation(
       throwIfAborted();
       conversation.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
     }
+
+    if (turn === maxTurns - 1) {
+      reachedMaxTurns = true;
+    }
+  }
+
+  // --- Fix A: Detect reply claiming file edits without actual write tool calls ---
+  const WRITE_TOOLS = new Set(["write_text_file", "move_path", "delete_path"]);
+  const hasWriteToolCall = toolTrace.some((item) => WRITE_TOOLS.has(item.name));
+  const CLAIM_MARKERS = ["修改了", "已改", "写入了", "更新了", "删除了", "添加了", "创建了", "移动了", "重命名", "已写入", "写回", "改好了", "已经修改"];
+  const replyClaimsModification = CLAIM_MARKERS.some((marker) => lastAssistantMessage.includes(marker));
+
+  const warnings: string[] = [];
+
+  // Fix B: maxTurns truncation warning
+  if (reachedMaxTurns) {
+    warnings.push("⚠️ 本轮对话工具调用轮次已达上限，部分操作可能未完成。如有遗漏，请再发一条消息继续。");
+  }
+
+  // Fix A: Contradiction warning
+  if (replyClaimsModification && !hasWriteToolCall) {
+    warnings.push("⚠️ 注意：本轮回复提到了文件修改，但实际未执行任何文件写入操作。如需真正修改文件，请明确要求我执行写入。");
+  }
+
+  // Append tool execution summary when writes happened
+  if (hasWriteToolCall) {
+    const writeOps = toolTrace.filter((item) => WRITE_TOOLS.has(item.name));
+    const summary = writeOps.map((op) => `- \`${op.name}\`：${String(op.args.path ?? op.args.from ?? "")}`).join("\n");
+    warnings.push(`\n---\n📋 **工具执行记录**\n${summary}`);
+  }
+
+  if (warnings.length > 0) {
+    lastAssistantMessage = `${lastAssistantMessage}\n\n${warnings.join("\n\n")}`;
   }
 
   return { content: lastAssistantMessage, reasoning: lastAssistantReasoning || undefined, toolTrace };
