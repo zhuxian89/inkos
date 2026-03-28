@@ -43,9 +43,17 @@ const MODE_DESCRIPTIONS: Record<ReviseMode, string> = {
   "spot-fix": "定点修复：只修改审稿意见指出的具体句子或段落，其余所有内容必须原封不动保留。修改范围限定在问题句子及其前后各一句。若问题来自正文与真相文件不一致，可最小范围同步对应真相文件；这类同步不算无关改动",
 };
 
+function isLengthPreservingMode(mode: ReviseMode): boolean {
+  return mode === "polish" || mode === "spot-fix" || mode === "anti-detect";
+}
+
 export class ReviserAgent extends BaseAgent {
   get name(): string {
     return "reviser";
+  }
+
+  private logRaw(message: string): void {
+    process.stderr.write(message);
   }
 
   async reviseChapter(
@@ -58,7 +66,7 @@ export class ReviserAgent extends BaseAgent {
     authorInstruction?: string,
     targetWordCount?: number,
   ): Promise<ReviseOutput> {
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.load_story_files.start ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO reviser.load_story_files.start ${JSON.stringify({
       bookDir,
       chapterNumber,
       mode,
@@ -76,7 +84,7 @@ export class ReviserAgent extends BaseAgent {
       this.readFileSafe(join(bookDir, "story/character_matrix.md")),
       this.readFileSafe(join(bookDir, "story/parent_canon.md")),
     ]);
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.load_story_files.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO reviser.load_story_files.done ${JSON.stringify({
       chapterNumber,
       currentStateLength: currentState.length,
       ledgerLength: ledger.length,
@@ -91,14 +99,14 @@ export class ReviserAgent extends BaseAgent {
 
     // Load genre profile and book rules
     const genreId = genre ?? "other";
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.load_rules.start ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO reviser.load_rules.start ${JSON.stringify({
       chapterNumber,
       genreId,
     })}\n`);
     const { profile: gp } = await readGenreProfile(this.ctx.projectRoot, genreId);
     const parsedRules = await readBookRules(bookDir);
     const bookRules = parsedRules?.rules ?? null;
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.load_rules.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO reviser.load_rules.done ${JSON.stringify({
       chapterNumber,
       genreName: gp.name,
       numericalSystem: gp.numericalSystem,
@@ -114,9 +122,11 @@ export class ReviserAgent extends BaseAgent {
       .map((i) => `- [${i.severity}] ${i.category}: ${i.description}\n  建议: ${i.suggestion}`)
       .join("\n");
 
-    const wordTarget = targetWordCount ?? countNovelWords(chapterContent);
+    const currentWordCount = countNovelWords(chapterContent);
+    const wordTarget = targetWordCount ?? currentWordCount;
     const minWordCount = Math.max(1, Math.floor(wordTarget * 0.9));
     const maxWordCount = Math.max(minWordCount, Math.ceil(wordTarget * 1.1));
+    const preserveLength = isLengthPreservingMode(mode);
 
     const modeDesc = MODE_DESCRIPTIONS[mode];
     const numericalRule = gp.numericalSystem
@@ -128,6 +138,21 @@ export class ReviserAgent extends BaseAgent {
     const canonBlock = parentCanon !== "(文件不存在)"
       ? `\n\n正传正典参照：\n${parentCanon}`
       : "";
+    const wordRuleBlock = preserveLength
+      ? `10. 篇幅约束：本次修订优先保持原章篇幅稳定。当前正文 ${currentWordCount} 字，建议控制在 ${minWordCount}-${maxWordCount} 字附近（参考 ${wordTarget} 字）
+11. 除非修复问题确有必要，不要明显扩写或缩写；禁止为了凑字数新增大段新情节、新对话或解释性说明`
+      : `10. 字数目标：修订后正文以 ${wordTarget} 字为目标，建议控制在 ${minWordCount}-${maxWordCount} 字
+11. 如超出上限，优先压缩重复描写和无效内心独白；如低于下限，补充有效动作、冲突推进和信息增量，避免明显失衡`;
+    const wordPromptBlock = preserveLength
+      ? `## 篇幅约束（优先保持稳定）
+- 当前字数：${currentWordCount}
+- 参考目标：${wordTarget}
+- 建议区间：${minWordCount}-${maxWordCount}
+- 说明：优先保持原章篇幅和事件密度稳定，除修复问题确有必要外，不要明显扩写或缩写`
+      : `## 字数目标（优先遵守）
+- 目标字数：${wordTarget}
+- 建议区间：${minWordCount}-${maxWordCount}
+- 说明：可以为修复结构问题适度偏离，但不要明显过长或过短`;
 
     const systemPrompt = `你是一位专业的${gp.name}网络小说修稿编辑。你的任务是根据审稿意见对章节进行修正。${protagonistBlock}${canonBlock}
 
@@ -143,8 +168,7 @@ export class ReviserAgent extends BaseAgent {
 7. 修改后同步更新状态卡${gp.numericalSystem ? "、账本" : ""}、伏笔池，以及所有受影响的真相文件
 8. 如果问题只是知识库/资料同步错误，也要优先修正真相文件，不要只改正文糊弄过去
 9. 除专有名词中必须保留的外文缩写外，正文、修订说明、状态卡和真相文件都必须使用自然简体中文，不得夹杂英文单词、英文短语或中英混写
-10. 字数硬约束：修订后正文必须在 ${minWordCount}-${maxWordCount} 字（目标 ${wordTarget} 字）
-11. 如超出上限，优先压缩重复描写和无效内心独白；如低于下限，补充有效动作、冲突推进和信息增量，禁止水字
+${wordRuleBlock}
 
 输出格式：
 
@@ -196,10 +220,7 @@ ${issueList}
 ## 作者额外修改要求
 ${authorInstruction?.trim() ? authorInstruction.trim() : "（无，按审稿问题和修稿模式处理）"}
 
-## 字数约束（必须遵守）
-- 目标字数：${wordTarget}
-- 允许区间：${minWordCount}-${maxWordCount}
-- 说明：最终 REVISED_CONTENT 必须落在该区间内
+${wordPromptBlock}
 
 ## 当前状态卡
 ${currentState}
@@ -213,7 +234,7 @@ ${styleGuide}
 
 ## 待修正章节
 ${chapterContent}`;
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.prompt.ready ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO reviser.prompt.ready ${JSON.stringify({
       chapterNumber,
       systemPromptLength: systemPrompt.length,
       userPromptLength: userPrompt.length,
@@ -221,7 +242,7 @@ ${chapterContent}`;
     })}\n`);
 
     const maxTokens = 16000;
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.llm.start ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO reviser.llm.start ${JSON.stringify({
       chapterNumber,
       model: this.ctx.model,
       mode,
@@ -235,7 +256,7 @@ ${chapterContent}`;
       ],
       { temperature: 0.3, maxTokens },
     );
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.llm.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO reviser.llm.done ${JSON.stringify({
       chapterNumber,
       responseLength: response.content.length,
       promptTokens: response.usage.promptTokens,
@@ -243,12 +264,12 @@ ${chapterContent}`;
       totalTokens: response.usage.totalTokens,
     })}\n`);
 
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.parse.start ${JSON.stringify({ chapterNumber })}\n`);
+    this.logRaw(`${new Date().toISOString()} INFO reviser.parse.start ${JSON.stringify({ chapterNumber })}\n`);
     let parsed = this.parseOutput(response.content, gp);
 
     // Retry once if critical section (REVISED_CONTENT) is empty
     if (!parsed.revisedContent) {
-      process.stderr.write(`${new Date().toISOString()} WARN reviser.parse.empty_content — retrying ${JSON.stringify({ chapterNumber, mode })}\n`);
+      this.logRaw(`${new Date().toISOString()} WARN reviser.parse.empty_content — retrying ${JSON.stringify({ chapterNumber, mode })}\n`);
       const retryResponse = await this.chat(
         [
           { role: "system", content: systemPrompt },
@@ -261,7 +282,7 @@ ${chapterContent}`;
       parsed = this.parseOutput(retryResponse.content, gp);
     }
 
-    process.stderr.write(`${new Date().toISOString()} INFO reviser.parse.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO reviser.parse.done ${JSON.stringify({
       chapterNumber,
       revisedContentLength: parsed.revisedContent.length,
       fixedIssuesCount: parsed.fixedIssues.length,

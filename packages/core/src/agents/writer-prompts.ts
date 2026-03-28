@@ -13,12 +13,13 @@ export function buildWriterSystemPrompt(
   bookRulesBody: string,
   genreBody: string,
   styleGuide: string,
+  targetWordCount: number,
   styleFingerprint?: string,
   chapterNumber?: number,
 ): string {
   const sections = [
     buildGenreIntro(book, genreProfile),
-    buildCoreRules(book),
+    buildCoreRules(targetWordCount),
     buildAntiAIExamples(),
     buildCharacterPsychologyMethod(),
     buildSupportingCharacterMethod(),
@@ -33,7 +34,7 @@ export function buildWriterSystemPrompt(
     buildStyleGuide(styleGuide),
     buildStyleFingerprint(styleFingerprint),
     buildPreWriteChecklist(book, genreProfile),
-    buildOutputFormat(book, genreProfile),
+    buildOutputFormat(targetWordCount, genreProfile),
   ];
 
   return sections.filter(Boolean).join("\n\n");
@@ -51,11 +52,11 @@ function buildGenreIntro(book: BookConfig, gp: GenreProfile): string {
 // Core rules (~25 universal rules)
 // ---------------------------------------------------------------------------
 
-function buildCoreRules(book: BookConfig): string {
+function buildCoreRules(targetWordCount: number): string {
   return `## 核心规则
 
 1. 以简体中文工作，句子长短交替，段落适合手机阅读（3-5行/段）
-2. 每章${book.chapterWordCount}字左右
+2. 每章${targetWordCount}字左右
 3. 伏笔前后呼应，不留悬空线；所有埋下的伏笔都必须在后续收回
 4. 只读必要上下文，不机械重复已有内容
 
@@ -424,7 +425,7 @@ function buildPreWriteChecklist(book: BookConfig, gp: GenreProfile): string {
 // Output format
 // ---------------------------------------------------------------------------
 
-function buildOutputFormat(book: BookConfig, gp: GenreProfile): string {
+function buildOutputFormat(targetWordCount: number, gp: GenreProfile): string {
   const resourceRow = gp.numericalSystem
     ? "| 当前资源总量 | X | 与账本一致 |\n| 本章预计增量 | +X（来源） | 无增量写+0 |"
     : "";
@@ -466,7 +467,7 @@ ${preWriteTable}
 (章节标题，不含"第X章")
 
 === CHAPTER_CONTENT ===
-(正文内容，${book.chapterWordCount}字左右)
+(正文内容，${targetWordCount}字左右)
 
 ${postSettlement}
 

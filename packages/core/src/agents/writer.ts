@@ -45,10 +45,14 @@ export class WriterAgent extends BaseAgent {
     return "writer";
   }
 
+  private logRaw(message: string): void {
+    process.stderr.write(message);
+  }
+
   async writeChapter(input: WriteChapterInput): Promise<WriteChapterOutput> {
     const { book, bookDir, chapterNumber } = input;
 
-    process.stderr.write(`${new Date().toISOString()} INFO writer.load_story_files.start ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.load_story_files.start ${JSON.stringify({
       bookId: book.id,
       bookDir,
       chapterNumber,
@@ -76,7 +80,7 @@ export class WriterAgent extends BaseAgent {
         this.readFileOrDefault(join(bookDir, "story/parent_canon.md")),
         this.readFileOrDefault(join(bookDir, "story/author_brief.md")),
       ]);
-    process.stderr.write(`${new Date().toISOString()} INFO writer.load_story_files.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.load_story_files.done ${JSON.stringify({
       chapterNumber,
       storyBibleLength: storyBible.length,
       volumeOutlineLength: volumeOutline.length,
@@ -93,17 +97,17 @@ export class WriterAgent extends BaseAgent {
       authorBriefLength: authorBrief.length,
     })}\n`);
 
-    process.stderr.write(`${new Date().toISOString()} INFO writer.load_recent_chapters.start ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.load_recent_chapters.start ${JSON.stringify({
       chapterNumber,
     })}\n`);
     const recentChapters = await this.loadRecentChapters(bookDir, chapterNumber);
-    process.stderr.write(`${new Date().toISOString()} INFO writer.load_recent_chapters.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.load_recent_chapters.done ${JSON.stringify({
       chapterNumber,
       recentChaptersLength: recentChapters.length,
     })}\n`);
 
     // Load genre profile + book rules
-    process.stderr.write(`${new Date().toISOString()} INFO writer.load_rules.start ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.load_rules.start ${JSON.stringify({
       chapterNumber,
       genre: book.genre,
     })}\n`);
@@ -112,7 +116,7 @@ export class WriterAgent extends BaseAgent {
     const parsedBookRules = await readBookRules(bookDir);
     const bookRules = parsedBookRules?.rules ?? null;
     const bookRulesBody = parsedBookRules?.body ?? "";
-    process.stderr.write(`${new Date().toISOString()} INFO writer.load_rules.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.load_rules.done ${JSON.stringify({
       chapterNumber,
       genreName: genreProfile.name,
       numericalSystem: genreProfile.numericalSystem,
@@ -123,11 +127,6 @@ export class WriterAgent extends BaseAgent {
 
     const styleFingerprint = this.buildStyleFingerprint(styleProfileRaw);
 
-    const systemPrompt = buildWriterSystemPrompt(
-      book, genreProfile, bookRules, bookRulesBody, genreBody, styleGuide, styleFingerprint,
-      chapterNumber,
-    );
-
     const dialogueFingerprints = this.extractDialogueFingerprints(recentChapters, storyBible);
     const relevantSummaries = this.findRelevantSummaries(chapterSummaries, volumeOutline, chapterNumber);
 
@@ -136,6 +135,18 @@ export class WriterAgent extends BaseAgent {
     const targetWordCount = input.wordCountOverride ?? book.chapterWordCount;
     const minWordCount = Math.max(1, Math.floor(targetWordCount * 0.9));
     const maxWordCount = Math.max(minWordCount, Math.ceil(targetWordCount * 1.1));
+
+    const systemPrompt = buildWriterSystemPrompt(
+      book,
+      genreProfile,
+      bookRules,
+      bookRulesBody,
+      genreBody,
+      styleGuide,
+      targetWordCount,
+      styleFingerprint,
+      chapterNumber,
+    );
 
     const userPrompt = this.buildUserPrompt({
       chapterNumber,
@@ -158,7 +169,7 @@ export class WriterAgent extends BaseAgent {
       authorBrief: authorBrief !== "(文件尚未创建)" ? authorBrief : undefined,
       parentCanon: hasParentCanon ? parentCanon : undefined,
     });
-    process.stderr.write(`${new Date().toISOString()} INFO writer.prompt.ready ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.prompt.ready ${JSON.stringify({
       chapterNumber,
       systemPromptLength: systemPrompt.length,
       userPromptLength: userPrompt.length,
@@ -168,7 +179,7 @@ export class WriterAgent extends BaseAgent {
     })}\n`);
 
     const temperature = input.temperatureOverride ?? 0.7;
-    process.stderr.write(`${new Date().toISOString()} INFO writer.llm.start ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.llm.start ${JSON.stringify({
       chapterNumber,
       model: this.ctx.model,
       temperature,
@@ -182,7 +193,7 @@ export class WriterAgent extends BaseAgent {
       ],
       { maxTokens: 16000, temperature },
     );
-    process.stderr.write(`${new Date().toISOString()} INFO writer.llm.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.llm.done ${JSON.stringify({
       chapterNumber,
       responseLength: response.content.length,
       promptTokens: response.usage.promptTokens,
@@ -190,12 +201,12 @@ export class WriterAgent extends BaseAgent {
       totalTokens: response.usage.totalTokens,
     })}\n`);
 
-    process.stderr.write(`${new Date().toISOString()} INFO writer.parse.start ${JSON.stringify({ chapterNumber })}\n`);
+    this.logRaw(`${new Date().toISOString()} INFO writer.parse.start ${JSON.stringify({ chapterNumber })}\n`);
     let output = this.parseOutput(chapterNumber, response.content, genreProfile);
 
     // Retry once if critical section (CHAPTER_CONTENT) is empty
     if (!output.content) {
-      process.stderr.write(`${new Date().toISOString()} WARN writer.parse.empty_content — retrying ${JSON.stringify({ chapterNumber })}\n`);
+      this.logRaw(`${new Date().toISOString()} WARN writer.parse.empty_content — retrying ${JSON.stringify({ chapterNumber })}\n`);
       const retryResponse = await this.chat(
         [
           { role: "system", content: systemPrompt },
@@ -211,7 +222,7 @@ export class WriterAgent extends BaseAgent {
       }
     }
 
-    process.stderr.write(`${new Date().toISOString()} INFO writer.parse.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.parse.done ${JSON.stringify({
       chapterNumber,
       title: output.title,
       contentLength: output.content.length,
@@ -226,7 +237,7 @@ export class WriterAgent extends BaseAgent {
     })}\n`);
 
     // #4: Post-write validation (regex + rule-based, zero LLM cost)
-    process.stderr.write(`${new Date().toISOString()} INFO writer.post_write.start ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.post_write.start ${JSON.stringify({
       chapterNumber,
       genreName: genreProfile.name,
       hasBookRules: Boolean(bookRules),
@@ -238,22 +249,22 @@ export class WriterAgent extends BaseAgent {
     const postWriteWarnings = ruleViolations.filter(v => v.severity === "warning");
 
     if (ruleViolations.length > 0) {
-      process.stderr.write(
+      this.logRaw(
         `[writer] Post-write: ${postWriteErrors.length} errors, ${postWriteWarnings.length} warnings in chapter ${chapterNumber}\n`,
       );
       for (const v of ruleViolations) {
-        process.stderr.write(`  [${v.severity}] ${v.rule}: ${v.description}\n`);
+        this.logRaw(`  [${v.severity}] ${v.rule}: ${v.description}\n`);
       }
     }
     if (aiTellIssues.length > 0) {
-      process.stderr.write(
+      this.logRaw(
         `[writer] AI-tell check: ${aiTellIssues.length} issues in chapter ${chapterNumber}\n`,
       );
       for (const issue of aiTellIssues) {
-        process.stderr.write(`  [${issue.severity}] ${issue.category}: ${issue.description}\n`);
+        this.logRaw(`  [${issue.severity}] ${issue.category}: ${issue.description}\n`);
       }
     }
-    process.stderr.write(`${new Date().toISOString()} INFO writer.post_write.done ${JSON.stringify({
+    this.logRaw(`${new Date().toISOString()} INFO writer.post_write.done ${JSON.stringify({
       chapterNumber,
       postWriteErrors: postWriteErrors.length,
       postWriteWarnings: postWriteWarnings.length,

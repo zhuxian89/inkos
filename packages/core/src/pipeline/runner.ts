@@ -129,6 +129,17 @@ export class PipelineRunner {
       : `[${issue.severity}] ${description}`;
   }
 
+  private resolveReviseTargetWordCount(
+    mode: ReviseMode,
+    currentWordCount: number,
+    defaultWordCount: number,
+  ): number {
+    if (mode === "polish" || mode === "spot-fix" || mode === "anti-detect") {
+      return Math.max(1, currentWordCount);
+    }
+    return defaultWordCount;
+  }
+
   // ---------------------------------------------------------------------------
   // Atomic operations (composable by OpenClaw or agent mode)
   // ---------------------------------------------------------------------------
@@ -389,7 +400,15 @@ export class PipelineRunner {
       // Prefer stored audit issues from index; only re-audit when there are no existing issues.
       this.debug("revise.chapter.read.start", { bookId, targetChapter });
       const content = await this.readChapterContent(bookDir, targetChapter, chapterMeta.title);
-      this.debug("revise.chapter.read.done", { bookId, targetChapter, contentLength: content.length });
+      const currentWordCount = countNovelWords(content);
+      const reviseTargetWordCount = this.resolveReviseTargetWordCount(mode, currentWordCount, book.chapterWordCount);
+      this.debug("revise.chapter.read.done", {
+        bookId,
+        targetChapter,
+        contentLength: content.length,
+        currentWordCount,
+        reviseTargetWordCount,
+      });
       let auditResult: AuditResult;
       if (chapterMeta.auditDetails?.length) {
         auditResult = {
@@ -430,7 +449,7 @@ export class PipelineRunner {
 
       if (auditResult.issues.length === 0 && !instruction?.trim()) {
         this.debug("revise.skip.no_issues", { bookId, targetChapter, mode });
-        return { chapterNumber: targetChapter, wordCount: countNovelWords(content), fixedIssues: ["没有需要修复的问题"] };
+        return { chapterNumber: targetChapter, wordCount: currentWordCount, fixedIssues: ["没有需要修复的问题"] };
       }
 
       const { profile: gp } = await this.loadGenreProfile(book.genre);
@@ -443,6 +462,7 @@ export class PipelineRunner {
         mode,
         issueCount: auditResult.issues.length,
         hasInstruction: Boolean(instruction?.trim()),
+        reviseTargetWordCount,
       });
       const reviseOutput = await reviser.reviseChapter(
         bookDir,
@@ -452,7 +472,7 @@ export class PipelineRunner {
         mode,
         book.genre,
         instruction,
-        book.chapterWordCount,
+        reviseTargetWordCount,
       );
 
       this.debug("revise.output", {
@@ -749,7 +769,7 @@ export class PipelineRunner {
         "spot-fix",
         book.genre,
         undefined,
-        book.chapterWordCount,
+        targetWordCount,
       );
       if (fixResult.revisedContent.length > 0) {
         finalContent = fixResult.revisedContent;
@@ -815,7 +835,7 @@ export class PipelineRunner {
           "spot-fix",
           book.genre,
           undefined,
-          book.chapterWordCount,
+          targetWordCount,
         );
 
         if (reviseOutput.revisedContent.length > 0) {
@@ -878,11 +898,19 @@ export class PipelineRunner {
       }
     }
 
-    // 3.5 Hard word-count gate (strict)
+    // 3.5 Word-count guard: preserve visibility, but do not block chapter persistence.
     if (finalWordCount < minWordCount || finalWordCount > maxWordCount) {
       const rangeLabel = `${minWordCount}-${maxWordCount}`;
-      log("wordcount", `failed — out of range ${finalWordCount} not in ${rangeLabel}`);
-      this.debug("write_next.wordcount.failed", {
+      const wordCountIssue: AuditIssue = {
+        severity: "warning",
+        category: "字数约束",
+        description: `正文长度 ${finalWordCount}，未落在目标区间 ${rangeLabel}（目标 ${targetWordCount}）内`,
+        suggestion: finalWordCount < minWordCount
+          ? "补充有效情节推进、人物动作或信息增量，再做一次修订"
+          : "压缩重复描写、冗余内心独白或低价值过渡段落后再做一次修订",
+      };
+      log("wordcount", `warning — out of range ${finalWordCount} not in ${rangeLabel}, continue to save`);
+      this.debug("write_next.wordcount.warning", {
         bookId,
         chapterNumber,
         wordCount: finalWordCount,
@@ -890,7 +918,10 @@ export class PipelineRunner {
         maxWordCount,
         targetWordCount,
       });
-      throw new Error(`字数硬约束未通过：当前 ${finalWordCount}，要求 ${rangeLabel}（目标 ${targetWordCount}）`);
+      auditResult = {
+        ...auditResult,
+        issues: [...auditResult.issues, wordCountIssue],
+      };
     }
 
     // 4. Save chapter (original or revised)
