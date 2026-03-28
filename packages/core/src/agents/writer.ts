@@ -133,6 +133,10 @@ export class WriterAgent extends BaseAgent {
 
     const hasParentCanon = parentCanon !== "(文件尚未创建)";
 
+    const targetWordCount = input.wordCountOverride ?? book.chapterWordCount;
+    const minWordCount = Math.max(1, Math.floor(targetWordCount * 0.9));
+    const maxWordCount = Math.max(minWordCount, Math.ceil(targetWordCount * 1.1));
+
     const userPrompt = this.buildUserPrompt({
       chapterNumber,
       storyBible,
@@ -141,7 +145,9 @@ export class WriterAgent extends BaseAgent {
       ledger: genreProfile.numericalSystem ? ledger : "",
       hooks,
       recentChapters,
-      wordCount: input.wordCountOverride ?? book.chapterWordCount,
+      targetWordCount,
+      minWordCount,
+      maxWordCount,
       externalContext: input.externalContext,
       chapterSummaries,
       subplotBoard,
@@ -299,7 +305,9 @@ export class WriterAgent extends BaseAgent {
     readonly ledger: string;
     readonly hooks: string;
     readonly recentChapters: string;
-    readonly wordCount: number;
+    readonly targetWordCount: number;
+    readonly minWordCount: number;
+    readonly maxWordCount: number;
     readonly externalContext?: string;
     readonly chapterSummaries: string;
     readonly subplotBoard: string;
@@ -370,7 +378,8 @@ ${params.storyBible}
 ${params.volumeOutline}
 
 要求：
-- 正文不少于${params.wordCount}字
+- 正文字数硬约束：必须在 ${params.minWordCount}-${params.maxWordCount} 字之间（目标 ${params.targetWordCount} 字）
+- 若超出上限，优先压缩冗余描写；若低于下限，补充有效情节与人物动作，不许水字数
 - 写完后更新状态卡${params.ledger ? "、资源账本" : ""}、伏笔池、章节摘要、支线进度板、情感弧线、角色交互矩阵
 - 先输出写作自检表，再写正文`;
   }

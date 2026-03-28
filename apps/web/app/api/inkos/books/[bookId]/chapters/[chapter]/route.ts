@@ -32,3 +32,18 @@ export async function POST(
   const data = await response.json();
   return NextResponse.json(data, { status: response.status });
 }
+
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ bookId: string; chapter: string }> },
+): Promise<NextResponse> {
+  const { bookId, chapter } = await context.params;
+  const response = await fetch(
+    `${serviceUrl}/api/books/${encodeURIComponent(bookId)}/chapters/${encodeURIComponent(chapter)}`,
+    {
+      method: "DELETE",
+    },
+  );
+  const data = await response.json();
+  return NextResponse.json(data, { status: response.status });
+}

@@ -1,6 +1,6 @@
 "use client";
 
-import { App, Alert, Button, Card, Checkbox, Descriptions, Dropdown, Grid, Input, Modal, Select, Space, Statistic, Table, Tag, Typography } from "antd";
+import { App, Alert, Button, Card, Checkbox, Descriptions, Dropdown, Grid, Input, Modal, Popconfirm, Select, Space, Statistic, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { MoreOutlined } from "@ant-design/icons";
 import Link from "next/link";
@@ -20,14 +20,6 @@ interface ChapterMeta {
   readonly auditIssues: ReadonlyArray<string>;
 }
 
-interface ChapterDetail {
-  readonly ok: boolean;
-  readonly chapter?: number;
-  readonly title?: string;
-  readonly content?: string;
-  readonly filePath?: string;
-  readonly error?: string;
-}
 
 interface ChapterChatMessage {
   readonly role: "user" | "assistant";
@@ -57,7 +49,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const screens = Grid.useBreakpoint();
   const isMobile = !screens.md;
   const [chapters, setChapters] = useState<ReadonlyArray<ChapterMeta>>([]);
-  const [detail, setDetail] = useState<ChapterDetail | null>(null);
   const [actionResult, setActionResult] = useState<unknown>(null);
   const [openingChapter, setOpeningChapter] = useState<number | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -287,12 +278,23 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
     }
   }
 
-  function loadChapterDetail(chapter: number): void {
+  async function refreshChapterWords(chapter: number): Promise<void> {
     setOpeningChapter(chapter);
-    void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chapter}`, { cache: "no-store" })
-      .then((response) => response.json())
-      .then((data: ChapterDetail) => setDetail(data))
-      .finally(() => setOpeningChapter(null));
+    try {
+      const response = await fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters`, { cache: "no-store" });
+      const data = await response.json();
+      if (!response.ok || !data?.ok) {
+        throw new Error(data?.error ?? "重算字数失败");
+      }
+      const list = Array.isArray(data.chapters) ? (data.chapters as ReadonlyArray<ChapterMeta>) : [];
+      setChapters(list);
+      const current = list.find((item) => item.number === chapter);
+      void message.success(`已校准 Ch.${chapter} 字数${current ? `：${current.wordCount.toLocaleString()} 字` : ""}`);
+    } catch (error: unknown) {
+      void message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setOpeningChapter(null);
+    }
   }
 
   useEffect(() => {
@@ -320,6 +322,27 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         }
         void message.success(action === "approve" ? "已通过" : "已驳回");
         await loadChapters();
+      })
+      .finally(() => setReviewAction(null));
+  }
+
+  function deleteChapter(chapter: number): void {
+    const actionKey = `delete:${chapter}`;
+    setReviewAction(actionKey);
+    void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chapter}`, {
+      method: "DELETE",
+    })
+      .then(async (response) => {
+        const data = await response.json();
+        setActionResult(data);
+        if (!response.ok || !data?.ok) {
+          throw new Error(data?.error ?? "删章失败");
+        }
+        await loadChapters();
+        void message.success(`已删 Ch.${chapter}`);
+      })
+      .catch((error: unknown) => {
+        void message.error(error instanceof Error ? error.message : String(error));
       })
       .finally(() => setReviewAction(null));
   }
@@ -420,7 +443,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       void message.success("已用最后一条助手回复替换全文");
       setReplacePreviewOpen(false);
       await loadChapters();
-      loadChapterDetail(chatChapter.number);
+      await refreshChapterWords(chatChapter.number);
     } catch (error: unknown) {
       void message.error(error instanceof Error ? error.message : String(error));
     } finally {
@@ -480,7 +503,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       width: embedded ? 360 : 320,
       render: (_, row) => (
         <Space>
-          <Button size="small" loading={openingChapter === row.number} onClick={() => loadChapterDetail(row.number)}>打开</Button>
+          <Button size="small" loading={openingChapter === row.number} onClick={() => void refreshChapterWords(row.number)}>校字</Button>
           <Button size="small" onClick={() => openChapterChat(row)}>对话</Button>
           <Link
             href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}
@@ -498,7 +521,9 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           {row.status === "ready-for-review" ? (
             <>
               <Button size="small" loading={reviewAction === `approve:${row.number}`} onClick={() => callReviewAction("approve", row.number)}>通过</Button>
-              <Button danger size="small" loading={reviewAction === `reject:${row.number}`} onClick={() => callReviewAction("reject", row.number)}>驳回</Button>
+              <Popconfirm title={`确认删除 Ch.${row.number}？`} description="会删除章节文件并清理 story 关联表格，且不可恢复。" okText="删除" cancelText="取消" onConfirm={() => deleteChapter(row.number)}>
+                <Button danger size="small" loading={reviewAction === `delete:${row.number}`}>删章</Button>
+              </Popconfirm>
             </>
           ) : null}
         </Space>
@@ -551,7 +576,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
                   <IssueTags issues={row.auditIssues} maxVisible={3} />
 
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
-                    <Button loading={openingChapter === row.number} onClick={() => loadChapterDetail(row.number)}>打开</Button>
+                    <Button loading={openingChapter === row.number} onClick={() => void refreshChapterWords(row.number)}>校字</Button>
                     <Button onClick={() => openChapterChat(row)}>对话</Button>
                     <Link
                       href={`/books/${encodeURIComponent(bookId)}/chapters/${row.number}`}
@@ -573,7 +598,9 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
                   {row.status === "ready-for-review" ? (
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8 }}>
                       <Button loading={reviewAction === `approve:${row.number}`} onClick={() => callReviewAction("approve", row.number)}>通过</Button>
-                      <Button danger loading={reviewAction === `reject:${row.number}`} onClick={() => callReviewAction("reject", row.number)}>驳回</Button>
+                      <Popconfirm title={`确认删除 Ch.${row.number}？`} description="会删除章节文件并清理 story 关联表格，且不可恢复。" okText="删除" cancelText="取消" onConfirm={() => deleteChapter(row.number)}>
+                        <Button danger loading={reviewAction === `delete:${row.number}`}>删章</Button>
+                      </Popconfirm>
                     </div>
                   ) : null}
                 </Space>
@@ -587,7 +614,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
 
       <Card title="操作结果" style={{ borderRadius: 22, background: "rgba(255,255,255,0.9)" }}>
         {!actionResult ? (
-          <Typography.Text type="secondary">点击“审计 / 修订 / 通过 / 驳回”后这里显示结果。</Typography.Text>
+          <Typography.Text type="secondary">点击“审计 / 修订 / 通过 / 删章”后这里显示结果。</Typography.Text>
         ) : (
           <Alert type="info" showIcon message={<pre style={{ margin: 0 }}>{JSON.stringify(actionResult, null, 2)}</pre>} />
         )}

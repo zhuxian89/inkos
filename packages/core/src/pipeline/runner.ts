@@ -24,6 +24,8 @@ import { countNovelWords } from "../utils/text-count.js";
 import { readFile, readdir, writeFile, mkdir, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
+const WORDCOUNT_TOLERANCE = 0.1;
+
 export interface PipelineConfig {
   readonly client: LLMClient;
   readonly model: string;
@@ -443,7 +445,14 @@ export class PipelineRunner {
         hasInstruction: Boolean(instruction?.trim()),
       });
       const reviseOutput = await reviser.reviseChapter(
-        bookDir, content, targetChapter, auditResult.issues, mode, book.genre, instruction,
+        bookDir,
+        content,
+        targetChapter,
+        auditResult.issues,
+        mode,
+        book.genre,
+        instruction,
+        book.chapterWordCount,
       );
 
       this.debug("revise.output", {
@@ -714,6 +723,10 @@ export class PipelineRunner {
     let finalWordCount = output.wordCount;
     let revised = false;
 
+    const targetWordCount = wordCount ?? book.chapterWordCount;
+    const minWordCount = Math.max(1, Math.floor(targetWordCount * (1 - WORDCOUNT_TOLERANCE)));
+    const maxWordCount = Math.max(minWordCount, Math.ceil(targetWordCount * (1 + WORDCOUNT_TOLERANCE)));
+
     if (output.postWriteErrors.length > 0) {
       log("spot-fix", `start — ${output.postWriteErrors.length} post-write errors`);
       this.debug("write_next.spot_fix.start", {
@@ -735,6 +748,8 @@ export class PipelineRunner {
         spotFixIssues,
         "spot-fix",
         book.genre,
+        undefined,
+        book.chapterWordCount,
       );
       if (fixResult.revisedContent.length > 0) {
         finalContent = fixResult.revisedContent;
@@ -799,6 +814,8 @@ export class PipelineRunner {
           auditResult.issues,
           "spot-fix",
           book.genre,
+          undefined,
+          book.chapterWordCount,
         );
 
         if (reviseOutput.revisedContent.length > 0) {
@@ -859,6 +876,21 @@ export class PipelineRunner {
           finalWordCount,
         });
       }
+    }
+
+    // 3.5 Hard word-count gate (strict)
+    if (finalWordCount < minWordCount || finalWordCount > maxWordCount) {
+      const rangeLabel = `${minWordCount}-${maxWordCount}`;
+      log("wordcount", `failed — out of range ${finalWordCount} not in ${rangeLabel}`);
+      this.debug("write_next.wordcount.failed", {
+        bookId,
+        chapterNumber,
+        wordCount: finalWordCount,
+        minWordCount,
+        maxWordCount,
+        targetWordCount,
+      });
+      throw new Error(`字数硬约束未通过：当前 ${finalWordCount}，要求 ${rangeLabel}（目标 ${targetWordCount}）`);
     }
 
     // 4. Save chapter (original or revised)

@@ -56,6 +56,7 @@ export class ReviserAgent extends BaseAgent {
     mode: ReviseMode = "rewrite",
     genre?: string,
     authorInstruction?: string,
+    targetWordCount?: number,
   ): Promise<ReviseOutput> {
     process.stderr.write(`${new Date().toISOString()} INFO reviser.load_story_files.start ${JSON.stringify({
       bookDir,
@@ -113,6 +114,10 @@ export class ReviserAgent extends BaseAgent {
       .map((i) => `- [${i.severity}] ${i.category}: ${i.description}\n  建议: ${i.suggestion}`)
       .join("\n");
 
+    const wordTarget = targetWordCount ?? countNovelWords(chapterContent);
+    const minWordCount = Math.max(1, Math.floor(wordTarget * 0.9));
+    const maxWordCount = Math.max(minWordCount, Math.ceil(wordTarget * 1.1));
+
     const modeDesc = MODE_DESCRIPTIONS[mode];
     const numericalRule = gp.numericalSystem
       ? "\n3. 数值错误必须精确修正，前后对账"
@@ -138,6 +143,8 @@ export class ReviserAgent extends BaseAgent {
 7. 修改后同步更新状态卡${gp.numericalSystem ? "、账本" : ""}、伏笔池，以及所有受影响的真相文件
 8. 如果问题只是知识库/资料同步错误，也要优先修正真相文件，不要只改正文糊弄过去
 9. 除专有名词中必须保留的外文缩写外，正文、修订说明、状态卡和真相文件都必须使用自然简体中文，不得夹杂英文单词、英文短语或中英混写
+10. 字数硬约束：修订后正文必须在 ${minWordCount}-${maxWordCount} 字（目标 ${wordTarget} 字）
+11. 如超出上限，优先压缩重复描写和无效内心独白；如低于下限，补充有效动作、冲突推进和信息增量，禁止水字
 
 输出格式：
 
@@ -188,6 +195,11 @@ ${issueList}
 
 ## 作者额外修改要求
 ${authorInstruction?.trim() ? authorInstruction.trim() : "（无，按审稿问题和修稿模式处理）"}
+
+## 字数约束（必须遵守）
+- 目标字数：${wordTarget}
+- 允许区间：${minWordCount}-${maxWordCount}
+- 说明：最终 REVISED_CONTENT 必须落在该区间内
 
 ## 当前状态卡
 ${currentState}

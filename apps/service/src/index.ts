@@ -1839,6 +1839,224 @@ async function findChapterFile(bookDir: string, chapterNumber: number, preferred
   return resolved.selected.fullPath;
 }
 
+async function loadChapterIndexWithRealtimeWords(state: StateManager, bookId: string): Promise<ReadonlyArray<ChapterMeta>> {
+  const bookDir = state.bookDir(bookId);
+  const index = await state.loadChapterIndex(bookId);
+  let changed = false;
+
+  const merged = await Promise.all(
+    index.map(async (chapter) => {
+      try {
+        const chapterFile = await findChapterFile(bookDir, chapter.number, chapter.title);
+        const raw = await readFile(chapterFile, "utf-8");
+        const content = raw.split("\n").slice(2).join("\n");
+        const realtimeWords = countNovelWords(content);
+        if (realtimeWords !== chapter.wordCount) {
+          changed = true;
+          return {
+            ...chapter,
+            wordCount: realtimeWords,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+      } catch {
+        // Keep original index value if file is missing/unreadable.
+      }
+      return chapter;
+    }),
+  );
+
+  if (changed) {
+    await state.saveChapterIndex(bookId, merged);
+    logInfo("chapter.index.words.resynced", {
+      bookId,
+      chapters: merged.length,
+    });
+  }
+
+  return merged;
+}
+
+function normalizeWordCountLikeWawa(text: string): number {
+  if (!text) return 0;
+  try {
+    const matches = text.match(/[\p{Script=Han}]|[\p{L}]+|[\p{N}]+|[^\p{Script=Han}\p{L}\p{N}\s]+/gu);
+    return matches ? matches.length : 0;
+  } catch {
+    const matches = text.match(/[\u4E00-\u9FFF]|[A-Za-z]+|\d+|[^\u4E00-\u9FFFA-Za-z\d\s]+/g);
+    return matches ? matches.length : 0;
+  }
+}
+
+async function loadChapterIndexWithRealtimeWordsWawa(state: StateManager, bookId: string): Promise<ReadonlyArray<ChapterMeta>> {
+  const bookDir = state.bookDir(bookId);
+  const index = await state.loadChapterIndex(bookId);
+  let changed = false;
+
+  const merged = await Promise.all(
+    index.map(async (chapter) => {
+      try {
+        const chapterFile = await findChapterFile(bookDir, chapter.number, chapter.title);
+        const raw = await readFile(chapterFile, "utf-8");
+        const content = raw.split("\n").slice(2).join("\n");
+        const realtimeWords = normalizeWordCountLikeWawa(content);
+        if (realtimeWords !== chapter.wordCount) {
+          changed = true;
+          return {
+            ...chapter,
+            wordCount: realtimeWords,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+      } catch {
+        // Keep original index value if file is missing/unreadable.
+      }
+      return chapter;
+    }),
+  );
+
+  if (changed) {
+    await state.saveChapterIndex(bookId, merged);
+    logInfo("chapter.index.words.resynced", {
+      bookId,
+      chapters: merged.length,
+      counter: "wawa-like",
+    });
+  }
+
+  return merged;
+}
+
+const loadChapterIndexForStats = loadChapterIndexWithRealtimeWordsWawa;
+
+function computeBookStatusFromIndex(book: {
+  title: string;
+  genre: string;
+  platform: string;
+  status: string;
+}, bookId: string, chapters: ReadonlyArray<ChapterMeta>) {
+  const totalWords = chapters.reduce((sum, ch) => sum + ch.wordCount, 0);
+  const maxChapter = chapters.reduce((max, ch) => Math.max(max, ch.number), 0);
+  return {
+    bookId,
+    title: book.title,
+    genre: book.genre,
+    platform: book.platform,
+    status: book.status,
+    chaptersWritten: chapters.length,
+    totalWords,
+    nextChapter: maxChapter + 1,
+    chapters: [...chapters],
+  };
+}
+
+function chapterCellMatches(cell: string, chapterNumber: number): boolean {
+  const normalized = cell.trim();
+  return (
+    normalized === String(chapterNumber)
+    || normalized === `Ch.${chapterNumber}`
+    || normalized === `第${chapterNumber}章`
+    || normalized === `第${chapterNumber}`
+  );
+}
+
+function removeChapterRowsFromMarkdownTable(content: string, chapterNumber: number): string {
+  const lines = content.split("\n");
+  const filtered = lines.filter((line) => {
+    if (!line.trim().startsWith("|")) return true;
+    const cells = line.split("|").map((cell) => cell.trim());
+    if (cells.length < 3) return true;
+    const firstCell = cells[1] ?? "";
+    const secondCell = cells[2] ?? "";
+    if (chapterCellMatches(firstCell, chapterNumber) || chapterCellMatches(secondCell, chapterNumber)) {
+      return false;
+    }
+    return true;
+  });
+  return `${filtered.join("\n").replace(/\n{3,}/g, "\n\n").trimEnd()}\n`;
+}
+
+async function cleanupStoryFilesAfterChapterDelete(bookDir: string, chapterNumber: number, chapters: ReadonlyArray<ChapterMeta>): Promise<void> {
+  const storyDir = join(bookDir, "story");
+  const filesToClean = [
+    "chapter_summaries.md",
+    "subplot_board.md",
+    "emotional_arcs.md",
+    "character_matrix.md",
+    "pending_hooks.md",
+  ];
+
+  for (const file of filesToClean) {
+    const filePath = join(storyDir, file);
+    try {
+      const raw = await readFile(filePath, "utf-8");
+      const cleaned = removeChapterRowsFromMarkdownTable(raw, chapterNumber);
+      if (cleaned !== raw) {
+        await writeFile(filePath, cleaned, "utf-8");
+      }
+    } catch {
+      // ignore missing/unreadable files
+    }
+  }
+
+  const currentStatePath = join(storyDir, "current_state.md");
+  try {
+    const maxChapter = chapters.reduce((max, item) => Math.max(max, item.number), 0);
+    const nextChapter = maxChapter + 1;
+    const completed = chapters.length;
+    const currentStateRaw = await readFile(currentStatePath, "utf-8");
+    let nextState = currentStateRaw
+      .replace(/(\|\s*当前章节\s*\|\s*)([^|]*)(\|)/, `$1${maxChapter}$3`)
+      .replace(/(\|\s*下一章\s*\|\s*)([^|]*)(\|)/, `$1${nextChapter}（待写作）$3`)
+      .replace(/(\|\s*已完成\s*\|\s*)([^|]*)(\|)/, `$1${completed}章$3`);
+
+    const totalMatch = currentStateRaw.match(/\|\s*总规划\s*\|\s*(\d+)章?\s*\|/);
+    if (totalMatch) {
+      const total = Number.parseInt(totalMatch[1] ?? "0", 10);
+      if (Number.isFinite(total) && total > 0) {
+        const remaining = Math.max(total - completed, 0);
+        nextState = nextState.replace(/(\|\s*待写作\s*\|\s*)([^|]*)(\|)/, `$1${remaining}章$3`);
+      }
+    }
+
+    if (nextState !== currentStateRaw) {
+      await writeFile(currentStatePath, nextState, "utf-8");
+    }
+  } catch {
+    // ignore missing/unreadable current_state
+  }
+}
+
+async function recalcChapterWordCounts(state: StateManager, bookId: string, chapters: ReadonlyArray<ChapterMeta>): Promise<ReadonlyArray<ChapterMeta>> {
+  const bookDir = state.bookDir(bookId);
+  const updated = await Promise.all(
+    chapters.map(async (chapter) => {
+      try {
+        const chapterFile = await findChapterFile(bookDir, chapter.number, chapter.title);
+        const raw = await readFile(chapterFile, "utf-8");
+        const content = raw.split("\n").slice(2).join("\n");
+        const wordCount = normalizeWordCountLikeWawa(content);
+        if (wordCount !== chapter.wordCount) {
+          return {
+            ...chapter,
+            wordCount,
+            updatedAt: new Date().toISOString(),
+          };
+        }
+      } catch {
+        // keep original
+      }
+      return chapter;
+    }),
+  );
+  return updated;
+}
+
+void loadChapterIndexWithRealtimeWords;
+void countNovelWords;
+void computeBookStatusFromIndex;
+void loadChapterIndexForStats;
+
 async function daemonStatus(): Promise<{ running: boolean; pid: number | null }> {
   try {
     const pid = parseInt((await readFile(daemonPidPath(), "utf-8")).trim(), 10);
@@ -2722,10 +2940,11 @@ app.put("/api/project/config", async (req, res) => {
 
 app.get("/api/books/:bookId/status", async (req, res) => {
   try {
-    const config = await loadProjectConfig(projectRoot);
+    const state = new StateManager(projectRoot);
     const bookId = await resolveBookId(projectRoot, req.params.bookId);
-    const pipeline = createPipeline(projectRoot, config);
-    res.json({ ok: true, status: await pipeline.getBookStatus(bookId) });
+    const book = await state.loadBookConfig(bookId);
+    const chapters = await loadChapterIndexForStats(state, bookId);
+    res.json({ ok: true, status: computeBookStatusFromIndex(book, bookId, chapters) });
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
   }
@@ -2846,7 +3065,7 @@ app.get("/api/books/:bookId/analytics", async (req, res) => {
   try {
     const state = new StateManager(projectRoot);
     const bookId = await resolveBookId(projectRoot, req.params.bookId);
-    const chapters = await state.loadChapterIndex(bookId);
+    const chapters = await loadChapterIndexForStats(state, bookId);
     res.json({ ok: true, analytics: computeAnalytics(bookId, chapters) });
   } catch (error) {
     res.status(400).json({ ok: false, error: error instanceof Error ? error.message : String(error) });
@@ -2923,7 +3142,7 @@ app.get("/api/books/:bookId/chapters", async (req, res) => {
   try {
     const state = new StateManager(projectRoot);
     const bookId = await resolveBookId(projectRoot, req.params.bookId);
-    const chapters = await state.loadChapterIndex(bookId);
+    const chapters = await loadChapterIndexForStats(state, bookId);
     const sorted = [...chapters].sort((a, b) => a.number - b.number);
     res.json({ ok: true, bookId, chapters: sorted });
   } catch (error) {
@@ -3035,6 +3254,56 @@ app.post("/api/books/:bookId/chapters/:chapter/replace", async (req, res) => {
     res.json({ ok: true, bookId, chapter: chapterNumber, filePath: writeResult.fullPath, title: nextTitle, wordCount: nextWordCount });
   } catch (error) {
     logError("chapter.replace.error", {
+      bookId: req.params.bookId,
+      chapter: req.params.chapter,
+      error: describeError(error),
+    });
+    res.status(400).json({ ok: false, error: describeError(error) });
+  }
+});
+
+app.delete("/api/books/:bookId/chapters/:chapter", async (req, res) => {
+  try {
+    const state = new StateManager(projectRoot);
+    const bookId = await resolveBookId(projectRoot, req.params.bookId);
+    const chapterNumber = parseInt(req.params.chapter, 10);
+    if (!Number.isFinite(chapterNumber) || chapterNumber < 1) {
+      throw new Error(`Invalid chapter number: ${req.params.chapter}`);
+    }
+
+    const bookDir = state.bookDir(bookId);
+    const chapterIndex = await state.loadChapterIndex(bookId);
+    const target = chapterIndex.find((item) => item.number === chapterNumber);
+    if (!target) {
+      throw new Error(`Chapter ${chapterNumber} not found in index`);
+    }
+
+    const chapterFile = await findChapterFile(bookDir, chapterNumber, target.title);
+    await rm(chapterFile, { force: true });
+
+    const filtered = chapterIndex.filter((item) => item.number !== chapterNumber);
+    const recalculated = await recalcChapterWordCounts(state, bookId, filtered);
+    await state.saveChapterIndex(bookId, recalculated);
+    await cleanupStoryFilesAfterChapterDelete(bookDir, chapterNumber, recalculated);
+
+    logInfo("chapter.delete.done", {
+      bookId,
+      chapter: chapterNumber,
+      removedFile: chapterFile,
+      remaining: recalculated.length,
+      totalWords: recalculated.reduce((sum, item) => sum + item.wordCount, 0),
+    });
+
+    res.json({
+      ok: true,
+      bookId,
+      chapter: chapterNumber,
+      removedFile: chapterFile,
+      remainingChapters: recalculated.length,
+      totalWords: recalculated.reduce((sum, item) => sum + item.wordCount, 0),
+    });
+  } catch (error) {
+    logError("chapter.delete.error", {
       bookId: req.params.bookId,
       chapter: req.params.chapter,
       error: describeError(error),
