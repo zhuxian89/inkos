@@ -31,6 +31,18 @@ function callParseOutput(
   return proto.parseOutput.call(null, chapterNumber, content, genreProfile);
 }
 
+function callFindDuplicateRecentChapter(
+  title: string,
+  content: string,
+  recentChapters: ReadonlyArray<{ readonly number: number; readonly title: string; readonly body: string; readonly raw: string }>,
+): { readonly number: number; readonly title: string; readonly body: string; readonly raw: string } | null {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const proto = WriterAgent.prototype as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const ctx = Object.create(proto) as any;
+  return proto.findDuplicateRecentChapter.call(ctx, { title, content }, recentChapters);
+}
+
 // ---------------------------------------------------------------------------
 // Full tagged output
 // ---------------------------------------------------------------------------
@@ -224,5 +236,39 @@ describe("WriterAgent parseOutput", () => {
 
     const result = callParseOutput(1, output);
     expect(result.wordCount).toBe(countNovelWords(chineseContent));
+  });
+
+  it("detects duplicated recent chapter when title and body are the same", () => {
+    const duplicate = callFindDuplicateRecentChapter(
+      "风雪夜归",
+      "林风踩着积雪回到山门，靴底的冰碴一路碎响。守山弟子还没开口，他已经把那封染血的信拍在案上。",
+      [
+        {
+          number: 7,
+          title: "风雪夜归",
+          body: "林风踩着积雪回到山门，靴底的冰碴一路碎响。守山弟子还没开口，他已经把那封染血的信拍在案上。",
+          raw: "# 第7章 风雪夜归\n\n林风踩着积雪回到山门，靴底的冰碴一路碎响。守山弟子还没开口，他已经把那封染血的信拍在案上。",
+        },
+      ],
+    );
+
+    expect(duplicate?.number).toBe(7);
+  });
+
+  it("does not flag recent chapter when title and body both advance", () => {
+    const duplicate = callFindDuplicateRecentChapter(
+      "风雪夜归后的赌局",
+      "林风推门进了偏殿，把染血的信扔进火盆。火苗窜起的那一瞬，三长老先笑了，笑意却没有进眼底。",
+      [
+        {
+          number: 7,
+          title: "风雪夜归",
+          body: "林风踩着积雪回到山门，靴底的冰碴一路碎响。守山弟子还没开口，他已经把那封染血的信拍在案上。",
+          raw: "# 第7章 风雪夜归\n\n林风踩着积雪回到山门，靴底的冰碴一路碎响。守山弟子还没开口，他已经把那封染血的信拍在案上。",
+        },
+      ],
+    );
+
+    expect(duplicate).toBeNull();
   });
 });

@@ -103,13 +103,24 @@ export class PipelineRunner {
     return this.config.modelOverrides?.[agentName] ?? this.config.model;
   }
 
-  private agentCtxFor(agent: string, bookId?: string): AgentContext {
+  private agentCtxFor(agent: string, bookId?: string, abortSignal?: AbortSignal): AgentContext {
     return {
       client: this.config.client,
       model: this.modelFor(agent),
       projectRoot: this.config.projectRoot,
       bookId,
+      abortSignal,
     };
+  }
+
+  private throwIfAborted(abortSignal?: AbortSignal): void {
+    if (!abortSignal?.aborted) return;
+    const reason = typeof abortSignal.reason === "string" && abortSignal.reason.trim()
+      ? abortSignal.reason.trim()
+      : "Operation aborted";
+    const error = new Error(reason);
+    error.name = "AbortError";
+    throw error;
   }
 
   private async loadGenreProfile(genre: string): Promise<{ profile: GenreProfile }> {
@@ -647,6 +658,7 @@ export class PipelineRunner {
     wordCount?: number,
     temperatureOverride?: number,
     onProgress?: (step: string) => void,
+    abortSignal?: AbortSignal,
   ): Promise<ChapterPipelineResult> {
     this.debug("write_next.start", {
       projectRoot: this.config.projectRoot,
@@ -661,12 +673,14 @@ export class PipelineRunner {
         // ignore progress handler errors
       }
     };
+    this.throwIfAborted(abortSignal);
     this.debug("write_next.lock.acquire.start", { bookId });
     const releaseLock = await this.state.acquireBookLock(bookId);
     safeProgress("lock-acquired");
     this.debug("write_next.lock.acquire.done", { bookId });
     try {
-      const result = await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, safeProgress);
+      this.throwIfAborted(abortSignal);
+      const result = await this._writeNextChapterLocked(bookId, wordCount, temperatureOverride, safeProgress, abortSignal);
       this.debug("write_next.done", {
         bookId,
         chapterNumber: result.chapterNumber,
@@ -689,7 +703,9 @@ export class PipelineRunner {
     wordCount?: number,
     temperatureOverride?: number,
     onProgress?: (step: string) => void,
+    abortSignal?: AbortSignal,
   ): Promise<ChapterPipelineResult> {
+    this.throwIfAborted(abortSignal);
     const book = await this.state.loadBookConfig(bookId);
     const bookDir = this.state.bookDir(bookId);
     const chapterNumber = await this.state.getNextChapterNumber(bookId);
@@ -717,9 +733,10 @@ export class PipelineRunner {
     };
 
     // 1. Write chapter
+    this.throwIfAborted(abortSignal);
     log("write", "start");
     this.debug("write_next.writer.start", { bookId, chapterNumber });
-    const writer = new WriterAgent(this.agentCtxFor("writer", bookId));
+    const writer = new WriterAgent(this.agentCtxFor("writer", bookId, abortSignal));
     const output = await writer.writeChapter({
       book,
       bookDir,
@@ -748,13 +765,14 @@ export class PipelineRunner {
     const maxWordCount = Math.max(minWordCount, Math.ceil(targetWordCount * (1 + WORDCOUNT_TOLERANCE)));
 
     if (output.postWriteErrors.length > 0) {
+      this.throwIfAborted(abortSignal);
       log("spot-fix", `start — ${output.postWriteErrors.length} post-write errors`);
       this.debug("write_next.spot_fix.start", {
         bookId,
         chapterNumber,
         postWriteErrors: output.postWriteErrors.length,
       });
-      const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
+      const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId, abortSignal));
       const spotFixIssues = output.postWriteErrors.map((v) => ({
         severity: "critical" as const,
         category: v.rule,
@@ -787,9 +805,10 @@ export class PipelineRunner {
     }
 
     // 2b. LLM audit
+    this.throwIfAborted(abortSignal);
     log("audit", "start");
     this.debug("write_next.audit.start", { bookId, chapterNumber });
-    const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId));
+    const auditor = new ContinuityAuditor(this.agentCtxFor("auditor", bookId, abortSignal));
     const llmAudit = await auditor.auditChapter(
       bookDir,
       finalContent,
@@ -826,7 +845,8 @@ export class PipelineRunner {
           criticalIssues: criticalIssues.length,
           totalIssues: auditResult.issues.length,
         });
-        const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId));
+        this.throwIfAborted(abortSignal);
+        const reviser = new ReviserAgent(this.agentCtxFor("reviser", bookId, abortSignal));
         const reviseOutput = await reviser.reviseChapter(
           bookDir,
           finalContent,
@@ -862,6 +882,7 @@ export class PipelineRunner {
           }
 
           // Re-audit the (possibly revised) content
+          this.throwIfAborted(abortSignal);
           log("re-audit", "start");
           this.debug("write_next.reaudit.start", { bookId, chapterNumber });
           const reAudit = await auditor.auditChapter(
@@ -925,6 +946,7 @@ export class PipelineRunner {
     }
 
     // 4. Save chapter (original or revised)
+    this.throwIfAborted(abortSignal);
     log("save", "start");
     this.debug("write_next.save.start", { bookId, chapterNumber });
     const chaptersDir = join(bookDir, "chapters");

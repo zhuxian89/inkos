@@ -11,6 +11,7 @@ import {
   Input,
   InputNumber,
   Modal,
+  Popconfirm,
   Row,
   Select,
   Space,
@@ -138,6 +139,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const [result, setResult] = useState<unknown>(null);
   const [writeStep, setWriteStep] = useState<string | null>(null);
   const [isWriting, setIsWriting] = useState(false);
+  const [isCancellingWrite, setIsCancellingWrite] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [authorBrief, setAuthorBrief] = useState("");
   const [isSavingBrief, setIsSavingBrief] = useState(false);
@@ -556,7 +558,8 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   }
 
   function cancelWriteJob(): void {
-    if (!writeJobId) return;
+    if (!writeJobId || isCancellingWrite) return;
+    setIsCancellingWrite(true);
     void fetch(`/api/inkos/jobs/${encodeURIComponent(writeJobId)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -570,7 +573,8 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         }
         void message.success("已请求取消续写");
       })
-      .catch(() => void message.error("取消请求发送失败"));
+      .catch(() => void message.error("取消请求发送失败"))
+      .finally(() => setIsCancellingWrite(false));
   }
 
   function draftOnly(values: WriteValues): void {
@@ -842,9 +846,18 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                   只写草稿
                 </Button>
                 {isWriting && writeJobId ? (
-                  <Button danger size="large" block={isMobile} onClick={cancelWriteJob}>
-                    取消续写
-                  </Button>
+                  <Popconfirm
+                    title="确认取消续写？"
+                    description="当前续写任务会停止，已生成的内容不会继续推进。"
+                    okText="确认取消"
+                    cancelText="继续续写"
+                    okButtonProps={{ danger: true, loading: isCancellingWrite }}
+                    onConfirm={cancelWriteJob}
+                  >
+                    <Button danger size="large" block={isMobile} loading={isCancellingWrite}>
+                      取消续写
+                    </Button>
+                  </Popconfirm>
                 ) : null}
                 {writeStep ? <Typography.Text type="secondary">{writeStep}</Typography.Text> : null}
               </div>

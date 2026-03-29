@@ -5,6 +5,7 @@ import { commandRegistry, getCommandDefinition } from "./command-registry.js";
 import {
   cancelJob,
   createJob,
+  ensureJobAbortController,
   failJob,
   finishJob,
   jobs,
@@ -49,6 +50,7 @@ export const registerOpsRoutes: RouteRegistrar = (app, context) => {
 
       res.json({ ok: true, jobId: job.id, bookId });
 
+      const abortController = ensureJobAbortController(job);
       const pipeline = createPipeline(context.projectRoot, config, input.context, (event, meta) => {
         logInfo(event, { bookId, jobId: job.id, ...(meta ?? {}) });
       });
@@ -70,7 +72,7 @@ export const registerOpsRoutes: RouteRegistrar = (app, context) => {
                 ? `章节 ${i + 1}/${input.count}：${step}`
                 : step, { chapterIndex: i + 1, total: input.count });
             };
-            results.push(await pipeline.writeNextChapter(bookId, input.words, undefined, onProgress));
+            results.push(await pipeline.writeNextChapter(bookId, input.words, undefined, onProgress, abortController.signal));
           }
           job.result = { ok: true, bookId, results };
           finishJob(job, { resultCount: results.length });

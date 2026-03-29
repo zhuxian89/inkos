@@ -210,6 +210,7 @@ export async function chatCompletion(
     readonly temperature?: number;
     readonly maxTokens?: number;
     readonly webSearch?: boolean;
+    readonly abortSignal?: AbortSignal;
   },
 ): Promise<LLMResponse> {
   const resolved = {
@@ -225,18 +226,19 @@ export async function chatCompletion(
     maxTokens: resolved.maxTokens,
     temperature: resolved.temperature,
     webSearch: options?.webSearch === true,
+    abortSignal: options?.abortSignal ? "provided" : "none",
     baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
     hasAnthropicClient: Boolean(client._anthropic),
     hasOpenAIClient: Boolean(client._openai),
   });
   try {
     if (client.provider === "anthropic") {
-      return await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
+      return await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget, options?.abortSignal);
     }
     if (client.apiFormat === "responses") {
-      return await chatCompletionOpenAIResponses(client._openai!, model, messages, resolved, options?.webSearch);
+      return await chatCompletionOpenAIResponses(client._openai!, model, messages, resolved, options?.webSearch, options?.abortSignal);
     }
-    return await chatCompletionOpenAIChat(client._openai!, model, messages, resolved, options?.webSearch);
+    return await chatCompletionOpenAIChat(client._openai!, model, messages, resolved, options?.webSearch, options?.abortSignal);
   } catch (error) {
     logLLMDiagnostic("llm.request.error", {
       kind: "chat_completion",
@@ -247,6 +249,7 @@ export async function chatCompletion(
       maxTokens: resolved.maxTokens,
       temperature: resolved.temperature,
       webSearch: options?.webSearch === true,
+      abortSignal: options?.abortSignal ? "provided" : "none",
       baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
       error: summarizeError(error),
     });
@@ -295,7 +298,7 @@ export async function chatWithTools(
   });
   try {
     if (client.provider === "anthropic") {
-      return await chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget);
+      return await chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget, options?.abortSignal);
     }
     if (client.apiFormat === "responses") {
       return await chatWithToolsOpenAIResponses(client._openai!, model, messages, tools, resolved, options?.abortSignal);
@@ -328,6 +331,7 @@ async function chatCompletionOpenAIChat(
   messages: ReadonlyArray<LLMMessage>,
   options: { readonly temperature: number; readonly maxTokens: number },
   webSearch?: boolean,
+  abortSignal?: AbortSignal,
 ): Promise<LLMResponse> {
   const moonshotCompat = isMoonshotModel(model, client);
   const request = {
@@ -348,7 +352,7 @@ async function chatCompletionOpenAIChat(
     const stream = await client.chat.completions.create({
       ...request,
       stream: true,
-    });
+    }, { signal: abortSignal });
 
     for await (const chunk of stream) {
       const delta = chunk.choices[0]?.delta as {
@@ -389,7 +393,7 @@ async function chatCompletionOpenAIChat(
     const completion = await client.chat.completions.create({
       ...request,
       stream: false,
-    });
+    }, { signal: abortSignal });
 
     const message = completion.choices[0]?.message as {
       content?: string | null;
@@ -595,6 +599,7 @@ async function chatCompletionOpenAIResponses(
   messages: ReadonlyArray<LLMMessage>,
   options: { readonly temperature: number; readonly maxTokens: number },
   webSearch?: boolean,
+  abortSignal?: AbortSignal,
 ): Promise<LLMResponse> {
   const input: OpenAI.Responses.ResponseInputItem[] = messages.map((m) => ({
     role: m.role as "system" | "user" | "assistant",
@@ -616,7 +621,7 @@ async function chatCompletionOpenAIResponses(
     const stream = await client.responses.create({
       ...request,
       stream: true,
-    });
+    }, { signal: abortSignal });
 
     const chunks: string[] = [];
     let inputTokens = 0;
@@ -652,7 +657,7 @@ async function chatCompletionOpenAIResponses(
     const response = await client.responses.create({
       ...request,
       stream: false,
-    });
+    }, { signal: abortSignal });
     if (!response.output_text) {
       throw new Error("LLM returned empty response");
     }
@@ -773,6 +778,7 @@ async function chatCompletionAnthropic(
   messages: ReadonlyArray<LLMMessage>,
   options: { readonly temperature: number; readonly maxTokens: number },
   thinkingBudget: number = 0,
+  abortSignal?: AbortSignal,
 ): Promise<LLMResponse> {
   const systemText = messages
     .filter((m) => m.role === "system")
@@ -792,7 +798,7 @@ async function chatCompletionAnthropic(
       : { temperature: options.temperature }),
     max_tokens: options.maxTokens,
     stream: true,
-  });
+  }, { signal: abortSignal });
 
   const chunks: string[] = [];
   let inputTokens = 0;
@@ -835,6 +841,7 @@ async function chatWithToolsAnthropic(
     readonly onReasoningDelta?: (delta: string) => void;
   },
   thinkingBudget: number = 0,
+  abortSignal?: AbortSignal,
 ): Promise<ChatWithToolsResult> {
   const systemText = messages
     .filter((m) => m.role === "system")
@@ -859,7 +866,7 @@ async function chatWithToolsAnthropic(
       : { temperature: options.temperature }),
     max_tokens: options.maxTokens,
     stream: true,
-  });
+  }, { signal: abortSignal });
 
   let content = "";
   const toolCalls: ToolCall[] = [];

@@ -40,6 +40,13 @@ export interface WriteChapterOutput {
   readonly postWriteWarnings: ReadonlyArray<PostWriteViolation>;
 }
 
+interface RecentChapterRecord {
+  readonly number: number;
+  readonly title: string;
+  readonly body: string;
+  readonly raw: string;
+}
+
 export class WriterAgent extends BaseAgent {
   get name(): string {
     return "writer";
@@ -100,10 +107,12 @@ export class WriterAgent extends BaseAgent {
     this.logRaw(`${new Date().toISOString()} INFO writer.load_recent_chapters.start ${JSON.stringify({
       chapterNumber,
     })}\n`);
-    const recentChapters = await this.loadRecentChapters(bookDir, chapterNumber);
+    const recentChapterRecords = await this.loadRecentChapterRecords(bookDir);
+    const recentChapters = recentChapterRecords.map((item) => item.raw).join("\n\n---\n\n");
     this.logRaw(`${new Date().toISOString()} INFO writer.load_recent_chapters.done ${JSON.stringify({
       chapterNumber,
       recentChaptersLength: recentChapters.length,
+      recentChapterCount: recentChapterRecords.length,
     })}\n`);
 
     // Load genre profile + book rules
@@ -193,6 +202,7 @@ export class WriterAgent extends BaseAgent {
       ],
       { maxTokens: 16000, temperature },
     );
+    let latestResponseContent = response.content;
     this.logRaw(`${new Date().toISOString()} INFO writer.llm.done ${JSON.stringify({
       chapterNumber,
       responseLength: response.content.length,
@@ -202,7 +212,7 @@ export class WriterAgent extends BaseAgent {
     })}\n`);
 
     this.logRaw(`${new Date().toISOString()} INFO writer.parse.start ${JSON.stringify({ chapterNumber })}\n`);
-    let output = this.parseOutput(chapterNumber, response.content, genreProfile);
+    let output = this.parseOutput(chapterNumber, latestResponseContent, genreProfile);
 
     // Retry once if critical section (CHAPTER_CONTENT) is empty
     if (!output.content) {
@@ -211,14 +221,53 @@ export class WriterAgent extends BaseAgent {
         [
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt },
-          { role: "assistant", content: response.content },
+          { role: "assistant", content: latestResponseContent },
           { role: "user", content: "你的输出缺少 === CHAPTER_CONTENT === 区块。请只输出从 === CHAPTER_TITLE === 到 === UPDATED_CHARACTER_MATRIX === 的完整内容，严格遵循输出格式。" },
         ],
         { maxTokens: 16000, temperature },
       );
-      output = this.parseOutput(chapterNumber, retryResponse.content, genreProfile);
+      latestResponseContent = retryResponse.content;
+      output = this.parseOutput(chapterNumber, latestResponseContent, genreProfile);
       if (!output.content) {
         throw new Error(`Writer returned empty chapter content after retry (chapter ${chapterNumber})`);
+      }
+    }
+
+    const duplicateRecentChapter = this.findDuplicateRecentChapter(output, recentChapterRecords);
+    if (duplicateRecentChapter) {
+      this.logRaw(`${new Date().toISOString()} WARN writer.duplicate_recent_chapter — retrying ${JSON.stringify({
+        chapterNumber,
+        duplicateWithChapter: duplicateRecentChapter.number,
+        duplicateWithTitle: duplicateRecentChapter.title,
+      })}\n`);
+      const retryResponse = await this.chat(
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+          { role: "assistant", content: latestResponseContent },
+          {
+            role: "user",
+            content: `你刚才生成的章节与最近的第${duplicateRecentChapter.number}章高度重复，标题或正文基本相同。这不是续写。
+
+请重新生成第${chapterNumber}章，必须满足：
+1. 标题不能与最近章节重复
+2. 不能复写上一章或最近章节的正文
+3. 必须推进新的事件、关系或冲突
+4. 章尾必须提供新的钩子
+
+请只输出从 === CHAPTER_TITLE === 到 === UPDATED_CHARACTER_MATRIX === 的完整内容，严格遵循输出格式。`,
+          },
+        ],
+        { maxTokens: 16000, temperature },
+      );
+      latestResponseContent = retryResponse.content;
+      output = this.parseOutput(chapterNumber, latestResponseContent, genreProfile);
+      if (!output.content) {
+        throw new Error(`Writer returned empty chapter content after duplicate retry (chapter ${chapterNumber})`);
+      }
+      const repeatedAgain = this.findDuplicateRecentChapter(output, recentChapterRecords);
+      if (repeatedAgain) {
+        throw new Error(`Writer generated duplicate chapter content with chapter ${repeatedAgain.number} after retry (chapter ${chapterNumber})`);
       }
     }
 
@@ -391,14 +440,12 @@ ${params.volumeOutline}
 要求：
 - 正文字数硬约束：必须在 ${params.minWordCount}-${params.maxWordCount} 字之间（目标 ${params.targetWordCount} 字）
 - 若超出上限，优先压缩冗余描写；若低于下限，补充有效情节与人物动作，不许水字数
+- 与最近章节相比，标题、核心事件推进、结尾钩子都必须有新增，禁止复写上一章或近几章
 - 写完后更新状态卡${params.ledger ? "、资源账本" : ""}、伏笔池、章节摘要、支线进度板、情感弧线、角色交互矩阵
 - 先输出写作自检表，再写正文`;
   }
 
-  private async loadRecentChapters(
-    bookDir: string,
-    currentChapter: number,
-  ): Promise<string> {
+  private async loadRecentChapterRecords(bookDir: string): Promise<ReadonlyArray<RecentChapterRecord>> {
     const chaptersDir = join(bookDir, "chapters");
     try {
       const files = await readdir(chaptersDir);
@@ -407,18 +454,16 @@ ${params.volumeOutline}
         .sort()
         .slice(-3);
 
-      if (mdFiles.length === 0) return "";
+      if (mdFiles.length === 0) return [];
 
-      const contents = await Promise.all(
+      return await Promise.all(
         mdFiles.map(async (f) => {
-          const content = await readFile(join(chaptersDir, f), "utf-8");
-          return content;
+          const raw = await readFile(join(chaptersDir, f), "utf-8");
+          return this.parseRecentChapterRecord(f, raw);
         }),
       );
-
-      return contents.join("\n\n---\n\n");
     } catch {
-      return "";
+      return [];
     }
   }
 
@@ -456,6 +501,51 @@ ${params.volumeOutline}
       updatedEmotionalArcs: extract("UPDATED_EMOTIONAL_ARCS"),
       updatedCharacterMatrix: extract("UPDATED_CHARACTER_MATRIX"),
     };
+  }
+
+  private parseRecentChapterRecord(filename: string, raw: string): RecentChapterRecord {
+    const firstLine = raw.split(/\r?\n/, 1)[0]?.trim() ?? "";
+    const chapterMatch = firstLine.match(/^#\s*第(\d+)章\s*(.*)$/);
+    const number = chapterMatch ? parseInt(chapterMatch[1]!, 10) : 0;
+    const title = (chapterMatch?.[2] ?? "").trim() || filename.replace(/^\d{4}_/, "").replace(/\.md$/i, "").replace(/_/g, " ");
+    const body = raw.split(/\r?\n/).slice(2).join("\n").trim();
+    return { number, title, body, raw };
+  }
+
+  private normalizeForDuplicateCheck(value: string): string {
+    return value
+      .replace(/\r/g, "")
+      .replace(/\s+/g, "")
+      .replace(/[，。！？；：、“”"'‘’,.!?;:()\[\]{}<>《》【】\-]/g, "")
+      .trim()
+      .toLowerCase();
+  }
+
+  private findDuplicateRecentChapter(
+    output: Pick<WriteChapterOutput, "title" | "content">,
+    recentChapters: ReadonlyArray<RecentChapterRecord>,
+  ): RecentChapterRecord | null {
+    const normalizedTitle = this.normalizeForDuplicateCheck(output.title);
+    const normalizedContent = this.normalizeForDuplicateCheck(output.content);
+    if (!normalizedTitle || !normalizedContent) return null;
+
+    for (const recent of recentChapters) {
+      const recentTitle = this.normalizeForDuplicateCheck(recent.title);
+      const recentContent = this.normalizeForDuplicateCheck(recent.body);
+      if (!recentTitle || !recentContent) continue;
+
+      const sameTitle = normalizedTitle === recentTitle;
+      const sameContent = normalizedContent === recentContent;
+      const highlyOverlapping = normalizedContent.length >= 200
+        && recentContent.length >= 200
+        && (normalizedContent.includes(recentContent) || recentContent.includes(normalizedContent));
+
+      if ((sameTitle && sameContent) || (sameTitle && highlyOverlapping) || sameContent) {
+        return recent;
+      }
+    }
+
+    return null;
   }
 
   /** Save new truth files (summaries, subplots, emotional arcs, character matrix). */

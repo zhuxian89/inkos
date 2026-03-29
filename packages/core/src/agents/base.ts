@@ -6,6 +6,7 @@ export interface AgentContext {
   readonly model: string;
   readonly projectRoot: string;
   readonly bookId?: string;
+  readonly abortSignal?: AbortSignal;
 }
 
 export abstract class BaseAgent {
@@ -17,9 +18,12 @@ export abstract class BaseAgent {
 
   protected async chat(
     messages: ReadonlyArray<LLMMessage>,
-    options?: { readonly temperature?: number; readonly maxTokens?: number },
+    options?: { readonly temperature?: number; readonly maxTokens?: number; readonly abortSignal?: AbortSignal },
   ): Promise<LLMResponse> {
-    return chatCompletion(this.ctx.client, this.ctx.model, messages, options);
+    return chatCompletion(this.ctx.client, this.ctx.model, messages, {
+      ...options,
+      abortSignal: options?.abortSignal ?? this.ctx.abortSignal,
+    });
   }
 
   /**
@@ -30,11 +34,12 @@ export abstract class BaseAgent {
    */
   protected async chatWithSearch(
     messages: ReadonlyArray<LLMMessage>,
-    options?: { readonly temperature?: number; readonly maxTokens?: number },
+    options?: { readonly temperature?: number; readonly maxTokens?: number; readonly abortSignal?: AbortSignal },
   ): Promise<LLMResponse> {
     return chatCompletion(this.ctx.client, this.ctx.model, messages, {
       ...options,
       webSearch: true,
+      abortSignal: options?.abortSignal ?? this.ctx.abortSignal,
     });
   }
 
