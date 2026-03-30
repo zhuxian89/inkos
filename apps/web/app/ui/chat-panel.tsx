@@ -43,7 +43,9 @@ const assistantMarkdownComponents: Components = {
         borderRadius: 12,
         background: "rgba(29, 45, 52, 0.06)",
         overflowX: "auto",
-        whiteSpace: "pre",
+        whiteSpace: "pre-wrap",
+        wordBreak: "break-word",
+        overflowWrap: "anywhere",
         lineHeight: 1.6,
       }}
     >
