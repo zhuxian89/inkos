@@ -1,6 +1,6 @@
 "use client";
 
-import { App, Alert, Button, Card, Checkbox, Descriptions, Dropdown, Grid, Input, Modal, Popconfirm, Select, Space, Statistic, Table, Tag, Typography } from "antd";
+import { App, Alert, Button, Card, Descriptions, Dropdown, Grid, Input, Modal, Popconfirm, Select, Space, Statistic, Table, Tag, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { MoreOutlined } from "@ant-design/icons";
 import Link from "next/link";
@@ -41,7 +41,6 @@ interface LlmProfilesResponse {
 }
 
 const CHAPTER_CHAT_STORAGE_PREFIX = "inkos.chapter-chat.";
-const CHAPTER_CHAT_OPTIONS_STORAGE_PREFIX = "inkos.chapter-chat-options.";
 const CHAPTER_CHAT_PROFILE_STORAGE_PREFIX = "inkos.chapter-chat-profile.";
 
 export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: string; embedded?: boolean }>) {
@@ -60,8 +59,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [chatJobId, setChatJobId] = useState<string | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatLogOpen, setChatLogOpen] = useState(false);
-  const [chatUseStream, setChatUseStream] = useState(true);
-  const [chatIncludeReasoning, setChatIncludeReasoning] = useState(false);
   const [chatProfiles, setChatProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
   const [chatProfileId, setChatProfileId] = useState<string | undefined>(undefined);
   const [replacingChapter, setReplacingChapter] = useState(false);
@@ -100,32 +97,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       messages,
       meta: { source: "book-chapters" },
     });
-  }
-
-  function chapterChatOptionsStorageKey(chapter: number): string {
-    return `${CHAPTER_CHAT_OPTIONS_STORAGE_PREFIX}${bookId}.${chapter}`;
-  }
-
-  function loadStoredChapterChatOptions(chapter: number): { readonly useStream: boolean; readonly includeReasoning: boolean } {
-    if (typeof window === "undefined") {
-      return { useStream: true, includeReasoning: false };
-    }
-    try {
-      const raw = window.localStorage.getItem(chapterChatOptionsStorageKey(chapter));
-      if (!raw) return { useStream: true, includeReasoning: false };
-      const parsed = JSON.parse(raw) as { useStream?: boolean; includeReasoning?: boolean };
-      return {
-        useStream: parsed.useStream !== false,
-        includeReasoning: parsed.includeReasoning === true,
-      };
-    } catch {
-      return { useStream: true, includeReasoning: false };
-    }
-  }
-
-  function persistChapterChatOptions(chapter: number, options: { readonly useStream: boolean; readonly includeReasoning: boolean }): void {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(chapterChatOptionsStorageKey(chapter), JSON.stringify(options));
   }
 
   function chapterChatProfileStorageKey(chapter: number): string {
@@ -356,9 +327,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         setChatMessages(messages as ReadonlyArray<ChapterChatMessage>);
       }
     });
-    const storedOptions = loadStoredChapterChatOptions(row.number);
-    setChatUseStream(storedOptions.useStream);
-    setChatIncludeReasoning(storedOptions.includeReasoning);
     setChatDraft("");
     void loadChatProfiles(row.number);
   }
@@ -377,8 +345,8 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         messages: nextMessages,
-        useStream: chatUseStream,
-        includeReasoning: chatIncludeReasoning,
+        useStream: false,
+        includeReasoning: false,
         profileId: chatProfileId,
         async: true,
       }),
@@ -685,34 +653,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
                       label: item.isActive ? `${item.name} · ${item.model}（当前激活）` : `${item.name} · ${item.model}`,
                     }))}
                   />
-                  <Checkbox
-                    checked={chatUseStream}
-                    onChange={(event) => {
-                      if (!chatChapter) return;
-                      const next = event.target.checked;
-                      setChatUseStream(next);
-                      persistChapterChatOptions(chatChapter.number, {
-                        useStream: next,
-                        includeReasoning: chatIncludeReasoning,
-                      });
-                    }}
-                  >
-                    使用流式
-                  </Checkbox>
-                  <Checkbox
-                    checked={chatIncludeReasoning}
-                    onChange={(event) => {
-                      if (!chatChapter) return;
-                      const next = event.target.checked;
-                      setChatIncludeReasoning(next);
-                      persistChapterChatOptions(chatChapter.number, {
-                        useStream: chatUseStream,
-                        includeReasoning: next,
-                      });
-                    }}
-                  >
-                    展示 reasoning
-                  </Checkbox>
                 </Space>
               )}
               footerRight={(

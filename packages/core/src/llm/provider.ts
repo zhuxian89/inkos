@@ -192,8 +192,24 @@ function isRetryableStreamError(error: unknown): boolean {
     || msg.includes("unexpected end of json input");
 }
 
+function isRetryableNonStreamToolChatError(error: unknown): boolean {
+  const msg = String(error).toLowerCase();
+  return msg.includes("missing choices array")
+    || msg.includes("missing choices")
+    || msg.includes("cannot read properties of undefined")
+    || msg.includes("cannot read properties of null");
+}
+
 function logStreamFallback(provider: "openai-chat" | "openai-responses", model: string, error: unknown): void {
   process.stderr.write(`${new Date().toISOString()} WARN llm.stream_fallback ${JSON.stringify({
+    provider,
+    model,
+    error: error instanceof Error ? error.message : String(error),
+  })}\n`);
+}
+
+function logNonStreamFallback(provider: "openai-chat-tools", model: string, error: unknown): void {
+  process.stderr.write(`${new Date().toISOString()} WARN llm.non_stream_fallback ${JSON.stringify({
     provider,
     model,
     error: error instanceof Error ? error.message : String(error),
@@ -448,106 +464,153 @@ async function chatWithToolsOpenAIChat(
   const moonshotCompat = isMoonshotModel(model, client);
 
   if (options.useStream) {
-    const stream = await client.chat.completions.create({
+    return streamChatWithToolsOpenAIChat(
+      client,
+      model,
+      openaiMessages,
+      openaiTools,
+      options,
+      abortSignal,
+      moonshotCompat,
+    );
+  }
+
+  try {
+    const completion = await client.chat.completions.create({
       model,
       messages: openaiMessages,
       tools: openaiTools,
       temperature: options.temperature,
       max_tokens: options.maxTokens,
-      stream: true,
+      stream: false,
     }, { signal: abortSignal });
 
-    let content = "";
-    let reasoning = "";
-    const toolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
+    const message = completion.choices[0]?.message as {
+      content?: unknown;
+      reasoning?: unknown;
+      reasoning_content?: unknown;
+      tool_calls?: Array<{
+        id?: string;
+        function?: {
+          name?: string;
+          arguments?: string;
+        };
+      }>;
+    } | undefined;
 
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta as {
-        content?: unknown;
-        reasoning?: unknown;
-        reasoning_content?: unknown;
-        tool_calls?: Array<{
-          index: number;
-          id?: string;
-          function?: {
-            name?: string;
-            arguments?: string;
-          };
-        }>;
-      } | undefined;
-      const contentDelta = extractTextValue(delta?.content);
-      if (contentDelta) {
-        content += contentDelta;
-        options.onTextDelta?.(contentDelta);
-      }
+    const toolCalls: ToolCall[] = (message?.tool_calls ?? []).map((toolCall) => ({
+      id: toolCall.id ?? "",
+      name: toolCall.function?.name ?? "",
+      arguments: toolCall.function?.arguments ?? "",
+    }));
 
-      if (options.includeReasoning) {
-        const reasoningDelta = extractTextValue(
-          moonshotCompat ? (delta?.reasoning_content ?? delta?.reasoning) : delta?.reasoning,
-        );
-        if (reasoningDelta) {
-          reasoning += reasoningDelta;
-          options.onReasoningDelta?.(reasoningDelta);
-        }
-      }
+    const reasoning = options.includeReasoning
+      ? extractTextValue(moonshotCompat ? (message?.reasoning_content ?? message?.reasoning) : message?.reasoning).trim()
+      : "";
 
-      if (delta?.tool_calls) {
-        for (const tc of delta.tool_calls) {
-          const existing = toolCallMap.get(tc.index);
-          if (existing) {
-            existing.arguments += tc.function?.arguments ?? "";
-          } else {
-            toolCallMap.set(tc.index, {
-              id: tc.id ?? "",
-              name: tc.function?.name ?? "",
-              arguments: tc.function?.arguments ?? "",
-            });
-          }
-        }
-      }
+    return {
+      content: extractTextValue(message?.content).trim(),
+      toolCalls,
+      reasoning: reasoning || undefined,
+    };
+  } catch (error) {
+    if (!isRetryableNonStreamToolChatError(error)) {
+      throw error;
     }
 
-    const toolCalls: ToolCall[] = [...toolCallMap.values()];
-    return { content, toolCalls, reasoning: reasoning.trim() || undefined };
+    logNonStreamFallback("openai-chat-tools", model, error);
+    return streamChatWithToolsOpenAIChat(
+      client,
+      model,
+      openaiMessages,
+      openaiTools,
+      {
+        ...options,
+        onTextDelta: undefined,
+        onReasoningDelta: undefined,
+      },
+      abortSignal,
+      moonshotCompat,
+    );
   }
+}
 
-  const completion = await client.chat.completions.create({
+async function streamChatWithToolsOpenAIChat(
+  client: OpenAI,
+  model: string,
+  openaiMessages: ReadonlyArray<OpenAI.Chat.Completions.ChatCompletionMessageParam>,
+  openaiTools: ReadonlyArray<OpenAI.Chat.Completions.ChatCompletionTool>,
+  options: {
+    readonly temperature: number;
+    readonly maxTokens: number;
+    readonly includeReasoning: boolean;
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
+  },
+  abortSignal: AbortSignal | undefined,
+  moonshotCompat: boolean,
+): Promise<ChatWithToolsResult> {
+  const stream = await client.chat.completions.create({
     model,
     messages: openaiMessages,
     tools: openaiTools,
     temperature: options.temperature,
     max_tokens: options.maxTokens,
-    stream: false,
+    stream: true,
   }, { signal: abortSignal });
 
-  const message = completion.choices[0]?.message as {
-    content?: unknown;
-    reasoning?: unknown;
-    reasoning_content?: unknown;
-    tool_calls?: Array<{
-      id?: string;
-      function?: {
-        name?: string;
-        arguments?: string;
-      };
-    }>;
-  } | undefined;
+  let content = "";
+  let reasoning = "";
+  const toolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
 
-  const toolCalls: ToolCall[] = (message?.tool_calls ?? []).map((toolCall) => ({
-    id: toolCall.id ?? "",
-    name: toolCall.function?.name ?? "",
-    arguments: toolCall.function?.arguments ?? "",
-  }));
+  for await (const chunk of stream) {
+    const delta = chunk.choices[0]?.delta as {
+      content?: unknown;
+      reasoning?: unknown;
+      reasoning_content?: unknown;
+      tool_calls?: Array<{
+        index: number;
+        id?: string;
+        function?: {
+          name?: string;
+          arguments?: string;
+        };
+      }>;
+    } | undefined;
+    const contentDelta = extractTextValue(delta?.content);
+    if (contentDelta) {
+      content += contentDelta;
+      options.onTextDelta?.(contentDelta);
+    }
 
-  const reasoning = options.includeReasoning
-    ? extractTextValue(moonshotCompat ? (message?.reasoning_content ?? message?.reasoning) : message?.reasoning).trim()
-    : "";
+    if (options.includeReasoning) {
+      const reasoningDelta = extractTextValue(
+        moonshotCompat ? (delta?.reasoning_content ?? delta?.reasoning) : delta?.reasoning,
+      );
+      if (reasoningDelta) {
+        reasoning += reasoningDelta;
+        options.onReasoningDelta?.(reasoningDelta);
+      }
+    }
 
-  return {
-    content: extractTextValue(message?.content).trim(),
-    toolCalls,
-    reasoning: reasoning || undefined,
-  };
+    if (delta?.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        const existing = toolCallMap.get(tc.index);
+        if (existing) {
+          existing.arguments += tc.function?.arguments ?? "";
+        } else {
+          toolCallMap.set(tc.index, {
+            id: tc.id ?? "",
+            name: tc.function?.name ?? "",
+            arguments: tc.function?.arguments ?? "",
+          });
+        }
+      }
+    }
+  }
+
+  const toolCalls: ToolCall[] = [...toolCallMap.values()];
+  return { content, toolCalls, reasoning: reasoning.trim() || undefined };
 }
 
 function agentMessagesToOpenAIChat(
