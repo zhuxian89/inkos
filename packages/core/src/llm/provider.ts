@@ -1,10 +1,15 @@
 import OpenAI from "openai";
 import Anthropic from "@anthropic-ai/sdk";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import type { LLMConfig } from "../models/project.js";
 
 const DEFAULT_LLM_HEADERS = {
   "User-Agent": "curl/8.0",
 } as const;
+const NON_STREAM_TOOL_CHAT_FALLBACK_TTL_MS = 15 * 24 * 60 * 60 * 1000;
+const nonStreamToolChatFallbackCache = new Map<string, number>();
 
 function summarizeBaseUrl(value?: string): string | null {
   if (!value) return null;
@@ -214,6 +219,75 @@ function logNonStreamFallback(provider: "openai-chat-tools", model: string, erro
     model,
     error: error instanceof Error ? error.message : String(error),
   })}\n`);
+}
+
+function nonStreamToolChatFallbackCachePath(): string {
+  const configured = process.env.INKOS_NON_STREAM_TOOL_CHAT_CACHE_PATH?.trim();
+  return configured || join(tmpdir(), "inkos", "non-stream-tool-chat-fallback.json");
+}
+
+function readNonStreamToolChatFallbackCache(now = Date.now()): Map<string, number> {
+  const cache = new Map<string, number>();
+  try {
+    const raw = readFileSync(nonStreamToolChatFallbackCachePath(), "utf-8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value === "number" && Number.isFinite(value) && value > now) {
+        cache.set(key, value);
+      }
+    }
+  } catch {
+    // Ignore cache read failures and fall back to the in-memory state.
+  }
+  return cache;
+}
+
+function persistNonStreamToolChatFallbackCache(cache: ReadonlyMap<string, number>): void {
+  const path = nonStreamToolChatFallbackCachePath();
+  const payload = JSON.stringify(Object.fromEntries(cache), null, 2);
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+    writeFileSync(tempPath, payload, "utf-8");
+    renameSync(tempPath, path);
+  } catch {
+    // Ignore cache write failures and keep using the in-memory fallback.
+  }
+}
+
+function nonStreamToolChatFallbackKey(client: OpenAI, model: string): string {
+  return `${summarizeBaseUrl(client.baseURL) ?? "unknown"}::${model}`;
+}
+
+function shouldPreferStreamingToolChat(client: OpenAI, model: string): boolean {
+  const now = Date.now();
+  for (const [key, expiresAt] of readNonStreamToolChatFallbackCache(now)) {
+    nonStreamToolChatFallbackCache.set(key, expiresAt);
+  }
+  const key = nonStreamToolChatFallbackKey(client, model);
+  const expiresAt = nonStreamToolChatFallbackCache.get(key);
+  if (!expiresAt) return false;
+  if (expiresAt <= now) {
+    nonStreamToolChatFallbackCache.delete(key);
+    persistNonStreamToolChatFallbackCache(nonStreamToolChatFallbackCache);
+    return false;
+  }
+  return true;
+}
+
+function rememberStreamingToolChatFallback(client: OpenAI, model: string): void {
+  for (const [key, expiresAt] of readNonStreamToolChatFallbackCache()) {
+    nonStreamToolChatFallbackCache.set(key, expiresAt);
+  }
+  nonStreamToolChatFallbackCache.set(
+    nonStreamToolChatFallbackKey(client, model),
+    Date.now() + NON_STREAM_TOOL_CHAT_FALLBACK_TTL_MS,
+  );
+  persistNonStreamToolChatFallbackCache(nonStreamToolChatFallbackCache);
+}
+
+export function __resetNonStreamToolChatFallbackCacheForTests(): void {
+  nonStreamToolChatFallbackCache.clear();
 }
 
 // === Simple Chat (used by all agents via BaseAgent.chat()) ===
@@ -463,7 +537,7 @@ async function chatWithToolsOpenAIChat(
 
   const moonshotCompat = isMoonshotModel(model, client);
 
-  if (options.useStream) {
+  if (options.useStream || shouldPreferStreamingToolChat(client, model)) {
     return streamChatWithToolsOpenAIChat(
       client,
       model,
@@ -519,6 +593,7 @@ async function chatWithToolsOpenAIChat(
     }
 
     logNonStreamFallback("openai-chat-tools", model, error);
+    rememberStreamingToolChatFallback(client, model);
     return streamChatWithToolsOpenAIChat(
       client,
       model,
