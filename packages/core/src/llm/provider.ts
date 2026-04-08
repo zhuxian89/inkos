@@ -552,8 +552,8 @@ async function streamChatWithToolsOpenAIChat(
 ): Promise<ChatWithToolsResult> {
   const stream = await client.chat.completions.create({
     model,
-    messages: openaiMessages,
-    tools: openaiTools,
+    messages: [...openaiMessages],
+    tools: [...openaiTools],
     temperature: options.temperature,
     max_tokens: options.maxTokens,
     stream: true,
