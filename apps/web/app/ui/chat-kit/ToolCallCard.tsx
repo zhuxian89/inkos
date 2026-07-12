@@ -265,7 +265,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   );
 
   useEffect(() => {
-    if (defaultExpanded || !isRunningStatus(toolCall.status) || error) {
+    if (defaultExpanded || error) {
       setExpanded(true);
     }
   }, [defaultExpanded, error, toolCall.status]);
