@@ -1,0 +1,36 @@
+feature: 2026-07-12-ctx-tool-output-prune
+created: 2026-07-12
+
+steps:
+  - action: "计算节点：实现 pruneToolOutputs（ingest cap + 超阈值 stale prune）"
+    exit_signal: "单测 N1–N3、B1、E2 通过"
+    status: done
+  - action: "编排接线：runToolEnabledConversation 每轮 tool 后调用 prune"
+    exit_signal: "typecheck + E1 grep 命中"
+    status: done
+  - action: "可观测：*.chat.tool_prune 日志"
+    exit_signal: "接线处存在 logInfo tool_prune"
+    status: done
+  - action: "验收对照：核对 design 第 3 节"
+    exit_signal: "场景证据齐全"
+    status: done
+
+checks:
+  - item: "pruneToolOutputs 不删除 tool 消息只改 content"
+    source: 名词契约
+    status: passed
+  - item: "单条入库 ≤ maxToolResultChars"
+    source: 验收场景
+    status: passed
+  - item: "超 primary 阈值剪旧 tool"
+    source: 验收场景
+    status: passed
+  - item: "loopCompressDisabled 旁路"
+    source: 验收场景
+    status: passed
+  - item: "runToolEnabledConversation 接线"
+    source: 挂载点
+    status: passed
+  - item: "无 LLM summarize / 不改 compaction 算法"
+    source: 范围守护
+    status: passed

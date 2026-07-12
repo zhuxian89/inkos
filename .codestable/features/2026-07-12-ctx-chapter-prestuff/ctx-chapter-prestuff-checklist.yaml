@@ -1,0 +1,42 @@
+feature: 2026-07-12-ctx-chapter-prestuff
+created: 2026-07-12
+
+steps:
+  - action: "计算节点：实现 ChapterContextMaterials + buildChapterContextPrompt"
+    exit_signal: "单测 N1–N4、B1 通过"
+    status: done
+  - action: "编排接线：runChapterAssistant 条件读盘并调用 builder"
+    exit_signal: "typecheck 通过且 E1 grep 命中"
+    status: done
+  - action: "system 提示：补充未预塞正文须 read_text_file"
+    exit_signal: "system 文案可断言或 grep 命中"
+    status: done
+  - action: "可观测：chapter.chat.prestuff 日志"
+    exit_signal: "接线处存在 logInfo chapter.chat.prestuff"
+    status: done
+  - action: "验收对照：核对 design 第 3 节与反向核对项"
+    exit_signal: "场景证据齐全"
+    status: done
+
+checks:
+  - item: "buildChapterContextPrompt 按 prestuff 规则拼装"
+    source: 名词契约
+    status: done
+  - item: "默认不含当前章节正文与 longform 块"
+    source: 验收场景
+    status: done
+  - item: "默认含 path_map"
+    source: 验收场景
+    status: done
+  - item: "story_state 截断 maxChars"
+    source: 验收场景
+    status: done
+  - item: "runChapterAssistant 接线 resolveContextPolicy + builder"
+    source: 挂载点
+    status: done
+  - item: "不改 LoopCompressor / claim / profile-init / compaction 算法"
+    source: 范围守护
+    status: done
+  - item: "工具列表仍含 read/write_text_file"
+    source: 验收场景
+    status: done

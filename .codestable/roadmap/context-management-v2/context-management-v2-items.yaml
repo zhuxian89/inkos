@@ -1,0 +1,67 @@
+roadmap: context-management-v2
+created: 2026-07-12
+
+items:
+  - slug: ctx-policy-core
+    description: ContextPolicy 类型与 resolveContextPolicy，含 chapter 默认规则单测
+    depends_on: []
+    status: done
+    feature: 2026-07-12-ctx-policy-core
+    minimal_loop: false
+    notes: null
+
+  - slug: ctx-chapter-prestuff
+    description: 章节对话按 policy 组装 context，默认不预塞全文/长 story
+    depends_on: [ctx-policy-core]
+    status: done
+    feature: 2026-07-12-ctx-chapter-prestuff
+    minimal_loop: true
+    notes: 最小闭环——token 下降且仍可工具读改
+
+  - slug: ctx-write-claim-guard
+    description: toolTrace 记录 ok，声称修改与 fallback 仅认成功写入
+    depends_on: []
+    status: planned
+    feature: null
+    minimal_loop: false
+    notes: 可与 policy/prestuff 并行
+
+  - slug: ctx-tool-output-prune
+    description: tool loop 内按预算剪旧 tool 输出
+    depends_on: [ctx-policy-core]
+    status: done
+    feature: 2026-07-12-ctx-tool-output-prune
+    minimal_loop: false
+    notes: null
+
+  - slug: ctx-loop-summarizer
+    description: 双阈值 + 结构化摘要中间轮（Hermes 对齐）
+    depends_on: [ctx-tool-output-prune]
+    status: planned
+    feature: null
+    minimal_loop: false
+    notes: null
+
+  - slug: ctx-wire-chapter
+    description: 章节对话运行时接入压缩与写入完整性
+    depends_on: [ctx-chapter-prestuff, ctx-write-claim-guard, ctx-loop-summarizer]
+    status: planned
+    feature: null
+    minimal_loop: false
+    notes: 完整抗 504 + 假写入的汇合点
+
+  - slug: ctx-wire-other-chats
+    description: profile/init 复用同一套上下文策略
+    depends_on: [ctx-wire-chapter]
+    status: planned
+    feature: null
+    minimal_loop: false
+    notes: null
+
+  - slug: ctx-retire-legacy-compaction
+    description: 退役或降级旧 compaction.ts 主路径并统一 env
+    depends_on: [ctx-wire-chapter]
+    status: planned
+    feature: null
+    minimal_loop: false
+    notes: 建议 other-chats 后再退役；design 时可收紧依赖

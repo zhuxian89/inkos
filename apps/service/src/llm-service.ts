@@ -13,9 +13,24 @@ import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/p
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { compactConversationMessages } from "./compaction.js";
+import {
+  buildChapterContextPrompt,
+  capToolResultContent,
+  describeChapterPrestuff,
+  pruneToolOutputs,
+  resolveContextPolicy,
+  type ChatContextMode,
+  type ContextPolicy,
+  type PrestuffBlockId,
+} from "./context/index.js";
 import type { createBookService } from "./book-service.js";
 import { loadProjectConfig, resolveBookId } from "./runtime.js";
 import { describeError, logInfo, sanitizeForLog } from "./service-logging.js";
+
+function policyIncludes(policy: ContextPolicy, blockId: PrestuffBlockId): boolean {
+  const rule = policy.prestuff.find((item) => item.blockId === blockId);
+  return Boolean(rule?.defaultInclude && rule.maxChars > 0);
+}
 
 const PLATFORM_GUIDANCE: Record<string, string> = {
   tomato: "番茄：节奏要快，前三章要有钩子和反馈，强调强冲突、强反转、强情绪兑现。",
@@ -590,6 +605,7 @@ export function createLlmService(
       onTextDelta: options?.onTextDelta,
       onReasoningDelta: options?.onReasoningDelta,
       abortSignal: options?.abortSignal,
+      contextMode: "profile",
       logToolCall: (name, args) => {
         logInfo("llm_profiles.chat.tool", { profileId, tool: name, args: sanitizeForLog(args) as Record<string, unknown> });
       },
@@ -610,6 +626,7 @@ export function createLlmService(
       readonly logToolCall?: (name: string, args: Record<string, unknown>) => void;
       readonly tools?: ReadonlyArray<ToolDefinition>;
       readonly executeTool?: (name: string, args: Record<string, unknown>) => Promise<string>;
+      readonly contextMode?: ChatContextMode;
     },
   ): Promise<{
     readonly content: string;
@@ -618,6 +635,8 @@ export function createLlmService(
   }> {
     const tools = options?.tools ?? PROFILE_CHAT_TOOLS;
     const executeTool = options?.executeTool ?? executeProfileChatTool;
+    const contextMode = options?.contextMode ?? "chapter";
+    const policy = resolveContextPolicy(contextMode);
     const toolTrace: Array<{ readonly name: string; readonly args: Record<string, unknown> }> = [];
     const conversation: AgentMessage[] = messages.map((message) => ({
       role: message.role,
@@ -669,7 +688,21 @@ export function createLlmService(
         options?.logToolCall?.(toolCall.name, args);
         const toolResult = await executeTool(toolCall.name, args);
         throwIfAborted();
-        conversation.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
+        const capped = policy.loopCompressDisabled
+          ? toolResult
+          : capToolResultContent(toolResult, policy.budget.maxToolResultChars);
+        conversation.push({ role: "tool", toolCallId: toolCall.id, content: capped });
+      }
+
+      if (!policy.loopCompressDisabled) {
+        const pruned = pruneToolOutputs({ messages: conversation, policy });
+        conversation.splice(0, conversation.length, ...pruned.messages);
+        if (pruned.stats.prunedToolResults > 0 || pruned.stats.triggered !== "none") {
+          logInfo(`${contextMode}.chat.tool_prune`, {
+            mode: contextMode,
+            ...pruned.stats,
+          });
+        }
       }
 
       if (turn === maxTurns - 1) {
@@ -1312,6 +1345,7 @@ export function createLlmService(
       useStream: input.useStream,
       includeReasoning: input.includeReasoning,
       abortSignal: input.abortSignal,
+      contextMode: "init",
       logToolCall: (name, args) => {
         logInfo("init_assistant.chat.tool", { tool: name, args: sanitizeForLog(args) as Record<string, unknown> });
       },
@@ -1394,14 +1428,24 @@ export function createLlmService(
     const book = await state.loadBookConfig(input.bookId);
     const chapterMeta = (await state.loadChapterIndex(input.bookId)).find((item) => item.number === input.chapterNumber);
     const chapterFile = await bookService.findChapterFile(state.bookDir(input.bookId), input.chapterNumber, chapterMeta?.title);
-    const chapterRaw = await readFile(chapterFile, "utf-8");
-    const chapterContent = chapterRaw.split("\n").slice(2).join("\n").trim();
-    const authorBrief = await bookService.readAuthorBrief(input.bookId);
-    const currentState = await bookService.readStoryFile(input.bookId, "current_state.md");
-    const pendingHooks = await bookService.readStoryFile(input.bookId, "pending_hooks.md");
-    const chapterSummaries = await bookService.readStoryFile(input.bookId, "chapter_summaries.md");
     const bookDir = state.bookDir(input.bookId);
     const pathSnapshot = await hydrateChapterChatPathSnapshot(buildChapterChatPathSnapshot(input.bookId, bookDir));
+    const policy = resolveContextPolicy("chapter");
+    const authorBrief = await bookService.readAuthorBrief(input.bookId);
+    const currentState = policyIncludes(policy, "story_state")
+      ? await bookService.readStoryFile(input.bookId, "current_state.md")
+      : "";
+    let chapterContent = "";
+    if (policyIncludes(policy, "chapter_body")) {
+      const chapterRaw = await readFile(chapterFile, "utf-8");
+      chapterContent = chapterRaw.split("\n").slice(2).join("\n").trim();
+    }
+    const pendingHooks = policyIncludes(policy, "story_longform")
+      ? await bookService.readStoryFile(input.bookId, "pending_hooks.md")
+      : "";
+    const chapterSummaries = policyIncludes(policy, "story_longform")
+      ? await bookService.readStoryFile(input.bookId, "chapter_summaries.md")
+      : "";
     const dialogueModel = (config.modelOverrides?.dialogue ?? config.llm.model).trim();
     const llm = input.profileId?.trim()
       ? await createClientFromOptionalProfile(input.profileId)
@@ -1417,15 +1461,10 @@ export function createLlmService(
     });
 
     const pathReference = [
-      "## 当前工作路径（每轮对话均有效）",
+      "## 路径提示",
+      "详细路径与文件列表见首包「路径地图」；改文件前用 get_current_chapter_paths / read_text_file。",
       `- bookId：${input.bookId}`,
-      `- 书籍目录：${bookDir}`,
-      `- story 目录：${bookService.storyDirPath(input.bookId)}`,
       `- 当前章节文件：${chapterFile}`,
-      `- 作者简报：${bookService.authorBriefPath(input.bookId)}`,
-      `- 状态卡：${bookService.storyFilePath(input.bookId, "current_state.md")}`,
-      `- 伏笔池：${bookService.storyFilePath(input.bookId, "pending_hooks.md")}`,
-      `- 章节摘要：${bookService.storyFilePath(input.bookId, "chapter_summaries.md")}`,
     ].join("\n");
 
     const systemPrompt = [
@@ -1437,6 +1476,7 @@ export function createLlmService(
       "禁止凭经验猜测目录结构，禁止自行拼接路径，禁止把 books/<bookId>/ 这一层省略掉。",
       "如果没有先调用工具确认路径，就不要在回答中写任何具体文件路径或执行任何文件操作。",
       "如果任何文件工具返回 recoverable=true 的路径错误，你必须立刻重新调用 get_current_chapter_paths，然后只从返回的 chapterFiles / storyFiles 中选择真实存在的文件继续执行。禁止在报错后继续猜路径。",
+      "首包上下文可能未包含章节正文或长篇 story 文件；修改章节前必须先用 read_text_file 读取真实文件内容，禁止仅凭记忆或空谈声称已改。",
       "无论是否调用工具、无论是否已经完成文件修改，最后都必须输出一段面向用户的中文最终回复。",
       "如果你修改了文件，最终回复必须明确告诉用户你改了什么；如果你只读取了文件，也必须明确告诉用户你看了什么以及下一步建议。",
       "禁止只调用工具后直接结束，禁止把最终回复留空。",
@@ -1448,24 +1488,47 @@ export function createLlmService(
       pathReference,
     ].join("\n");
 
-    const contextPrompt = [
-      `书籍：${book.title}（${input.bookId}）`,
-      `题材：${book.genre}`,
-      `平台：${book.platform}`,
-      `章节：第${input.chapterNumber}章 ${chapterMeta?.title ?? ""}`.trim(),
-      chapterMeta?.status ? `当前状态：${chapterMeta.status}` : "",
+    const auditText = [
       chapterMeta?.auditIssues?.length ? `审计问题：\n- ${chapterMeta.auditIssues.join("\n- ")}` : "审计问题：（暂无）",
       formatChapterAuditDetails(chapterMeta),
-      authorBrief.trim() ? `长期创作约束（${bookService.authorBriefPath(input.bookId)}）：\n${authorBrief.trim()}` : "长期创作约束：（暂无）",
-      currentState.trim() ? `当前状态卡（${bookService.storyFilePath(input.bookId, "current_state.md")}）：\n${currentState.trim()}` : "",
-      pendingHooks.trim() ? `伏笔池（${bookService.storyFilePath(input.bookId, "pending_hooks.md")}）：\n${pendingHooks.trim().slice(-2500)}` : "",
-      chapterSummaries.trim() ? `章节摘要（${bookService.storyFilePath(input.bookId, "chapter_summaries.md")}）：\n${chapterSummaries.trim().slice(-3000)}` : "",
-      `已确认真实章节文件：\n- ${pathSnapshot.chapterFiles.join("\n- ")}`,
-      `已确认真实 story 文件：\n- ${pathSnapshot.storyFiles.join("\n- ")}`,
-      `当前章节正文：\n${chapterContent.slice(0, 12000)}`,
     ]
       .filter(Boolean)
-      .join("\n\n");
+      .join("\n");
+    const contextPrompt = buildChapterContextPrompt(policy, {
+      bookId: input.bookId,
+      bookTitle: book.title,
+      genre: book.genre,
+      platform: book.platform,
+      chapterNumber: input.chapterNumber,
+      chapterTitle: chapterMeta?.title ?? "",
+      status: chapterMeta?.status,
+      auditText,
+      bookDir,
+      chaptersDir: pathSnapshot.chaptersDir,
+      storyDir: pathSnapshot.storyDir,
+      chapterFile,
+      authorBriefPath: bookService.authorBriefPath(input.bookId),
+      authorBrief,
+      currentStatePath: bookService.storyFilePath(input.bookId, "current_state.md"),
+      currentState,
+      chapterFiles: pathSnapshot.chapterFiles,
+      storyFiles: pathSnapshot.storyFiles,
+      chapterContent,
+      pendingHooksPath: bookService.storyFilePath(input.bookId, "pending_hooks.md"),
+      pendingHooks,
+      chapterSummariesPath: bookService.storyFilePath(input.bookId, "chapter_summaries.md"),
+      chapterSummaries,
+    });
+    const prestuffDesc = describeChapterPrestuff(policy, {
+      authorBriefPresent: Boolean(authorBrief.trim()),
+    });
+    logInfo("chapter.chat.prestuff", {
+      bookId: input.bookId,
+      chapterNumber: input.chapterNumber,
+      includedBlocks: prestuffDesc.includedBlocks,
+      omittedBlocks: prestuffDesc.omittedBlocks,
+      contextChars: contextPrompt.length,
+    });
 
     const pathReminder = `[路径提醒] bookDir=${bookDir} | chapterFile=${chapterFile} | storyDir=${bookService.storyDirPath(input.bookId)}`;
 
@@ -1502,6 +1565,7 @@ export function createLlmService(
         useStream: input.useStream,
         includeReasoning: input.includeReasoning,
         abortSignal: input.abortSignal,
+        contextMode: "chapter",
         tools: CHAPTER_CHAT_TOOLS,
         executeTool: (name, args) => executeChapterChatTool(
           { bookId: input.bookId, chapterNumber: input.chapterNumber },

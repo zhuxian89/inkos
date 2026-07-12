@@ -1,0 +1,63 @@
+feature: 2026-07-12-ctx-policy-core
+created: 2026-07-12
+
+steps:
+  - action: "名词骨架：落地 ContextPolicy 相关类型与 chapter/profile/init 默认常量表"
+    exit_signal: "TypeScript 类型检查通过，默认常量可被单测 import"
+    status: done
+  - action: "计算节点：实现 resolveContextPolicy（env 覆盖 + ratio/数值校验回落）"
+    exit_signal: "chapter 默认硬约束单测全部通过"
+    status: done
+  - action: "边界节点：非法 env、ratio 颠倒、未知 mode 行为锁定"
+    exit_signal: "边界单测全部通过"
+    status: done
+  - action: "导出整理：context 模块 barrel 导出公开 API"
+    exit_signal: "service 内可从 context 入口 import resolveContextPolicy"
+    status: done
+  - action: "验收对照：核对 design 第 3 节场景均有测试或 grep 证据"
+    exit_signal: "N1–N3、B1–B2、E1–E2 均有可观察证据"
+    status: done
+
+checks:
+  - item: "ContextPolicy / ContextBudget / PrestuffRule / ChatContextMode 类型符合 roadmap §4.1"
+    source: 名词契约
+    status: passed
+  - item: "resolveContextPolicy(mode, env?) 返回不可变政策快照"
+    source: 名词契约
+    status: passed
+  - item: "chapter 默认含 path_map 必预塞、chapter_body/story_longform 不预塞"
+    source: 名词契约
+    status: passed
+  - item: "解析路径为纯函数，不插入 chat 主流程"
+    source: 编排骨架
+    status: passed
+  - item: "compressPrimaryRatio < compressSafetyRatio，否则回落默认对"
+    source: 流程级约束
+    status: passed
+  - item: "挂载 INKOS_CTX_* 与 INKOS_DISABLE_LOOP_COMPRESS（loopCompressDisabled）"
+    source: 挂载点
+    status: passed
+  - item: "不改 runChapterAssistant / runToolEnabledConversation / compaction.ts 接线"
+    source: 范围守护
+    status: passed
+  - item: "不删除 INKOS_COMPACTION_* 读取逻辑"
+    source: 范围守护
+    status: passed
+  - item: "N1 chapter 默认硬约束"
+    source: 验收场景
+    status: passed
+  - item: "N2 TOTAL_TOKENS env 覆盖"
+    source: 验收场景
+    status: passed
+  - item: "N3 ratio env 覆盖"
+    source: 验收场景
+    status: passed
+  - item: "B1 ratio 颠倒回落"
+    source: 验收场景
+    status: passed
+  - item: "B2 非法 TOTAL_TOKENS 回落"
+    source: 验收场景
+    status: passed
+  - item: "E2 生产路径未 import resolveContextPolicy"
+    source: 验收场景
+    status: passed
