@@ -275,7 +275,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       const db = context.llmService.openProfilesDb();
       try {
         const rows = db
-          .prepare("SELECT * FROM llm_profiles ORDER BY is_active DESC, updated_at DESC, created_at DESC")
+          .prepare("SELECT * FROM llm_profiles WHERE provider = 'openai' ORDER BY is_active DESC, updated_at DESC, created_at DESC")
           .all() as unknown as LlmProfileRow[];
         const profiles = rows.map((row) => context.llmService.mapProfileRow(row));
         const active = rows.find((row) => row.is_active === 1);
@@ -311,7 +311,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
   app.post("/api/llm-profiles/models", async (req, res) => {
     const schema = z.object({
       profileId: z.string().optional(),
-      provider: z.enum(["openai", "anthropic"]),
+      provider: z.literal("openai").default("openai"),
       baseUrl: z.string().url(),
       apiKey: z.string().trim().min(1).optional(),
     });
@@ -346,7 +346,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
     const schema = z.object({
       profileId: z.string().optional(),
       name: z.string().trim().min(1).optional(),
-      provider: z.enum(["openai", "anthropic"]),
+      provider: z.literal("openai").default("openai"),
       baseUrl: z.string().url(),
       apiKey: z.string().trim().min(1).optional(),
       model: z.string().trim().min(1),
@@ -394,7 +394,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
   app.post("/api/llm-profiles", async (req, res) => {
     const schema = z.object({
       name: z.string().trim().min(1),
-      provider: z.enum(["openai", "anthropic"]).default("openai"),
+      provider: z.literal("openai").default("openai"),
       baseUrl: z.string().url().default("https://api.openai.com/v1"),
       apiKey: z.string().trim().min(1).optional(),
       model: z.string().trim().min(1).default("gpt-4o"),
@@ -430,10 +430,10 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
             input.baseUrl,
             finalApiKey,
             input.model,
-            input.temperature ?? null,
-            input.maxTokens ?? null,
-            input.thinkingBudget ?? null,
-            input.apiFormat ?? null,
+            input.temperature ?? 0.7,
+            input.maxTokens ?? 16000,
+            input.thinkingBudget ?? 0,
+            input.apiFormat ?? "chat",
             now,
             now,
           );
@@ -471,7 +471,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
   app.put("/api/llm-profiles/:id", async (req, res) => {
     const schema = z.object({
       name: z.string().trim().min(1).optional(),
-      provider: z.enum(["openai", "anthropic"]).optional(),
+      provider: z.literal("openai").optional(),
       baseUrl: z.string().url().optional(),
       apiKey: z.string().trim().min(1).optional(),
       model: z.string().trim().min(1).optional(),
@@ -501,14 +501,14 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
           )
           .run(
             input.name ?? existing.name,
-            input.provider ?? existing.provider,
+            input.provider ?? "openai",
             input.baseUrl ?? existing.base_url,
             input.apiKey ?? existing.api_key,
             input.model ?? existing.model,
-            input.temperature ?? existing.temperature,
-            input.maxTokens ?? existing.max_tokens,
-            input.thinkingBudget ?? existing.thinking_budget,
-            input.apiFormat ?? existing.api_format,
+            input.temperature ?? existing.temperature ?? 0.7,
+            input.maxTokens ?? existing.max_tokens ?? 16000,
+            input.thinkingBudget ?? existing.thinking_budget ?? 0,
+            input.apiFormat ?? existing.api_format ?? "chat",
             now,
             profileId,
           );
@@ -609,6 +609,9 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       if (!profile) {
         throw new Error(`LLM profile not found: ${profileId}`);
       }
+      if (profile.provider !== "openai") {
+        throw new Error("Only openai-compatible LLM profiles are supported.");
+      }
       logInfo("llm_profiles.chat.start", {
         profileId,
         messageCount: normalizedMessages.length,
@@ -704,6 +707,9 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
 
       if (!profile) {
         throw new Error(`LLM profile not found: ${profileId}`);
+      }
+      if (profile.provider !== "openai") {
+        throw new Error("Only openai-compatible LLM profiles are supported.");
       }
 
       logInfo("llm_profiles.chat_stream.start", {
@@ -837,7 +843,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
   app.post("/api/project/init", async (req, res) => {
     const schema = z.object({
       name: z.string().min(1).optional(),
-      provider: z.enum(["openai", "anthropic"]).default("openai"),
+      provider: z.literal("openai").default("openai"),
       baseUrl: z.string().url().default("https://api.openai.com/v1"),
       apiKey: z.string().min(1).optional(),
       model: z.string().min(1).default("gpt-4o"),
@@ -902,10 +908,10 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         baseUrl: input.baseUrl,
         apiKey: finalApiKey,
         model: input.model,
-        temperature: input.temperature,
-        maxTokens: input.maxTokens,
-        thinkingBudget: input.thinkingBudget,
-        apiFormat: input.apiFormat,
+        temperature: input.temperature ?? 0.7,
+        maxTokens: input.maxTokens ?? 16000,
+        thinkingBudget: input.thinkingBudget ?? 0,
+        apiFormat: input.apiFormat ?? "chat",
       });
       await context.llmService.upsertActiveLlmProfileFromInit({
         name: input.name ?? basename(context.projectRoot),
@@ -913,10 +919,10 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         baseUrl: input.baseUrl,
         apiKey: finalApiKey,
         model: input.model,
-        temperature: input.temperature,
-        maxTokens: input.maxTokens,
-        thinkingBudget: input.thinkingBudget,
-        apiFormat: input.apiFormat,
+        temperature: input.temperature ?? 0.7,
+        maxTokens: input.maxTokens ?? 16000,
+        thinkingBudget: input.thinkingBudget ?? 0,
+        apiFormat: input.apiFormat ?? "chat",
       });
 
       logInfo("project.init.done", {

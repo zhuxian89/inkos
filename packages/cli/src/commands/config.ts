@@ -41,16 +41,19 @@ configCommand
 configCommand
   .command("set-global")
   .description("Set global LLM config (~/.inkos/.env), shared by all projects")
-  .requiredOption("--provider <provider>", "LLM provider (openai / anthropic)")
+  .requiredOption("--provider <provider>", "LLM provider (openai / compatible)")
   .requiredOption("--base-url <url>", "API base URL")
   .requiredOption("--api-key <key>", "API key")
   .requiredOption("--model <model>", "Model name")
   .option("--temperature <n>", "Temperature")
   .option("--max-tokens <n>", "Max output tokens")
-  .option("--thinking-budget <n>", "Anthropic thinking budget")
+  .option("--thinking-budget <n>", "Reasoning/thinking budget")
   .option("--api-format <format>", "API format (chat / responses)")
   .action(async (opts) => {
     try {
+      if (opts.provider !== "openai") {
+        throw new Error("Only openai-compatible providers are supported.");
+      }
       await mkdir(GLOBAL_CONFIG_DIR, { recursive: true });
 
       const lines = [

@@ -70,7 +70,7 @@ export const commandRegistry: ReadonlyArray<CommandDefinition> = [
     title: "Set Global LLM Config",
     description: "Write shared LLM credentials into ~/.inkos/.env for this runtime environment.",
     fields: [
-      { name: "provider", label: "Provider", type: "select", required: true, defaultValue: "openai", options: [{ label: "OpenAI / compatible", value: "openai" }, { label: "Anthropic", value: "anthropic" }] },
+      { name: "provider", label: "Provider", type: "select", required: true, defaultValue: "openai", options: [{ label: "OpenAI / compatible", value: "openai" }] },
       { name: "baseUrl", label: "Base URL", type: "text", required: true, defaultValue: "https://api.openai.com/v1" },
       { name: "apiKey", label: "API Key", type: "text", required: true },
       { name: "model", label: "Model", type: "text", required: true, defaultValue: "gpt-4o" },

@@ -13,7 +13,6 @@ import {
   InputNumber,
   Modal,
   Popconfirm,
-  Radio,
   Row,
   Select,
   Space,
@@ -51,7 +50,7 @@ const PROFILE_CHAT_PLATFORM_OPTIONS = [
 
 interface ProfileFormValues {
   readonly name: string;
-  readonly provider: "openai" | "anthropic";
+  readonly provider: "openai";
   readonly baseUrl: string;
   readonly apiKey?: string;
   readonly model: string;
@@ -94,7 +93,7 @@ interface CommandCatalogResponse {
 interface LlmProfile {
   readonly id: string;
   readonly name: string;
-  readonly provider: "openai" | "anthropic";
+  readonly provider: "openai";
   readonly baseUrl: string;
   readonly model: string;
   readonly temperature?: number;
@@ -247,40 +246,25 @@ export function SetupWorkspace() {
     return {
       profileId: editingProfile?.id,
       name: values.name,
-      provider: values.provider,
+      provider: "openai",
       baseUrl: values.baseUrl,
       model: values.model,
       apiKey: values.apiKey?.trim() || undefined,
-      temperature: values.temperature,
-      maxTokens: values.maxTokens,
-      thinkingBudget: values.thinkingBudget,
-      apiFormat: values.apiFormat,
+      temperature: values.temperature ?? 0.7,
+      maxTokens: values.maxTokens ?? 16000,
+      thinkingBudget: values.thinkingBudget ?? 0,
+      apiFormat: values.apiFormat ?? "chat",
     };
   }
 
-  function profileProviderDefaultBaseUrl(provider: ProfileFormValues["provider"]): string {
-    return provider === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1";
-  }
-
-  function normalizeProfileProvider(provider?: string): ProfileFormValues["provider"] {
-    return provider === "anthropic" ? "anthropic" : "openai";
-  }
-
-  function handleProfileProviderChange(provider: ProfileFormValues["provider"]): void {
-    const currentBaseUrl = String(profileForm.getFieldValue("baseUrl") ?? "");
-    const defaultUrls = new Set(["", "https://api.openai.com/v1", "https://api.anthropic.com"]);
-    if (defaultUrls.has(currentBaseUrl)) {
-      profileForm.setFieldValue("baseUrl", profileProviderDefaultBaseUrl(provider));
-    }
-    if (provider === "anthropic" && profileForm.getFieldValue("apiFormat") === "responses") {
-      profileForm.setFieldValue("apiFormat", "chat");
-    }
+  function profileProviderDefaultBaseUrl(): string {
+    return "https://api.openai.com/v1";
   }
 
   async function loadProfileModelsFromDraft(): Promise<void> {
     if (profileModelsLoading) return;
     try {
-      const values = await profileForm.validateFields(["provider", "baseUrl", "apiKey"]);
+      const values = await profileForm.validateFields(["baseUrl", "apiKey"]);
       setProfileModelsLoading(true);
       const response = await fetch("/api/inkos/llm-profiles/models", {
         method: "POST",
@@ -308,7 +292,15 @@ export function SetupWorkspace() {
   async function testDraftProfile(): Promise<void> {
     if (profileDraftTesting) return;
     try {
-      const values = await profileForm.validateFields();
+      const values = await profileForm.validateFields([
+        "baseUrl",
+        "apiKey",
+        "model",
+        "apiFormat",
+        "temperature",
+        "maxTokens",
+        "thinkingBudget",
+      ]);
       setProfileDraftTesting(true);
       setProfileDraftTestResult(null);
       const response = await fetch("/api/inkos/llm-profiles/test-config", {
@@ -321,7 +313,7 @@ export function SetupWorkspace() {
       if (!response.ok || !data?.ok) {
         throw new Error(data?.error ?? "模型文本测试失败");
       }
-      void message.success("模型文本测试通过");
+      void message.success("模型配置测试完成");
     } catch (error: unknown) {
       void message.error(error instanceof Error ? error.message : String(error));
     } finally {
@@ -361,11 +353,10 @@ export function SetupWorkspace() {
     setEditingProfile(null);
     setProfileDraftTestResult(null);
     setProfileModelOptions(knownProfileModels(activeProfile?.model));
-    const provider = normalizeProfileProvider(activeProfile?.provider ?? summary?.globalLlm?.provider ?? summary?.config?.llm?.provider);
     profileForm.setFieldsValue({
       name: "",
-      provider,
-      baseUrl: activeProfile?.baseUrl ?? summary?.globalLlm?.baseUrl ?? summary?.config?.llm?.baseUrl ?? profileProviderDefaultBaseUrl(provider),
+      provider: "openai",
+      baseUrl: activeProfile?.baseUrl ?? summary?.globalLlm?.baseUrl ?? summary?.config?.llm?.baseUrl ?? profileProviderDefaultBaseUrl(),
       model: activeProfile?.model ?? summary?.globalLlm?.model ?? summary?.config?.llm?.model ?? "gpt-4o",
       apiKey: "",
       temperature: activeProfile?.temperature ?? 0.7,
@@ -382,7 +373,7 @@ export function SetupWorkspace() {
     setProfileModelOptions(knownProfileModels(profile.model));
     profileForm.setFieldsValue({
       name: profile.name,
-      provider: profile.provider,
+      provider: "openai",
       baseUrl: profile.baseUrl,
       model: profile.model,
       apiKey: "",
@@ -404,14 +395,14 @@ export function SetupWorkspace() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         name: values.name,
-        provider: values.provider,
+        provider: "openai",
         baseUrl: values.baseUrl,
         model: values.model,
         apiKey: values.apiKey?.trim() || undefined,
-        temperature: values.temperature,
-        maxTokens: values.maxTokens,
-        thinkingBudget: values.thinkingBudget,
-        apiFormat: values.apiFormat,
+        temperature: values.temperature ?? 0.7,
+        maxTokens: values.maxTokens ?? 16000,
+        thinkingBudget: values.thinkingBudget ?? 0,
+        apiFormat: values.apiFormat ?? "chat",
         activate: false,
       }),
     })
@@ -715,7 +706,7 @@ export function SetupWorkspace() {
             loading={profileLoading}
             options={profiles.map((profile) => ({
               value: profile.id,
-              label: `${profile.name} · ${profile.provider}/${profile.model}`,
+              label: `${profile.name} · ${profile.model}`,
             }))}
             onChange={(value) => activateProfile(String(value))}
             style={{ width: "100%" }}
@@ -727,7 +718,7 @@ export function SetupWorkspace() {
                   <Space direction="vertical" size={10} style={{ width: "100%" }}>
                     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <Typography.Text strong>{record.name}</Typography.Text>
-                      <Typography.Text type="secondary" style={{ wordBreak: "break-all" }}>{`${record.provider}/${record.model}`}</Typography.Text>
+                      <Typography.Text type="secondary" style={{ wordBreak: "break-all" }}>{record.model}</Typography.Text>
                     </div>
                     <div>
                       {record.isActive ? <Tag color="green">已激活</Tag> : <Tag>未激活</Tag>}
@@ -762,7 +753,7 @@ export function SetupWorkspace() {
               dataSource={[...profiles]}
               columns={[
                 { title: "名称", dataIndex: "name", key: "name" },
-                { title: "模型", key: "model", render: (_v, r) => `${r.provider}/${r.model}` },
+                { title: "模型", key: "model", render: (_v, r) => r.model },
                 {
                   title: "状态",
                   key: "status",
@@ -904,17 +895,6 @@ export function SetupWorkspace() {
           <Form.Item label="配置名称" name="name" rules={[{ required: true, message: "请输入配置名称" }]}>
             <Input placeholder="例如：OpenAI-主力" />
           </Form.Item>
-          <Form.Item label="服务商" name="provider" rules={[{ required: true }]}>
-            <Radio.Group
-              options={[
-                { label: "openai", value: "openai" },
-                { label: "anthropic", value: "anthropic" },
-              ]}
-              optionType="button"
-              buttonStyle="solid"
-              onChange={(event) => handleProfileProviderChange(event.target.value)}
-            />
-          </Form.Item>
           <Form.Item label="Base URL（接口地址）" name="baseUrl" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
@@ -1002,7 +982,7 @@ export function SetupWorkspace() {
         width={isMobile ? "94vw" : CHAT_MODAL_WIDTH}
         style={{ top: 20 }}
         styles={{ body: { paddingTop: 12, height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
-        destroyOnClose
+        destroyOnHidden
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>
           <Card bodyStyle={{ padding: 16 }}>

@@ -9,7 +9,9 @@ import {
   type ToolDefinition,
 } from "@actalk/inkos-core";
 import { randomUUID } from "node:crypto";
+import { lookup } from "node:dns/promises";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
+import { isIP } from "node:net";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -90,7 +92,7 @@ export interface LlmProfilePayload {
 }
 
 export interface LlmProfileConnectionInput {
-  readonly provider: "openai" | "anthropic";
+  readonly provider: "openai";
   readonly baseUrl: string;
   readonly apiKey: string;
 }
@@ -233,6 +235,12 @@ export function createLlmService(
     };
   }
 
+  function assertOpenAiProfile(profile: LlmProfileRow): void {
+    if (profile.provider !== "openai") {
+      throw new Error("Only openai-compatible LLM profiles are supported.");
+    }
+  }
+
   function redactUrl(value: string): string {
     try {
       const url = new URL(value);
@@ -244,9 +252,6 @@ export function createLlmService(
 
   function modelsEndpoint(input: LlmProfileConnectionInput): string {
     const trimmed = input.baseUrl.replace(/\/+$/, "");
-    if (input.provider === "anthropic") {
-      return `${trimmed.replace(/\/v1$/, "")}/v1/models`;
-    }
     return `${trimmed}/models`;
   }
 
@@ -259,21 +264,16 @@ export function createLlmService(
   }
 
   async function listLlmModels(input: LlmProfileConnectionInput): Promise<{
-    readonly provider: "openai" | "anthropic";
+    readonly provider: "openai";
     readonly baseUrl: string;
     readonly models: ReadonlyArray<string>;
     readonly count: number;
   }> {
     const response = await fetch(modelsEndpoint(input), {
       method: "GET",
-      headers: input.provider === "anthropic"
-        ? {
-            "x-api-key": input.apiKey,
-            "anthropic-version": "2023-06-01",
-          }
-        : {
-            Authorization: `Bearer ${input.apiKey}`,
-          },
+      headers: {
+        Authorization: `Bearer ${input.apiKey}`,
+      },
     });
     const rawText = await response.text();
     const parsed = safeParseJson(rawText);
@@ -394,19 +394,13 @@ export function createLlmService(
           includeReasoning: true,
         });
         const reasoning = response.reasoning?.trim() ?? "";
-        const anthropicThinkingAccepted = payload.provider === "anthropic" && thinkingBudget > 0;
         return {
-          ok: Boolean(reasoning) || anthropicThinkingAccepted,
+          ok: Boolean(reasoning),
           accepted: true,
           reasoningReturned: Boolean(reasoning),
           ...(reasoning ? { reasoningPreview: reasoning.slice(0, 300) } : {}),
           responsePreview: response.content.trim().slice(0, 200),
-          ...(!reasoning && anthropicThinkingAccepted
-            ? { note: "Anthropic thinking 参数已被服务端接受；当前适配层不回传 raw thinking 文本。" }
-            : {}),
-          ...(!reasoning && !anthropicThinkingAccepted
-            ? { note: "请求成功，但没有返回 reasoning/thinking 字段。" }
-            : {}),
+          ...(!reasoning ? { note: "请求成功，但没有返回 reasoning/thinking 字段。" } : {}),
         };
       } catch (error) {
         return {
@@ -457,6 +451,7 @@ export function createLlmService(
       if (!profile) {
         throw new Error(`LLM profile not found: ${profileId}`);
       }
+      assertOpenAiProfile(profile);
 
       db.exec("UPDATE llm_profiles SET is_active = 0");
       db.prepare("UPDATE llm_profiles SET is_active = 1, updated_at = ? WHERE id = ?").run(Date.now(), profileId);
@@ -488,6 +483,7 @@ export function createLlmService(
     if (!profile) {
       throw new Error(`LLM profile not found: ${profileId}`);
     }
+    assertOpenAiProfile(profile);
 
     const payload = profileRowToPayload(profile);
     const result = await testLlmProfileConfig(payload);
@@ -528,6 +524,7 @@ export function createLlmService(
     if (!profile) {
       throw new Error(`LLM profile not found: ${profileId}`);
     }
+    assertOpenAiProfile(profile);
 
     const payload = profileRowToPayload(profile);
     return {
@@ -572,6 +569,7 @@ export function createLlmService(
       `- 项目配置文件：${join(inkosProjectRoot, "inkos.json")}`,
       "书籍目录下包含书籍配置、story 长期记忆文件、chapters 章节文件等内容。",
       "如需处理本地文件：先用 search_text_files 或 list_directory 定位，再用 read_text_file 读取真实文件；需要修改时再用 write_text_file 写回。",
+      "如需读取公开 HTTP(S) 页面或 API，可以调用 curl 工具；它只支持安全的 GET/HEAD 公网请求，不执行 shell 命令。",
       "当问题与小说生产、题材、平台、写作流程、审计流程、项目文件路径有关时，可以结合这些背景信息提高回答相关性。",
       "最终回复必须使用规范 GitHub-Flavored Markdown；如果展示书籍列表、章节列表、对比数据等表格信息，必须输出带管道和分隔行的标准 Markdown 表格，例如 `| # | 书名 | 状态 | 章节数 |` 和 `|---|---|---|---|`，禁止用空格或制表符伪装表格。",
       "",
@@ -688,6 +686,25 @@ export function createLlmService(
         required: ["profileId"],
       },
     },
+    {
+      name: "curl",
+      description: "安全地读取公网 HTTP(S) URL，类似受限 curl。只支持 GET/HEAD，不访问 localhost/内网，不执行 shell 命令。",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "要请求的公网 http/https URL" },
+          method: { type: "string", enum: ["GET", "HEAD"], description: "请求方法，默认 GET" },
+          headers: {
+            type: "object",
+            description: "可选请求头。Authorization/Cookie 等敏感头会被拒绝。",
+            additionalProperties: { type: "string" },
+          },
+          maxBytes: { type: "number", description: "最多读取多少字节，默认 120000，最大 250000" },
+          timeoutMs: { type: "number", description: "超时时间，默认 10000，最大 20000" },
+        },
+        required: ["url"],
+      },
+    },
   ];
 
   const PROFILE_TEXT_EXTENSIONS = new Set([
@@ -740,6 +757,222 @@ export function createLlmService(
     }, null, 2);
   }
 
+  function isPrivateIpv4(address: string): boolean {
+    const parts = address.split(".").map((part) => Number(part));
+    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true;
+    const [a, b, c] = parts as [number, number, number, number];
+    return a === 0
+      || a === 10
+      || a === 127
+      || (a === 100 && b >= 64 && b <= 127)
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 0)
+      || (a === 192 && b === 168)
+      || (a === 198 && (b === 18 || b === 19))
+      || (a === 198 && b === 51 && c === 100)
+      || (a === 203 && b === 0 && c === 113)
+      || a >= 224;
+  }
+
+  function isPrivateIpv6(address: string): boolean {
+    const normalized = address.toLowerCase();
+    return normalized === "::1"
+      || normalized === "::"
+      || normalized.startsWith("fc")
+      || normalized.startsWith("fd")
+      || normalized.startsWith("fe80:")
+      || /^fe[89ab][0-9a-f]:/.test(normalized)
+      || normalized.startsWith("::ffff:")
+      || normalized.startsWith("::ffff:127.")
+      || normalized.startsWith("::ffff:10.")
+      || normalized.startsWith("::ffff:192.168.")
+      || normalized.startsWith("::ffff:169.254.")
+      || /^::ffff:172\.(1[6-9]|2\d|3[0-1])\./.test(normalized)
+      || /^::ffff:100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(normalized);
+  }
+
+  async function validatePublicHttpUrl(rawUrl: string): Promise<URL> {
+    const url = new URL(rawUrl);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      throw new Error("curl only supports http/https URLs");
+    }
+    if (url.username || url.password) {
+      throw new Error("curl URL must not contain username or password");
+    }
+    const rawHostname = url.hostname.toLowerCase();
+    const hostname = rawHostname.startsWith("[") && rawHostname.endsWith("]")
+      ? rawHostname.slice(1, -1)
+      : rawHostname;
+    if (
+      hostname === "localhost"
+      || hostname === "0.0.0.0"
+      || hostname.endsWith(".localhost")
+      || hostname.endsWith(".local")
+    ) {
+      throw new Error("curl refuses localhost/private hosts");
+    }
+    const addresses = isIP(hostname) ? [{ address: hostname }] : await lookup(hostname, { all: true });
+    for (const item of addresses) {
+      if ((isIP(item.address) === 4 && isPrivateIpv4(item.address)) || (isIP(item.address) === 6 && isPrivateIpv6(item.address))) {
+        throw new Error(`curl refuses private network address: ${item.address}`);
+      }
+    }
+    return url;
+  }
+
+  function sanitizeCurlHeaders(input: unknown): Record<string, string> {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+    const denied = new Set([
+      "authorization",
+      "connection",
+      "content-length",
+      "cookie",
+      "host",
+      "proxy-authorization",
+      "transfer-encoding",
+      "x-api-key",
+    ]);
+    const result: Record<string, string> = {};
+    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+      const normalized = key.trim().toLowerCase();
+      if (!normalized || denied.has(normalized)) {
+        throw new Error(`curl header is not allowed: ${key}`);
+      }
+      if (typeof value !== "string") continue;
+      result[key.trim()] = value.slice(0, 500);
+    }
+    return result;
+  }
+
+  async function readLimitedResponseText(response: Response, maxBytes: number): Promise<{
+    readonly body: string;
+    readonly truncated: boolean;
+  }> {
+    const reader = response.body?.getReader();
+    if (!reader) {
+      const text = await response.text();
+      return {
+        body: text.slice(0, maxBytes),
+        truncated: text.length > maxBytes,
+      };
+    }
+
+    const chunks: Uint8Array[] = [];
+    let received = 0;
+    let truncated = false;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        const remaining = maxBytes - received;
+        if (remaining <= 0) {
+          truncated = true;
+          await reader.cancel();
+          break;
+        }
+        if (value.byteLength > remaining) {
+          chunks.push(value.slice(0, remaining));
+          received += remaining;
+          truncated = true;
+          await reader.cancel();
+          break;
+        }
+        chunks.push(value);
+        received += value.byteLength;
+        if (received >= maxBytes) {
+          truncated = true;
+          await reader.cancel();
+          break;
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const buffer = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+      buffer.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return { body: new TextDecoder().decode(buffer), truncated };
+  }
+
+  async function fetchSafeCurlResponse(input: {
+    readonly url: URL;
+    readonly method: string;
+    readonly headers: Record<string, string>;
+    readonly timeoutMs: number;
+  }): Promise<{
+    readonly response: Response;
+    readonly finalUrl: URL;
+    readonly redirects: ReadonlyArray<string>;
+  }> {
+    let currentUrl = input.url;
+    const redirects: string[] = [];
+    for (let index = 0; index <= 5; index += 1) {
+      const response = await fetch(currentUrl, {
+        method: input.method,
+        headers: input.headers,
+        redirect: "manual",
+        signal: AbortSignal.timeout(input.timeoutMs),
+      });
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (location) {
+          if (index >= 5) {
+            await response.body?.cancel();
+            throw new Error("curl redirect limit exceeded");
+          }
+          await response.body?.cancel();
+          currentUrl = await validatePublicHttpUrl(new URL(location, currentUrl).toString());
+          redirects.push(currentUrl.toString());
+          continue;
+        }
+      }
+      return { response, finalUrl: currentUrl, redirects };
+    }
+    throw new Error("curl redirect limit exceeded");
+  }
+
+  async function executeSafeCurl(args: Record<string, unknown>): Promise<string> {
+    const url = await validatePublicHttpUrl(String(args.url ?? ""));
+    const method = String(args.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+      throw new Error("curl only supports GET and HEAD");
+    }
+    const maxBytesRaw = Number(args.maxBytes ?? 120000);
+    const maxBytes = Math.min(Math.max(Number.isFinite(maxBytesRaw) ? Math.trunc(maxBytesRaw) : 120000, 1), 250000);
+    const timeoutRaw = Number(args.timeoutMs ?? 10000);
+    const timeoutMs = Math.min(Math.max(Number.isFinite(timeoutRaw) ? Math.trunc(timeoutRaw) : 10000, 1000), 20000);
+    const { response, finalUrl, redirects } = await fetchSafeCurlResponse({
+      url,
+      method,
+      headers: sanitizeCurlHeaders(args.headers),
+      timeoutMs,
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    const { body, truncated } = method === "HEAD"
+      ? { body: "", truncated: false }
+      : await readLimitedResponseText(response, maxBytes);
+    return profileToolOk({
+      url: finalUrl.toString(),
+      originalUrl: url.toString(),
+      redirects,
+      method,
+      status: response.status,
+      statusText: response.statusText,
+      headers: {
+        contentType,
+        contentLength: response.headers.get("content-length"),
+      },
+      truncated,
+      body,
+    });
+  }
+
   function isProfileTextPath(filePath: string): boolean {
     const extension = extname(filePath).toLowerCase();
     return PROFILE_TEXT_EXTENSIONS.has(extension) || basename(filePath) === ".env";
@@ -766,6 +999,7 @@ export function createLlmService(
   function profileToolKind(name: string): string {
     if (name === "read_text_file" || name === "list_directory" || name === "list_books" || name === "list_llm_profiles") return "read";
     if (name === "search_text_files") return "search";
+    if (name === "curl") return "fetch";
     if (name === "write_text_file" || name === "make_directory") return "edit";
     if (name === "move_path") return "move";
     if (name === "delete_path") return "delete";
@@ -803,8 +1037,9 @@ export function createLlmService(
   }): ProfileToolCall {
     const payload = parseProfileToolPayload(input.result);
     const primaryPath = toolPrimaryPath(input.name, input.args, payload);
+    const url = optionalString(input.args.url) ?? optionalString(payload?.url);
     const query = optionalString(input.args.query) ?? optionalString(payload?.query);
-    const title = primaryPath ?? query ?? input.name;
+    const title = primaryPath ?? url ?? query ?? input.name;
     const locations: Array<{ path: string; line?: number }> = [];
     const content: ProfileToolContentItem[] = [];
 
@@ -835,6 +1070,9 @@ export function createLlmService(
       if (lines.length > 0) {
         content.push({ type: "text", text: lines.join("\n") });
       }
+    } else if (input.name === "curl" && input.result && input.status !== "running") {
+      const body = optionalString(payload?.body) ?? input.result;
+      content.push({ type: "text", text: body });
     } else if (input.result && input.status !== "running") {
       content.push({ type: "text", text: input.result });
       if (primaryPath) locations.push({ path: primaryPath });
@@ -1045,7 +1283,7 @@ export function createLlmService(
       case "list_llm_profiles": {
         const db = openProfilesDb();
         try {
-          const rows = db.prepare("SELECT * FROM llm_profiles ORDER BY is_active DESC, updated_at DESC").all() as unknown as LlmProfileRow[];
+          const rows = db.prepare("SELECT * FROM llm_profiles WHERE provider = 'openai' ORDER BY is_active DESC, updated_at DESC").all() as unknown as LlmProfileRow[];
           return profileToolOk({ profiles: rows.map((row) => mapProfileRow(row)) });
         } finally {
           db.close();
@@ -1056,6 +1294,10 @@ export function createLlmService(
         const profileId = String(args.profileId ?? "");
         const profile = await activateLlmProfile(profileId);
         return profileToolOk({ profile });
+      }
+
+      case "curl": {
+        return await executeSafeCurl(args);
       }
 
       default:
@@ -1493,10 +1735,10 @@ export function createLlmService(
             payload.baseUrl,
             payload.apiKey,
             payload.model,
-            payload.temperature ?? null,
-            payload.maxTokens ?? null,
-            payload.thinkingBudget ?? null,
-            payload.apiFormat ?? null,
+            payload.temperature ?? 0.7,
+            payload.maxTokens ?? 16000,
+            payload.thinkingBudget ?? 0,
+            payload.apiFormat ?? "chat",
             now,
             active.id,
           );
@@ -1516,10 +1758,10 @@ export function createLlmService(
           payload.baseUrl,
           payload.apiKey,
           payload.model,
-          payload.temperature ?? null,
-          payload.maxTokens ?? null,
-          payload.thinkingBudget ?? null,
-          payload.apiFormat ?? null,
+          payload.temperature ?? 0.7,
+          payload.maxTokens ?? 16000,
+          payload.thinkingBudget ?? 0,
+          payload.apiFormat ?? "chat",
           now,
           now,
         );

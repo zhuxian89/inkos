@@ -70,7 +70,7 @@ export const initCommand = new Command("init")
           [
             "# LLM Configuration",
             "# Tip: Run 'inkos config set-global' to set once for all projects.",
-            "# Provider: openai (OpenAI / compatible proxy), anthropic (Anthropic native)",
+            "# Provider: openai (OpenAI / compatible proxy)",
             "INKOS_LLM_PROVIDER=openai",
             "INKOS_LLM_BASE_URL=https://api.openai.com/v1",
             "INKOS_LLM_API_KEY=your-api-key-here",
@@ -79,13 +79,8 @@ export const initCommand = new Command("init")
             "# Optional parameters (defaults shown):",
             "# INKOS_LLM_TEMPERATURE=0.7",
             "# INKOS_LLM_MAX_TOKENS=16000",
-            "# INKOS_LLM_THINKING_BUDGET=0          # Anthropic extended thinking budget",
+            "# INKOS_LLM_THINKING_BUDGET=0          # Reasoning/thinking budget",
             "# INKOS_LLM_API_FORMAT=chat             # chat (default) or responses (OpenAI Responses API)",
-            "",
-            "# Anthropic example:",
-            "# INKOS_LLM_PROVIDER=anthropic",
-            "# INKOS_LLM_BASE_URL=https://api.anthropic.com",
-            "# INKOS_LLM_MODEL=claude-sonnet-4-5-20250514",
           ].join("\n"),
           "utf-8",
         );

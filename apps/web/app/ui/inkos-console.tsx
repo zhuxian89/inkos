@@ -108,7 +108,7 @@ interface ProjectInitResult {
 
 interface ProjectInitValues {
   readonly name: string;
-  readonly provider: string;
+  readonly provider: "openai";
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;
@@ -357,7 +357,7 @@ export function InkosConsole() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           name: values.name || undefined,
-          provider: values.provider,
+          provider: "openai",
           baseUrl: values.baseUrl,
           apiKey: values.apiKey,
           model: values.model,
@@ -609,7 +609,7 @@ export function InkosConsole() {
                     <Form layout="vertical" form={projectInitForm} onFinish={submitProjectInit}>
                       <Form.Item label="项目名称" name="name"><Input /></Form.Item>
                       <Form.Item label="服务商" name="provider" rules={[{ required: true }]}>
-                        <Select options={[{ value: "openai", label: "openai" }, { value: "anthropic", label: "anthropic" }]} />
+                        <Select options={[{ value: "openai", label: "OpenAI / compatible" }]} />
                       </Form.Item>
                       <Form.Item label="Base URL（接口地址）" name="baseUrl" rules={[{ required: true }]}><Input /></Form.Item>
                       <Form.Item label="API Key（密钥）" name="apiKey" rules={[{ required: true }]}><Input.Password /></Form.Item>
