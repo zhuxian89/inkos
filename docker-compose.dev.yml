@@ -21,7 +21,8 @@ services:
     ports:
       - "4010:4010"
     command: >-
-      bash -lc "corepack enable &&
+      bash -lc "export CI=true &&
+      corepack enable && corepack prepare pnpm@10.33.0 --activate &&
       pnpm install --frozen-lockfile &&
       pnpm --filter @actalk/inkos-core build &&
       pnpm --filter @actalk/inkos-service dev"
@@ -44,7 +45,8 @@ services:
     ports:
       - "13006:3000"
     command: >-
-      bash -lc "corepack enable &&
+      bash -lc "export CI=true &&
+      corepack enable && corepack prepare pnpm@10.33.0 --activate &&
       pnpm install --frozen-lockfile &&
       pnpm --filter @actalk/inkos-web dev"
     restart: unless-stopped
