@@ -368,7 +368,9 @@ export async function chatWithTools(
     temperature: options?.temperature ?? client.defaults.temperature,
     maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
     useStream: options?.useStream ?? true,
-    includeReasoning: options?.includeReasoning ?? false,
+    includeReasoning: options?.includeReasoning === true,
+    onTextDelta: options?.onTextDelta,
+    onReasoningDelta: options?.onReasoningDelta,
   };
   logLLMDiagnostic("llm.request.start", {
     kind: "chat_with_tools",
@@ -535,8 +537,6 @@ async function chatWithToolsOpenAIChat(
     },
   }));
 
-  const moonshotCompat = isMoonshotModel(model, client);
-
   if (options.useStream || shouldPreferStreamingToolChat(client, model)) {
     return streamChatWithToolsOpenAIChat(
       client,
@@ -545,7 +545,6 @@ async function chatWithToolsOpenAIChat(
       openaiTools,
       options,
       abortSignal,
-      moonshotCompat,
     );
   }
 
@@ -579,7 +578,7 @@ async function chatWithToolsOpenAIChat(
     }));
 
     const reasoning = options.includeReasoning
-      ? extractTextValue(moonshotCompat ? (message?.reasoning_content ?? message?.reasoning) : message?.reasoning).trim()
+      ? extractTextValue(message?.reasoning_content ?? message?.reasoning).trim()
       : "";
 
     return {
@@ -605,7 +604,6 @@ async function chatWithToolsOpenAIChat(
         onReasoningDelta: undefined,
       },
       abortSignal,
-      moonshotCompat,
     );
   }
 }
@@ -623,7 +621,6 @@ async function streamChatWithToolsOpenAIChat(
     readonly onReasoningDelta?: (delta: string) => void;
   },
   abortSignal: AbortSignal | undefined,
-  moonshotCompat: boolean,
 ): Promise<ChatWithToolsResult> {
   const stream = await client.chat.completions.create({
     model,
@@ -659,9 +656,7 @@ async function streamChatWithToolsOpenAIChat(
     }
 
     if (options.includeReasoning) {
-      const reasoningDelta = extractTextValue(
-        moonshotCompat ? (delta?.reasoning_content ?? delta?.reasoning) : delta?.reasoning,
-      );
+      const reasoningDelta = extractTextValue(delta?.reasoning_content ?? delta?.reasoning);
       if (reasoningDelta) {
         reasoning += reasoningDelta;
         options.onReasoningDelta?.(reasoningDelta);

@@ -207,7 +207,7 @@ export function SetupWorkspace() {
         genre: typeof parsed.genre === "string" ? parsed.genre : undefined,
         platform: typeof parsed.platform === "string" ? parsed.platform : undefined,
         useStream: parsed.useStream !== false,
-        includeReasoning: parsed.includeReasoning === true,
+        includeReasoning: parsed.includeReasoning !== false,
       };
     } catch {
       return null;
