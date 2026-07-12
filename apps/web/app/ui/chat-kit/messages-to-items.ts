@@ -28,13 +28,15 @@ export function messagesToChatKitItems(
     readonly role: "user" | "assistant";
     readonly content: string;
     readonly reasoning?: string;
+    readonly id?: string;
     readonly items?: ReadonlyArray<ChatKitItem>;
   }>,
 ): ChatKitItem[] {
   const items: ChatKitItem[] = [];
   messages.forEach((message, index) => {
+    const baseId = message.id ?? String(index);
     if (message.role === "user") {
-      items.push({ kind: "user", id: `hist-user-${index}`, content: message.content });
+      items.push({ kind: "user", id: `hist-user-${baseId}`, content: message.content });
       return;
     }
     if (message.items?.length) {
@@ -45,12 +47,12 @@ export function messagesToChatKitItems(
       return;
     }
     if (message.reasoning?.trim()) {
-      items.push({ kind: "thought", id: `hist-thought-${index}`, content: message.reasoning });
+      items.push({ kind: "thought", id: `hist-thought-${baseId}`, content: message.reasoning });
     }
     if (message.content?.trim()) {
       items.push({
         kind: "assistant_text",
-        id: `hist-asst-${index}`,
+        id: `hist-asst-${baseId}`,
         content: message.content,
         streaming: false,
       });

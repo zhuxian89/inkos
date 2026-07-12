@@ -1,0 +1,36 @@
+feature: 2026-07-12-chat-kit-framework
+created: 2026-07-12
+
+steps:
+  - action: "静态框架：扩展 ChatKitPanel props，保持 profile 调用兼容"
+    exit_signal: "profile ChatKitPanel 调用无需改动，旧 ChatPanel 所需壳层 props 可透传"
+    status: done
+  - action: "Adapter 收敛：ChatPanel 委托 ChatKitPanel"
+    exit_signal: "旧 ChatPanel 调用点无需批量改 import，实际渲染走 ChatKitPanel"
+    status: done
+  - action: "消息转换：补稳定 id 支持"
+    exit_signal: "messagesToChatKitItems 接受旧消息 id 并生成稳定 ChatKit item id"
+    status: done
+  - action: "静态检查与提交"
+    exit_signal: "TypeScript 语法/类型检查通过，提交并 push"
+    status: done
+
+checks:
+  - item: "章节对话使用 ChatKit 气泡/Markdown/ThinkingBlock 样式"
+    source: 验收场景
+    status: pending
+  - item: "书籍智能初始化对话使用 ChatKit 气泡/Markdown/ThinkingBlock 样式"
+    source: 验收场景
+    status: pending
+  - item: "创建书籍智能初始化对话使用 ChatKit 气泡/Markdown/ThinkingBlock 样式"
+    source: 验收场景
+    status: pending
+  - item: "profile chat 现有 ChatKit 行为不退化"
+    source: 验收场景
+    status: pending
+  - item: "不新增 chapter/init SSE 路由"
+    source: 范围守护
+    status: pending
+  - item: "chapter/init API payload 不新增 stream event 字段"
+    source: 范围守护
+    status: pending

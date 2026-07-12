@@ -1,6 +1,6 @@
 "use client";
 
-import { Button, Input, Space } from "antd";
+import { Button, Input, Space, Typography } from "antd";
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useRef } from "react";
 import { ChatKitMarkdown } from "./ChatKitMarkdown";
@@ -23,11 +23,17 @@ export function ChatKitPanel(props: Readonly<{
   readonly emptyText?: string;
   readonly topBar?: ReactNode;
   readonly footerLeft?: ReactNode;
+  readonly footerRight?: ReactNode;
+  readonly minHeight?: number | string;
   readonly maxHeight?: number | string;
+  readonly inputMinRows?: number;
+  readonly inputMaxRows?: number;
+  readonly sendText?: string;
   readonly containerStyle?: CSSProperties;
 }>) {
   const bodyRef = useRef<HTMLDivElement | null>(null);
   const maxHeight = props.maxHeight ?? 460;
+  const minHeight = props.minHeight ?? 200;
 
   useEffect(() => {
     if (!bodyRef.current) return;
@@ -41,7 +47,7 @@ export function ChatKitPanel(props: Readonly<{
         ref={bodyRef}
         style={{
           flex: 1,
-          minHeight: 200,
+          minHeight,
           maxHeight,
           overflowY: "auto",
           padding: 12,
@@ -117,7 +123,7 @@ export function ChatKitPanel(props: Readonly<{
           value={props.value}
           onChange={(e) => props.onChange(e.target.value)}
           placeholder={props.placeholder ?? "输入消息，测试该模型…"}
-          autoSize={{ minRows: 2, maxRows: 6 }}
+          autoSize={{ minRows: props.inputMinRows ?? 2, maxRows: props.inputMaxRows ?? 6 }}
           onPressEnter={(e) => {
             if (!e.shiftKey) {
               e.preventDefault();
@@ -126,11 +132,17 @@ export function ChatKitPanel(props: Readonly<{
           }}
           disabled={props.sending}
         />
-        <Space style={{ justifyContent: "flex-end", width: "100%" }}>
-          <Button type="primary" onClick={props.onSend} loading={props.sending} disabled={!props.value.trim()}>
-            发送
-          </Button>
-        </Space>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, width: "100%", flexWrap: "wrap" }}>
+          <div style={{ minWidth: 0, flex: "1 1 240px" }}>
+            {props.footerLeft ? null : <Typography.Text type="secondary">回车发送，Shift+回车换行。</Typography.Text>}
+          </div>
+          <Space style={{ justifyContent: "flex-end", flexShrink: 0 }}>
+            {props.footerRight}
+            <Button type="primary" onClick={props.onSend} loading={props.sending} disabled={!props.value.trim()}>
+              {props.sendText ?? "发送"}
+            </Button>
+          </Space>
+        </div>
       </div>
       <style>{`@keyframes inkos-chat-pulse{0%,100%{opacity:0.35}50%{opacity:1}}`}</style>
     </div>
