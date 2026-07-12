@@ -1,5 +1,7 @@
 // ---------------------------------------------------------------------------
-// Conversation message compaction — unified token budget control
+// Conversation helpers — estimateTokens / extractStructuredSummary still used.
+// compactConversationMessages is LEGACY: chat runtimes use maybeCompressConversation
+// in the tool loop. Prefer INKOS_CTX_* / INKOS_DISABLE_LOOP_COMPRESS over INKOS_COMPACTION_*.
 // ---------------------------------------------------------------------------
 
 export interface CompactionConfig {

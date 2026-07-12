@@ -1,0 +1,10 @@
+feature: 2026-07-12-ctx-wire-other-chats
+created: 2026-07-12
+steps:
+  - action: "核对 profile/init contextMode 与无进模前 compact"
+    exit_signal: "grep 通过"
+    status: done
+checks:
+  - item: "profile/init 共用 compress+claim"
+    source: 挂载点
+    status: passed

@@ -12,16 +12,19 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { compactConversationMessages } from "./compaction.js";
 import {
   buildChapterContextPrompt,
-  capToolResultContent,
+  buildHonestChapterFallback,
   describeChapterPrestuff,
-  pruneToolOutputs,
+  finalizeAssistantReply,
+  maybeCompressConversation,
+  parseToolResultError,
+  parseToolResultOk,
   resolveContextPolicy,
   type ChatContextMode,
   type ContextPolicy,
   type PrestuffBlockId,
+  type ToolTraceItem,
 } from "./context/index.js";
 import type { createBookService } from "./book-service.js";
 import { loadProjectConfig, resolveBookId } from "./runtime.js";
@@ -588,17 +591,7 @@ export function createLlmService(
     readonly reasoning?: string;
     readonly toolTrace: ReadonlyArray<{ readonly name: string; readonly args: Record<string, unknown> }>;
   }> {
-    const compacted = compactConversationMessages(messages, { mode: "profile" });
-    logInfo("llm_profiles.chat.compaction", {
-      profileId,
-      model,
-      originalEstimate: compacted.stats.originalTokenEstimate,
-      compactedEstimate: compacted.stats.compactedTokenEstimate,
-      compressionTriggered: compacted.stats.compressionTriggered,
-      summaryLength: compacted.stats.summaryLength,
-    });
-
-    return runToolEnabledConversation(client, model, compacted.messages, {
+    return runToolEnabledConversation(client, model, messages, {
       maxTurns: 8,
       useStream: options?.useStream,
       includeReasoning: options?.includeReasoning,
@@ -631,13 +624,13 @@ export function createLlmService(
   ): Promise<{
     readonly content: string;
     readonly reasoning?: string;
-    readonly toolTrace: ReadonlyArray<{ readonly name: string; readonly args: Record<string, unknown> }>;
+    readonly toolTrace: ReadonlyArray<ToolTraceItem>;
   }> {
     const tools = options?.tools ?? PROFILE_CHAT_TOOLS;
     const executeTool = options?.executeTool ?? executeProfileChatTool;
     const contextMode = options?.contextMode ?? "chapter";
     const policy = resolveContextPolicy(contextMode);
-    const toolTrace: Array<{ readonly name: string; readonly args: Record<string, unknown> }> = [];
+    const toolTrace: ToolTraceItem[] = [];
     const conversation: AgentMessage[] = messages.map((message) => ({
       role: message.role,
       content: message.content,
@@ -684,23 +677,38 @@ export function createLlmService(
       for (const toolCall of result.toolCalls) {
         throwIfAborted();
         const args = parseToolArguments(toolCall.arguments);
-        toolTrace.push({ name: toolCall.name, args });
         options?.logToolCall?.(toolCall.name, args);
         const toolResult = await executeTool(toolCall.name, args);
         throwIfAborted();
-        const capped = policy.loopCompressDisabled
-          ? toolResult
-          : capToolResultContent(toolResult, policy.budget.maxToolResultChars);
-        conversation.push({ role: "tool", toolCallId: toolCall.id, content: capped });
+        const ok = parseToolResultOk(toolResult);
+        const error = ok ? undefined : parseToolResultError(toolResult);
+        toolTrace.push({ name: toolCall.name, args, ok, ...(error ? { error } : {}) });
+        conversation.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
       }
 
       if (!policy.loopCompressDisabled) {
-        const pruned = pruneToolOutputs({ messages: conversation, policy });
-        conversation.splice(0, conversation.length, ...pruned.messages);
-        if (pruned.stats.prunedToolResults > 0 || pruned.stats.triggered !== "none") {
-          logInfo(`${contextMode}.chat.tool_prune`, {
+        const compressed = await maybeCompressConversation({
+          messages: conversation,
+          policy,
+          summarizeMiddle: async (middlePlaintext) => {
+            const response = await chatCompletion(client, model, [
+              {
+                role: "system",
+                content: [
+                  "你是对话压缩器。根据中间轮次材料输出结构化中文摘要，保留：已确认设定、关键改动、未决问题、硬约束、关键路径。",
+                  "不要续写小说，不要调用工具，不要道歉。",
+                ].join(""),
+              },
+              { role: "user", content: middlePlaintext.slice(0, 20000) },
+            ], { maxTokens: 1200, temperature: 0.2, abortSignal: options?.abortSignal });
+            return response.content.trim();
+          },
+        });
+        conversation.splice(0, conversation.length, ...compressed.messages);
+        if (compressed.stats.triggered !== "none" || compressed.stats.summaryUpdated) {
+          logInfo(`${contextMode}.chat.compress`, {
             mode: contextMode,
-            ...pruned.stats,
+            ...compressed.stats,
           });
         }
       }
@@ -710,27 +718,11 @@ export function createLlmService(
       }
     }
 
-    const writeTools = new Set(["write_text_file", "move_path", "delete_path"]);
-    const hasWriteToolCall = toolTrace.some((item) => writeTools.has(item.name));
-    const claimMarkers = ["修改了", "已改", "写入了", "更新了", "删除了", "添加了", "创建了", "移动了", "重命名", "已写入", "写回", "改好了", "已经修改"];
-    const replyClaimsModification = claimMarkers.some((marker) => lastAssistantMessage.includes(marker));
-
-    const warnings: string[] = [];
-    if (reachedMaxTurns) {
-      warnings.push("⚠️ 本轮对话工具调用轮次已达上限，部分操作可能未完成。如有遗漏，请再发一条消息继续。");
-    }
-    if (replyClaimsModification && !hasWriteToolCall) {
-      warnings.push("⚠️ 注意：本轮回复提到了文件修改，但实际未执行任何文件写入操作。如需真正修改文件，请明确要求我执行写入。");
-    }
-    if (hasWriteToolCall) {
-      const writeOps = toolTrace.filter((item) => writeTools.has(item.name));
-      const summary = writeOps.map((op) => `- \`${op.name}\`：${String(op.args.path ?? op.args.from ?? "")}`).join("\n");
-      warnings.push(`\n---\n📋 **工具执行记录**\n${summary}`);
-    }
-
-    if (warnings.length > 0) {
-      lastAssistantMessage = `${lastAssistantMessage}\n\n${warnings.join("\n\n")}`;
-    }
+    lastAssistantMessage = finalizeAssistantReply({
+      reply: lastAssistantMessage,
+      toolTrace,
+      reachedMaxTurns,
+    });
 
     return { content: lastAssistantMessage, reasoning: lastAssistantReasoning || undefined, toolTrace };
   }
@@ -1329,18 +1321,8 @@ export function createLlmService(
       { role: "user", content: metaPrompt },
       ...userMessages,
     ];
-    const compacted = compactConversationMessages(messages, { mode: "init" });
-    logInfo("init_assistant.chat.compaction", {
-      bookId: input.bookId ?? null,
-      profileId: llm.profileId ?? null,
-      model: llm.model,
-      originalEstimate: compacted.stats.originalTokenEstimate,
-      compactedEstimate: compacted.stats.compactedTokenEstimate,
-      compressionTriggered: compacted.stats.compressionTriggered,
-      summaryLength: compacted.stats.summaryLength,
-    });
 
-    const response = await runToolEnabledConversation(llm.client, llm.model, compacted.messages, {
+    const response = await runToolEnabledConversation(llm.client, llm.model, messages, {
       maxTurns: 8,
       useStream: input.useStream,
       includeReasoning: input.includeReasoning,
@@ -1401,17 +1383,8 @@ export function createLlmService(
     return config;
   }
 
-  function buildChapterChatFallbackReply(toolTrace: ReadonlyArray<{ readonly name: string; readonly args: Record<string, unknown> }>): string {
-    if (toolTrace.some((item) => item.name === "write_text_file")) {
-      return "已按你的要求完成修改，并写回相关文件。你可以继续让我解释改动点，或再提具体调整要求。";
-    }
-    if (toolTrace.some((item) => item.name === "read_text_file")) {
-      return "我已经查看了相关章节/状态文件。本次没有直接输出正文答复，你可以继续告诉我要改哪里。";
-    }
-    if (toolTrace.length > 0) {
-      return "我已经完成本次处理，但没有生成可展示的正文回复。你可以继续补充更具体的修改要求。";
-    }
-    return "我收到了这次请求，但没有生成可展示的回复。你可以换一种更具体的说法再试一次。";
+  function buildChapterChatFallbackReply(toolTrace: ReadonlyArray<ToolTraceItem>): string {
+    return buildHonestChapterFallback(toolTrace);
   }
 
   async function runChapterAssistant(input: {
@@ -1544,22 +1517,11 @@ export function createLlmService(
       { role: "user", content: contextPrompt },
       ...userMessages,
     ];
-    const compacted = compactConversationMessages(messages, { mode: "chapter" });
-    logInfo("chapter.chat.compaction", {
-      bookId: input.bookId,
-      chapterNumber: input.chapterNumber,
-      profileId: input.profileId ?? null,
-      model: llm.model,
-      originalEstimate: compacted.stats.originalTokenEstimate,
-      compactedEstimate: compacted.stats.compactedTokenEstimate,
-      compressionTriggered: compacted.stats.compressionTriggered,
-      summaryLength: compacted.stats.summaryLength,
-    });
 
     const response = await runToolEnabledConversation(
       llm.client,
       llm.model,
-      compacted.messages,
+      messages,
       {
         maxTurns: 8,
         useStream: input.useStream,

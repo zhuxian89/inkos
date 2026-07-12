@@ -1,0 +1,10 @@
+feature: 2026-07-12-ctx-wire-chapter
+created: 2026-07-12
+steps:
+  - action: "核对 chapter 接线完整性"
+    exit_signal: "grep 三项均命中"
+    status: done
+checks:
+  - item: "contextMode chapter + compress + claim"
+    source: 挂载点
+    status: passed

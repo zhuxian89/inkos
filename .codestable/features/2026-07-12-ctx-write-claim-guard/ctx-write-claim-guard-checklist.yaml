@@ -1,0 +1,30 @@
+feature: 2026-07-12-ctx-write-claim-guard
+created: 2026-07-12
+
+steps:
+  - action: "计算节点：write-integrity（parse/finalize/fallback）+ 单测"
+    exit_signal: "N1–N3、B1 单测通过"
+    status: done
+  - action: "编排接线：runToolEnabledConversation + chapter fallback"
+    exit_signal: "typecheck 通过"
+    status: done
+  - action: "验收对照：核对 design 第 3 节"
+    exit_signal: "场景证据齐全"
+    status: done
+
+checks:
+  - item: "toolTrace 含 ok，写成功才进执行记录"
+    source: 名词契约
+    status: passed
+  - item: "假声称追加警告"
+    source: 验收场景
+    status: passed
+  - item: "诚实 fallback"
+    source: 验收场景
+    status: passed
+  - item: "runToolEnabledConversation 接线"
+    source: 挂载点
+    status: passed
+  - item: "无 summarize / 不改 provider"
+    source: 范围守护
+    status: passed

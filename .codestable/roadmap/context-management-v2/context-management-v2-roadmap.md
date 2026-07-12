@@ -1,7 +1,7 @@
 ---
 doc_type: roadmap
 slug: context-management-v2
-status: active
+status: completed
 created: 2026-07-12
 last_reviewed: 2026-07-12
 tags: [context, agent, compaction, chapter-chat, hermes]
@@ -227,8 +227,8 @@ function finalizeAssistantReply(input: {
 3. **ctx-write-claim-guard** — toolTrace 带 ok；fallback/警告/执行记录只认成功写
    - 所属模块：WriteIntegrity
    - 依赖：无（可与 1–2 并行）
-   - 状态：planned
-   - 对应 feature：未启动
+   - 状态：done
+   - 对应 feature：`2026-07-12-ctx-write-claim-guard`
 
 4. **ctx-tool-output-prune** — loop 内按 budget 剪旧 tool 输出
    - 所属模块：LoopCompressor
@@ -239,26 +239,26 @@ function finalizeAssistantReply(input: {
 5. **ctx-loop-summarizer** — 主/安全双阈值 + 结构化摘要（Hermes 对齐）
    - 所属模块：LoopCompressor
    - 依赖：`ctx-tool-output-prune`
-   - 状态：planned
-   - 对应 feature：未启动
+   - 状态：done
+   - 对应 feature：`2026-07-12-ctx-loop-summarizer`
 
 6. **ctx-wire-chapter** — 章节 `runToolEnabledConversation` 接上 prune/summarizer + WriteIntegrity
    - 所属模块：ChatRuntimeBridge
    - 依赖：`ctx-chapter-prestuff`, `ctx-write-claim-guard`, `ctx-loop-summarizer`
-   - 状态：planned
-   - 对应 feature：未启动
+   - 状态：done
+   - 对应 feature：`2026-07-12-ctx-wire-chapter`
 
 7. **ctx-wire-other-chats** — profile / init 复用同一套 policy+compress
    - 所属模块：ChatRuntimeBridge
    - 依赖：`ctx-wire-chapter`
-   - 状态：planned
-   - 对应 feature：未启动
+   - 状态：done
+   - 对应 feature：`2026-07-12-ctx-wire-other-chats`
 
 8. **ctx-retire-legacy-compaction** — 旧 `compaction.ts` 进模前主路径退役或降为兼容层，文档与 env 对齐
    - 所属模块：ChatRuntimeBridge
    - 依赖：`ctx-wire-chapter`（建议 `ctx-wire-other-chats` 后做，也可仅 chapter 退役——design 时确认）
-   - 状态：planned
-   - 对应 feature：未启动
+   - 状态：done
+   - 对应 feature：`2026-07-12-ctx-retire-legacy-compaction`
 
 **最小闭环**：第 2 条 `ctx-chapter-prestuff` 做完即可演示「少预塞仍可工具改章」；完整抗 504 + 假写入要到第 6 条。
 

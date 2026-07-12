@@ -1,0 +1,13 @@
+feature: 2026-07-12-ctx-retire-legacy-compaction
+created: 2026-07-12
+steps:
+  - action: "移除三入口进模前 compact 调用"
+    exit_signal: "llm-service 无 compactConversationMessages"
+    status: done
+checks:
+  - item: "进模前主路径已退役"
+    source: 挂载点
+    status: passed
+  - item: "estimateTokens 仍可用"
+    source: 范围守护
+    status: passed

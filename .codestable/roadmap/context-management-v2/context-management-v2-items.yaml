@@ -21,8 +21,8 @@ items:
   - slug: ctx-write-claim-guard
     description: toolTrace 记录 ok，声称修改与 fallback 仅认成功写入
     depends_on: []
-    status: planned
-    feature: null
+    status: done
+    feature: 2026-07-12-ctx-write-claim-guard
     minimal_loop: false
     notes: 可与 policy/prestuff 并行
 
@@ -37,31 +37,31 @@ items:
   - slug: ctx-loop-summarizer
     description: 双阈值 + 结构化摘要中间轮（Hermes 对齐）
     depends_on: [ctx-tool-output-prune]
-    status: planned
-    feature: null
+    status: done
+    feature: 2026-07-12-ctx-loop-summarizer
     minimal_loop: false
     notes: null
 
   - slug: ctx-wire-chapter
     description: 章节对话运行时接入压缩与写入完整性
     depends_on: [ctx-chapter-prestuff, ctx-write-claim-guard, ctx-loop-summarizer]
-    status: planned
-    feature: null
+    status: done
+    feature: 2026-07-12-ctx-wire-chapter
     minimal_loop: false
     notes: 完整抗 504 + 假写入的汇合点
 
   - slug: ctx-wire-other-chats
     description: profile/init 复用同一套上下文策略
     depends_on: [ctx-wire-chapter]
-    status: planned
-    feature: null
+    status: done
+    feature: 2026-07-12-ctx-wire-other-chats
     minimal_loop: false
     notes: null
 
   - slug: ctx-retire-legacy-compaction
     description: 退役或降级旧 compaction.ts 主路径并统一 env
     depends_on: [ctx-wire-chapter]
-    status: planned
-    feature: null
+    status: done
+    feature: 2026-07-12-ctx-retire-legacy-compaction
     minimal_loop: false
     notes: 建议 other-chats 后再退役；design 时可收紧依赖

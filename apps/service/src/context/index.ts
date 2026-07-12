@@ -31,3 +31,20 @@ export {
   type PruneInput,
   type PruneResult,
 } from "./prune-tool-outputs.js";
+
+export {
+  WRITE_TOOL_NAMES,
+  buildHonestChapterFallback,
+  finalizeAssistantReply,
+  hasSuccessfulWrite,
+  parseToolResultError,
+  parseToolResultOk,
+  replyClaimsModification,
+  type ToolTraceItem,
+} from "./write-integrity.js";
+
+export {
+  maybeCompressConversation,
+  type CompressInput,
+  type CompressResult,
+} from "./maybe-compress-conversation.js";

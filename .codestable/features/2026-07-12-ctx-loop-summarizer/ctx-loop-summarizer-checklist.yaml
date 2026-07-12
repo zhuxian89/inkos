@@ -1,0 +1,30 @@
+feature: 2026-07-12-ctx-loop-summarizer
+created: 2026-07-12
+
+steps:
+  - action: "计算节点：maybeCompressConversation + 单测"
+    exit_signal: "N1–N3、B1 通过"
+    status: done
+  - action: "编排接线：替换纯 prune 调用并注入 summarize"
+    exit_signal: "typecheck 通过"
+    status: done
+  - action: "验收对照"
+    exit_signal: "第 3 节证据齐"
+    status: done
+
+checks:
+  - item: "超 primary 折叠 middle 为摘要"
+    source: 验收场景
+    status: passed
+  - item: "disabled 旁路"
+    source: 验收场景
+    status: passed
+  - item: "摘要失败本地兜底"
+    source: 验收场景
+    status: passed
+  - item: "runToolEnabledConversation 接线"
+    source: 挂载点
+    status: passed
+  - item: "不退役 compaction / 不改 claim"
+    source: 范围守护
+    status: passed

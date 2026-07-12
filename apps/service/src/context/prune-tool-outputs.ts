@@ -13,6 +13,8 @@ const TRUNCATE_PREFIX = (originalChars: number): string =>
 export interface PruneInput {
   readonly messages: ReadonlyArray<AgentMessage>;
   readonly policy: ContextPolicy;
+  /** ingest = cap only; primary = cap + primary stale; full = include safety stale. */
+  readonly phase?: "ingest" | "primary" | "full";
 }
 
 export interface PruneResult {
@@ -158,8 +160,9 @@ export function pruneToolOutputs(input: PruneInput): PruneResult {
 
   const afterCapTokens = totalMessageTokens(working);
   let triggered: "none" | "prune" | "safety" = prunedToolResults > 0 ? "prune" : "none";
+  const phase = input.phase ?? "full";
 
-  if (afterCapTokens < primaryThreshold) {
+  if (phase === "ingest" || afterCapTokens < primaryThreshold) {
     return {
       messages: working,
       stats: {
@@ -171,7 +174,7 @@ export function pruneToolOutputs(input: PruneInput): PruneResult {
     };
   }
 
-  const isSafety = afterCapTokens >= safetyThreshold;
+  const isSafety = phase === "full" && afterCapTokens >= safetyThreshold;
   triggered = isSafety ? "safety" : "prune";
   const staleTarget = isSafety
     ? Math.min(policy.budget.staleToolResultChars, 120)
