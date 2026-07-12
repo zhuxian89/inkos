@@ -401,13 +401,16 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
 
   app.post("/api/llm-profiles/:id/chat-stream", async (req, res) => {
     let streamOpened = false;
+    let streamFinished = false;
     const abortController = new AbortController();
-    const onClientClose = (): void => {
-      if (!abortController.signal.aborted) {
+    const abortClientStream = (): void => {
+      if (!streamFinished && !abortController.signal.aborted) {
         abortController.abort();
       }
     };
-    req.on("close", onClientClose);
+    // `req.close` can fire after the POST body is read; only abort on true request abort or SSE response close.
+    req.on("aborted", abortClientStream);
+    res.on("close", abortClientStream);
     const paramsSchema = z.object({
       id: z.string().min(1),
     });
@@ -526,6 +529,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         toolCalls: result.toolTrace.length,
       });
       sendEvent({ type: "done" });
+      streamFinished = true;
 
       logInfo("llm_profiles.chat_stream.done", {
         profileId,
@@ -542,15 +546,18 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       const message = describeError(error);
       if (streamOpened) {
         sendEvent({ type: "error", ok: false, error: message });
+        streamFinished = true;
         logError("llm_profiles.chat_stream.error", { profileId: req.params.id, error: message });
       } else {
+        streamFinished = true;
         logError("llm_profiles.chat_stream.error", { profileId: req.params.id, error: message });
         res.status(400).json({ ok: false, error: message });
         return;
       }
     } finally {
-      req.off("close", onClientClose);
-      if (streamOpened && !res.writableEnded) {
+      req.off("aborted", abortClientStream);
+      res.off("close", abortClientStream);
+      if (streamOpened && !res.writableEnded && !res.destroyed) {
         res.end();
       }
     }

@@ -109,6 +109,7 @@ interface ProfileChatMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly reasoning?: string;
+  readonly items?: ReadonlyArray<ChatKitItem>;
 }
 
 interface StoredProfileChatSession {
@@ -382,7 +383,7 @@ export function SetupWorkspace() {
     response: Response,
     baseMessages: ReadonlyArray<ProfileChatMessage>,
     options?: { readonly signal?: AbortSignal; readonly onFrame?: (items: ChatKitItem[]) => void },
-  ): Promise<{ content: string; reasoning?: string }> {
+  ): Promise<{ content: string; reasoning?: string; items: ReadonlyArray<ChatKitItem> }> {
     if (!response.body) {
       throw new Error("流式响应不可用");
     }
@@ -456,7 +457,16 @@ export function SetupWorkspace() {
     return {
       content: turnState.content,
       reasoning: turnState.reasoning || undefined,
+      items: turnState.items,
     };
+  }
+
+  function profileModelMessages(messages: ReadonlyArray<ProfileChatMessage>): ReadonlyArray<Pick<ProfileChatMessage, "role" | "content" | "reasoning">> {
+    return messages.map((item) => ({
+      role: item.role,
+      content: item.content,
+      ...(item.reasoning ? { reasoning: item.reasoning } : {}),
+    }));
   }
 
   function abortProfileChatStream(): void {
@@ -498,7 +508,7 @@ export function SetupWorkspace() {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            messages: nextMessages,
+            messages: profileModelMessages(nextMessages),
             genre: chatOptionsSnapshot.genre,
             platform: chatOptionsSnapshot.platform,
           }),
@@ -534,6 +544,7 @@ export function SetupWorkspace() {
             reasoning: typeof streamed.reasoning === "string" && streamed.reasoning.trim()
               ? streamed.reasoning
               : undefined,
+            items: streamed.items,
           },
         ];
         setProfileChatMessages(updated);

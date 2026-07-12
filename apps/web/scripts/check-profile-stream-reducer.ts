@@ -6,6 +6,7 @@ import {
   applyProfileStreamEvent,
   createEmptyProfileStreamState,
 } from "../app/ui/chat-kit/apply-profile-stream-event";
+import { messagesToChatKitItems } from "../app/ui/chat-kit/messages-to-items";
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message);
@@ -74,6 +75,28 @@ assert(
 assert(
   state.items.filter((i) => i.kind === "thought").length >= 1,
   "final must keep thought blocks",
+);
+assert(
+  state.items.filter((i) => i.kind === "tool").length === 2,
+  "final must keep tool blocks in the live turn",
+);
+
+const historyItems = messagesToChatKitItems([
+  { role: "user", content: "read files" },
+  {
+    role: "assistant",
+    content: state.content,
+    reasoning: state.reasoning,
+    items: state.items,
+  },
+]);
+assert(
+  historyItems.filter((i) => i.kind === "tool").length === 2,
+  "persisted assistant items must replay tool blocks after live state is cleared",
+);
+assert(
+  historyItems.every((i) => i.kind !== "assistant_text" || !i.streaming),
+  "persisted assistant items must not replay streaming state",
 );
 
 console.log("check-profile-stream-reducer: ok");

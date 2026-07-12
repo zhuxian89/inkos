@@ -3,9 +3,10 @@ doc_type: audit-index
 audit: 2026-07-12-profile-chat-fe-be
 scope: profile chat 前端 ChatKit + 后端 SSE/provider（chat completions）复审
 created: 2026-07-12
-status: active
+status: superseded
 total_findings: 7
 supersedes: 2026-07-12-profile-chat-ux
+superseded-by: 2026-07-12-profile-chat-mindfs-parity
 ---
 
 # profile-chat-fe-be 审计报告

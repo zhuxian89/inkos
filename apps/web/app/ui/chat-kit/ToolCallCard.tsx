@@ -17,6 +17,7 @@ import {
   ToolOutlined,
 } from "@ant-design/icons";
 import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
+import { ChatKitMarkdown } from "./ChatKitMarkdown";
 import type { ChatKitToolCall, ChatKitToolContentItem, ChatKitToolLocation, ChatKitToolStatus } from "./types";
 
 export type ToolCallCardProps = {
@@ -25,6 +26,10 @@ export type ToolCallCardProps = {
 };
 
 const terminalFontFamily = "SFMono-Regular, Consolas, Menlo, monospace";
+
+type DetailSection =
+  | { readonly type: "diff"; readonly path: string; readonly markdown: string }
+  | { readonly type: "text"; readonly markdown: string };
 
 function basename(path: string): string {
   const normalized = (path || "").replace(/\\/g, "/");
@@ -59,6 +64,13 @@ function stringMeta(meta: Record<string, unknown> | undefined, key: string): str
   return typeof value === "string" ? value.trim() : "";
 }
 
+function toolProgressText(meta: Record<string, unknown> | undefined): string {
+  const progress = stringMeta(meta, "progress");
+  if (progress) return progress;
+  const lastToolName = stringMeta(meta, "lastToolName");
+  return lastToolName ? `Using ${lastToolName}` : "";
+}
+
 function toolName(toolCall: ChatKitToolCall): string {
   return stringMeta(toolCall.meta, "tool") || toolCall.title || toolCall.kind || "tool";
 }
@@ -86,33 +98,87 @@ function formatJson(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-function textBlockTitle(item: ChatKitToolContentItem, fallbackIndex: number): string {
-  if (item.type === "diff") return item.path || `diff-${fallbackIndex + 1}`;
-  return item.path || `text-${fallbackIndex + 1}`;
+function stripAnsi(text: string): string {
+  return text
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[ -/]*[@-~]/g, "");
 }
 
-function renderStructuredDiff(path: string, oldText?: string, newText?: string): string {
+function normalizeTerminalText(text: string): string {
+  return stripAnsi(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function prefixDiffLines(text: string, prefix: "+" | "-"): string[] {
+  return text.split("\n").map((line) => `${prefix}${line}`);
+}
+
+function renderStructuredDiffMarkdown(path: string, oldText?: string, newText?: string): string {
   const lines = [`--- a/${path}`, `+++ b/${path}`];
   if (typeof oldText === "string" && oldText !== "") {
-    lines.push(...oldText.split("\n").map((line) => `-${line}`));
+    lines.push(...prefixDiffLines(oldText, "-"));
   }
   if (typeof newText === "string" && newText !== "") {
-    lines.push(...newText.split("\n").map((line) => `+${line}`));
+    lines.push(...prefixDiffLines(newText, "+"));
   }
-  return lines.join("\n");
+  return `~~~diff\n${lines.join("\n")}\n~~~`;
 }
 
-function contentText(item: ChatKitToolContentItem): string {
-  if (item.type === "diff") {
-    return renderStructuredDiff(item.path || "(unknown)", item.oldText, item.newText);
+function isDiffLikeText(text: string): boolean {
+  const trimmed = stripAnsi(text).trim();
+  if (!trimmed) return false;
+  if (/^(```|~~~)/.test(trimmed)) return false;
+  return /^(diff --git|index |--- |\+\+\+ |@@ )/m.test(trimmed);
+}
+
+function extractDiffPath(text: string, fallbackPath = "(unknown)"): string {
+  const lines = stripAnsi(text).split("\n");
+  for (const line of lines) {
+    const match = line.match(/^\+\+\+\s+(?:b\/)?(.+)$/);
+    if (match?.[1]) return match[1].trim();
   }
-  if (item.changeKind === "add") {
-    return renderStructuredDiff(item.path || "(unknown)", undefined, item.text);
+  for (const line of lines) {
+    const match = line.match(/^diff --git a\/.+ b\/(.+)$/);
+    if (match?.[1]) return match[1].trim();
   }
-  if (item.changeKind === "delete") {
-    return renderStructuredDiff(item.path || "(unknown)", item.text, undefined);
+  return fallbackPath;
+}
+
+function buildDetailSections(
+  content?: ReadonlyArray<ChatKitToolContentItem>,
+  locations?: ReadonlyArray<ChatKitToolLocation>,
+): DetailSection[] {
+  if (!content?.length) return [];
+  const sections: DetailSection[] = [];
+  let locationIndex = 0;
+  for (const item of content) {
+    if (item.type === "diff") {
+      const path = item.path || locations?.[locationIndex]?.path || "(unknown)";
+      sections.push({ type: "diff", path, markdown: renderStructuredDiffMarkdown(path, item.oldText, item.newText) });
+      locationIndex += 1;
+      continue;
+    }
+    if (!item.text?.trim()) continue;
+    const fallbackPath = item.path || locations?.[locationIndex]?.path || "(unknown)";
+    if (item.changeKind === "add") {
+      sections.push({ type: "diff", path: fallbackPath, markdown: renderStructuredDiffMarkdown(fallbackPath, undefined, item.text) });
+      locationIndex += 1;
+      continue;
+    }
+    if (item.changeKind === "delete") {
+      sections.push({ type: "diff", path: fallbackPath, markdown: renderStructuredDiffMarkdown(fallbackPath, item.text, undefined) });
+      locationIndex += 1;
+      continue;
+    }
+    if (isDiffLikeText(item.text)) {
+      const path = extractDiffPath(item.text, fallbackPath);
+      sections.push({ type: "diff", path, markdown: `~~~diff\n${stripAnsi(item.text).trim()}\n~~~` });
+      locationIndex += 1;
+      continue;
+    }
+    sections.push({ type: "text", markdown: item.text });
   }
-  return item.text || "";
+  return sections;
 }
 
 function CodeBlock(props: Readonly<{ readonly title: string; readonly content: string; readonly danger?: boolean }>) {
@@ -150,6 +216,14 @@ function locationNames(locations?: ReadonlyArray<ChatKitToolLocation>): string[]
   return Array.from(new Set(locations.map((location) => basename(location.path)).filter(Boolean)));
 }
 
+function TerminalOutput(props: Readonly<{ readonly text: string }>) {
+  const text = normalizeTerminalText(props.text);
+  if (!text.trim()) return null;
+  return (
+    <CodeBlock title="输出" content={text} />
+  );
+}
+
 export const ToolCallCard = memo(function ToolCallCard({
   toolCall,
   defaultExpanded = false,
@@ -160,17 +234,30 @@ export const ToolCallCard = memo(function ToolCallCard({
   const title = toolCall.title || name;
   const args = toolCall.meta?.args;
   const error = stringMeta(toolCall.meta, "error");
+  const progressText = toolProgressText(toolCall.meta);
+  const detailSections = useMemo(
+    () => buildDetailSections(toolCall.content, toolCall.locations),
+    [toolCall.content, toolCall.locations],
+  );
+  const isUserShell = kind === "execute" && toolCall.meta?.source === "userShell";
+  const userShellText = useMemo(
+    () => toolCall.content?.map((item) => ("text" in item ? item.text || "" : "")).join("") || toolCall.result || "",
+    [toolCall.content, toolCall.result],
+  );
   const isFileChange =
     kind === "edit"
     || kind === "delete"
     || kind === "move"
-    || Boolean(toolCall.content?.some((item) => item.type === "diff" || item.changeKind));
+    || detailSections.some((section) => section.type === "diff");
   const fileNames = useMemo(() => {
     const contentPaths = toolCall.content?.map((item) => item.path).filter((path): path is string => Boolean(path)) ?? [];
-    return Array.from(new Set([...locationNames(toolCall.locations), ...contentPaths.map(basename)]));
-  }, [toolCall.content, toolCall.locations]);
+    const diffPaths = detailSections
+      .filter((section): section is Extract<DetailSection, { readonly type: "diff" }> => section.type === "diff")
+      .map((section) => basename(section.path));
+    return Array.from(new Set([...locationNames(toolCall.locations), ...contentPaths.map(basename), ...diffPaths]));
+  }, [detailSections, toolCall.content, toolCall.locations]);
   const hasDetails = Boolean(
-    toolCall.content?.length
+    detailSections.length
     || toolCall.locations?.length
     || toolCall.result
     || args
@@ -184,6 +271,7 @@ export const ToolCallCard = memo(function ToolCallCard({
   }, [defaultExpanded, error, toolCall.status]);
 
   return (
+    <>
     <div
       style={{
         width: "100%",
@@ -286,29 +374,52 @@ export const ToolCallCard = memo(function ToolCallCard({
         >
           {error ? <CodeBlock title="错误" content={error} danger /> : null}
           {args ? <CodeBlock title="参数" content={formatJson(args)} /> : null}
-          {toolCall.content?.map((item, index) => (
-            <CodeBlock
-              key={`${item.type}-${item.path ?? ""}-${index}`}
-              title={textBlockTitle(item, index)}
-              content={contentText(item)}
-              danger={isFailedStatus(toolCall.status)}
-            />
-          ))}
+          {isUserShell ? <TerminalOutput text={userShellText} /> : null}
+          {!isUserShell && detailSections.length ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+              {detailSections.map((section, index) => (
+                <div key={`${section.type}-${index}`} style={{ minWidth: 0 }}>
+                  {section.type === "diff" ? (
+                    <div style={{ marginBottom: 6, color: "var(--text-primary, #262626)", fontSize: 12, fontWeight: 600, wordBreak: "break-all" }}>
+                      {section.path}
+                    </div>
+                  ) : null}
+                  <ChatKitMarkdown content={section.markdown} />
+                </div>
+              ))}
+            </div>
+          ) : null}
           {toolCall.locations?.length ? (
             <CodeBlock
               title="位置"
               content={toolCall.locations.map((location) => `${location.path}${location.line ? `:${location.line}` : ""}`).join("\n")}
             />
           ) : null}
-          {toolCall.result ? (
-            <CodeBlock
-              title="原始结果"
-              content={toolCall.result}
-              danger={isFailedStatus(toolCall.status)}
-            />
-          ) : null}
+          {!detailSections.length && !isUserShell && toolCall.result ? <ChatKitMarkdown content={toolCall.result} /> : null}
         </div>
       ) : null}
     </div>
+    {progressText ? (
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          gap: 5,
+          marginTop: 3,
+          paddingLeft: 8,
+          paddingRight: 4,
+          color: "var(--text-secondary, #8c8c8c)",
+          fontSize: 11,
+          lineHeight: 1.25,
+          minWidth: 0,
+        }}
+      >
+        <LoadingOutlined spin={isRunningStatus(toolCall.status)} style={{ fontSize: 12, opacity: isRunningStatus(toolCall.status) ? 1 : 0.72 }} />
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          {progressText}
+        </span>
+      </div>
+    ) : null}
+    </>
   );
 });
