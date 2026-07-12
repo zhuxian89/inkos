@@ -1524,7 +1524,11 @@ export function createLlmService(
     readonly includeReasoning?: boolean;
     readonly profileId?: string;
     readonly abortSignal?: AbortSignal;
-  }): Promise<{ reply: string; brief: string; reasoning?: string; model: string; profileId?: string }> {
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
+    readonly onToolStart?: (toolCall: ProfileToolCall) => void;
+    readonly onToolEnd?: (toolCall: ProfileToolCall) => void;
+  }): Promise<{ reply: string; brief: string; reasoning?: string; model: string; profileId?: string; toolTrace: ReadonlyArray<ToolTraceItem> }> {
     const llm = await createClientFromOptionalProfile(input.profileId);
     logInfo("init_assistant.llm.start", {
       bookId: input.bookId ?? null,
@@ -1637,6 +1641,10 @@ export function createLlmService(
       useStream: input.useStream,
       includeReasoning: input.includeReasoning,
       abortSignal: input.abortSignal,
+      onTextDelta: input.onTextDelta,
+      onReasoningDelta: input.onReasoningDelta,
+      onToolStart: input.onToolStart,
+      onToolEnd: input.onToolEnd,
       contextMode: "init",
       logToolCall: (name, args) => {
         logInfo("init_assistant.chat.tool", { tool: name, args: sanitizeForLog(args) as Record<string, unknown> });
@@ -1648,6 +1656,7 @@ export function createLlmService(
       reasoning: response.reasoning,
       model: llm.model,
       profileId: llm.profileId,
+      toolTrace: response.toolTrace,
     };
   }
 
@@ -1705,7 +1714,11 @@ export function createLlmService(
     readonly includeReasoning?: boolean;
     readonly profileId?: string;
     readonly abortSignal?: AbortSignal;
-  }): Promise<{ reply: string; reasoning?: string; model: string; profileId?: string }> {
+    readonly onTextDelta?: (delta: string) => void;
+    readonly onReasoningDelta?: (delta: string) => void;
+    readonly onToolStart?: (toolCall: ProfileToolCall) => void;
+    readonly onToolEnd?: (toolCall: ProfileToolCall) => void;
+  }): Promise<{ reply: string; reasoning?: string; model: string; profileId?: string; toolTrace: ReadonlyArray<ToolTraceItem> }> {
     const config = await loadProjectConfig(projectRoot);
     const state = new StateManager(projectRoot);
     const book = await state.loadBookConfig(input.bookId);
@@ -1837,6 +1850,10 @@ export function createLlmService(
         useStream: input.useStream,
         includeReasoning: input.includeReasoning,
         abortSignal: input.abortSignal,
+        onTextDelta: input.onTextDelta,
+        onReasoningDelta: input.onReasoningDelta,
+        onToolStart: input.onToolStart,
+        onToolEnd: input.onToolEnd,
         contextMode: "chapter",
         tools: CHAPTER_CHAT_TOOLS,
         executeTool: (name, args) => executeChapterChatTool(
@@ -1871,6 +1888,7 @@ export function createLlmService(
       reasoning: response.reasoning,
       model: llm.model,
       profileId: "profileId" in llm ? llm.profileId : undefined,
+      toolTrace: response.toolTrace,
     };
   }
 

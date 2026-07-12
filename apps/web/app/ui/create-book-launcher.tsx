@@ -3,6 +3,7 @@
 import { App, Button, Card, Checkbox, Col, Divider, Form, Grid, Input, InputNumber, Modal, Radio, Row, Select, Space, Tag, Typography } from "antd";
 import { useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 
@@ -20,14 +21,7 @@ interface InitAssistantMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly reasoning?: string;
-}
-
-interface InitAssistantResult {
-  readonly ok: boolean;
-  readonly reply?: string;
-  readonly brief?: string;
-  readonly reasoning?: string;
-  readonly error?: string;
+  readonly items?: ReadonlyArray<ChatKitItem>;
 }
 
 interface LlmProfile {
@@ -59,6 +53,7 @@ export function CreateBookLauncher(props: Readonly<{
   const [createStep, setCreateStep] = useState<string | null>(null);
   const [chatting, setChatting] = useState(false);
   const [assistantMessages, setAssistantMessages] = useState<ReadonlyArray<InitAssistantMessage>>([]);
+  const [assistantLiveItems, setAssistantLiveItems] = useState<ReadonlyArray<ChatKitItem> | null>(null);
   const [assistantDraft, setAssistantDraft] = useState("");
   const [assistantBrief, setAssistantBrief] = useState("");
   const [assistantUseStream, setAssistantUseStream] = useState(true);
@@ -67,6 +62,7 @@ export function CreateBookLauncher(props: Readonly<{
   const [assistantProfileId, setAssistantProfileId] = useState<string | undefined>(undefined);
   const [createResult, setCreateResult] = useState<unknown>(null);
   const createPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const assistantAbortRef = useRef<AbortController | null>(null);
   const [form] = Form.useForm<CreateBookValues>();
   const screens = Grid.useBreakpoint();
   const isMobile = !screens.md;
@@ -180,13 +176,25 @@ export function CreateBookLauncher(props: Readonly<{
     void loadAssistantProfiles();
 
     return () => {
+      assistantAbortRef.current?.abort();
+      assistantAbortRef.current = null;
       if (createPollRef.current) clearInterval(createPollRef.current);
       createPollRef.current = null;
     };
   }, [form]);
 
+  function assistantModelMessages(messages: ReadonlyArray<InitAssistantMessage>): ReadonlyArray<Pick<InitAssistantMessage, "role" | "content">> {
+    return messages.map((item) => ({
+      role: item.role,
+      content: item.content,
+    }));
+  }
+
   function resetAssistant(): void {
+    assistantAbortRef.current?.abort();
+    assistantAbortRef.current = null;
     setAssistantMessages([]);
+    setAssistantLiveItems(null);
     setAssistantDraft("");
     setAssistantBrief("");
     if (typeof window !== "undefined") {
@@ -210,71 +218,78 @@ export function CreateBookLauncher(props: Readonly<{
     const values = form.getFieldsValue();
     const nextMessages = [...assistantMessages, { role: "user" as const, content: draft }];
     setAssistantMessages(nextMessages);
+    setAssistantLiveItems(messagesToChatKitItems(nextMessages));
     persistAssistantMessages(nextMessages);
     setAssistantDraft("");
     setChatting(true);
+    assistantAbortRef.current?.abort();
+    const abortController = new AbortController();
+    assistantAbortRef.current = abortController;
 
-    void fetch("/api/inkos/init-assistant/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        title: values.title || "未命名作品",
-        genre: values.genre || "other",
-        platform: values.platform || "tomato",
-        targetChapters: values.targetChapters || 200,
-        chapterWords: values.chapterWords || 3000,
-        context: values.context || undefined,
-        currentBrief: assistantBrief || undefined,
-        useStream: assistantUseStream,
-        includeReasoning: assistantIncludeReasoning,
-        profileId: assistantProfileId,
-        async: true,
-        messages: nextMessages,
-      }),
-    })
-      .then(async (response) => {
-        const data = await response.json() as { ok?: boolean; error?: string; jobId?: string };
-        if (!response.ok || !data.ok || !data.jobId) {
-          void message.error(data.error ?? "智能初始化对话失败");
-          return;
+    void (async () => {
+      try {
+        const response = await fetch("/api/inkos/init-assistant/chat-stream", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            title: values.title || "未命名作品",
+            genre: values.genre || "other",
+            platform: values.platform || "tomato",
+            targetChapters: values.targetChapters || 200,
+            chapterWords: values.chapterWords || 3000,
+            context: values.context || undefined,
+            currentBrief: assistantBrief || undefined,
+            useStream: assistantUseStream,
+            includeReasoning: assistantIncludeReasoning,
+            profileId: assistantProfileId,
+            messages: assistantModelMessages(nextMessages),
+          }),
+          signal: abortController.signal,
+        });
+        if (abortController.signal.aborted) return;
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || "智能初始化对话失败");
         }
-        const result = await new Promise<InitAssistantResult>((resolve, reject) => {
-          const timer = setInterval(async () => {
-            try {
-              const pollRes = await fetch(`/api/inkos/jobs/${encodeURIComponent(String(data.jobId))}`, { cache: "no-store" });
-              const job = await pollRes.json();
-              if (job.status === "done") {
-                clearInterval(timer);
-                resolve(job.result as InitAssistantResult);
-                return;
-              }
-              if (job.status === "error") {
-                clearInterval(timer);
-                reject(new Error(job.error ?? "智能初始化对话失败"));
-              }
-            } catch (error) {
-              clearInterval(timer);
-              reject(error);
+        if (!contentType.includes("text/event-stream")) {
+          throw new Error("期望 SSE 流式响应，但服务端返回了非流式内容");
+        }
+
+        const streamed = await consumeChatKitStream(response, nextMessages, {
+          signal: abortController.signal,
+          onFrame: (items) => {
+            if (!abortController.signal.aborted) {
+              setAssistantLiveItems(items);
             }
-          }, 3000);
+          },
         });
-        setAssistantMessages((prev) => {
-          const updated = [...prev, {
-            role: "assistant" as const,
-            content: result.reply?.trim() || "我已经整理好了当前方向，你可以继续补充。",
-            reasoning: typeof result.reasoning === "string" ? result.reasoning : undefined,
-          }];
-          persistAssistantMessages(updated);
-          return updated;
-        });
-        const nextBrief = result.brief ?? "";
+        if (abortController.signal.aborted) return;
+        const updated = [...nextMessages, {
+          role: "assistant" as const,
+          content: streamed.content.trim() || "我已经整理好了当前方向，你可以继续补充。",
+          reasoning: typeof streamed.reasoning === "string" && streamed.reasoning.trim()
+            ? streamed.reasoning
+            : undefined,
+          items: streamed.items,
+        }];
+        setAssistantMessages(updated);
+        setAssistantLiveItems(null);
+        persistAssistantMessages(updated);
+        const nextBrief = typeof streamed.finalEvent?.brief === "string" ? streamed.finalEvent.brief : "";
         setAssistantBrief(nextBrief);
         persistAssistantBrief(nextBrief);
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
+        if (abortController.signal.aborted || (error instanceof Error && error.name === "AbortError")) return;
+        setAssistantLiveItems(null);
         void message.error(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => setChatting(false));
+      } finally {
+        if (assistantAbortRef.current === abortController) {
+          assistantAbortRef.current = null;
+        }
+        setChatting(false);
+      }
+    })();
   }
 
   function submitCreateBook(values: CreateBookValues): void {
@@ -444,6 +459,7 @@ export function CreateBookLauncher(props: Readonly<{
                       </Typography.Text>
                       <ChatPanel
                         messages={assistantMessages}
+                        items={assistantLiveItems}
                         value={assistantDraft}
                         onChange={setAssistantDraft}
                         onSend={sendInitAssistantMessage}

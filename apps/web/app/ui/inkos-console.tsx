@@ -5,6 +5,7 @@ import type { ColumnsType } from "antd/es/table";
 import type { Dispatch, SetStateAction } from "react";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { ChatPanel } from "./chat-panel";
+import { consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
 import { IssueTags } from "./issue-tags";
 import { labelBookStatus, labelGenre, labelPlatform } from "./labels";
 
@@ -126,13 +127,8 @@ interface CreateBookValues {
 interface InitAssistantMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
-}
-
-interface InitAssistantResult {
-  readonly ok: boolean;
-  readonly reply?: string;
-  readonly brief?: string;
-  readonly error?: string;
+  readonly reasoning?: string;
+  readonly items?: ReadonlyArray<ChatKitItem>;
 }
 
 interface WriteValues {
@@ -165,9 +161,11 @@ export function InkosConsole() {
   const [isCreatingBook, setIsCreatingBook] = useState(false);
   const createBookPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [initAssistantMessages, setInitAssistantMessages] = useState<ReadonlyArray<InitAssistantMessage>>([]);
+  const [initAssistantLiveItems, setInitAssistantLiveItems] = useState<ReadonlyArray<ChatKitItem> | null>(null);
   const [initAssistantDraft, setInitAssistantDraft] = useState("");
   const [initAssistantBrief, setInitAssistantBrief] = useState("");
   const [isChattingInitAssistant, setIsChattingInitAssistant] = useState(false);
+  const initAssistantAbortRef = useRef<AbortController | null>(null);
   const [writeNextResult, setWriteNextResult] = useState<WriteNextResult | null>(null);
   const [writeStep, setWriteStep] = useState<string | null>(null);
   const [isWriting, setIsWriting] = useState(false);
@@ -216,6 +214,8 @@ export function InkosConsole() {
     });
 
     return () => {
+      initAssistantAbortRef.current?.abort();
+      initAssistantAbortRef.current = null;
       if (writePollRef.current) clearInterval(writePollRef.current);
       writePollRef.current = null;
       if (createBookPollRef.current) clearInterval(createBookPollRef.current);
@@ -231,6 +231,13 @@ export function InkosConsole() {
     setCommandFormValues(buildInitialValues(selectedCommand.fields));
   }, [selectedCommandId, selectedCommand]);
 
+  function initAssistantModelMessages(messages: ReadonlyArray<InitAssistantMessage>): ReadonlyArray<Pick<InitAssistantMessage, "role" | "content">> {
+    return messages.map((item) => ({
+      role: item.role,
+      content: item.content,
+    }));
+  }
+
   function sendInitAssistantMessage(): void {
     const draft = initAssistantDraft.trim();
     if (!draft || isChattingInitAssistant) return;
@@ -238,61 +245,75 @@ export function InkosConsole() {
     const values = createBookForm.getFieldsValue();
     const nextMessages = [...initAssistantMessages, { role: "user" as const, content: draft }];
     setInitAssistantMessages(nextMessages);
+    setInitAssistantLiveItems(messagesToChatKitItems(nextMessages));
     setInitAssistantDraft("");
     setIsChattingInitAssistant(true);
     setError(null);
+    initAssistantAbortRef.current?.abort();
+    const abortController = new AbortController();
+    initAssistantAbortRef.current = abortController;
 
-    void fetch("/api/inkos/init-assistant/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        title: values.title || "未命名作品",
-        genre: values.genre || "other",
-        platform: values.platform || "tomato",
-        targetChapters: values.targetChapters || 200,
-        chapterWords: values.chapterWords || 3000,
-        context: values.context || undefined,
-        currentBrief: initAssistantBrief || undefined,
-        async: true,
-        messages: nextMessages,
-      }),
-    })
-      .then(async (response) => {
-        const data = await response.json() as { ok?: boolean; error?: string; jobId?: string };
-        if (!response.ok || !data.ok || !data.jobId) {
-          setError(data.error ?? "智能初始化对话失败");
-          return;
-        }
-        const result = await new Promise<InitAssistantResult>((resolve, reject) => {
-          const timer = setInterval(async () => {
-            try {
-              const pollRes = await fetch(`/api/inkos/jobs/${encodeURIComponent(String(data.jobId))}`, { cache: "no-store" });
-              const job = await pollRes.json();
-              if (job.status === "done") {
-                clearInterval(timer);
-                resolve(job.result as InitAssistantResult);
-                return;
-              }
-              if (job.status === "error") {
-                clearInterval(timer);
-                reject(new Error(job.error ?? "智能初始化对话失败"));
-              }
-            } catch (error) {
-              clearInterval(timer);
-              reject(error);
-            }
-          }, 3000);
+    void (async () => {
+      try {
+        const response = await fetch("/api/inkos/init-assistant/chat-stream", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            title: values.title || "未命名作品",
+            genre: values.genre || "other",
+            platform: values.platform || "tomato",
+            targetChapters: values.targetChapters || 200,
+            chapterWords: values.chapterWords || 3000,
+            context: values.context || undefined,
+            currentBrief: initAssistantBrief || undefined,
+            messages: initAssistantModelMessages(nextMessages),
+          }),
+          signal: abortController.signal,
         });
-        const reply = result.reply?.trim() || "我已经整理好了当前方向，你可以继续补充。";
-        setInitAssistantMessages((prev) => [...prev, { role: "assistant", content: reply }]);
-        setInitAssistantBrief(result.brief ?? "");
-      })
-      .catch((runError: unknown) => {
+        if (abortController.signal.aborted) return;
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || "智能初始化对话失败");
+        }
+        if (!contentType.includes("text/event-stream")) {
+          throw new Error("期望 SSE 流式响应，但服务端返回了非流式内容");
+        }
+
+        const streamed = await consumeChatKitStream(response, nextMessages, {
+          signal: abortController.signal,
+          onFrame: (items) => {
+            if (!abortController.signal.aborted) {
+              setInitAssistantLiveItems(items);
+            }
+          },
+        });
+        if (abortController.signal.aborted) return;
+        const reply = streamed.content.trim() || "我已经整理好了当前方向，你可以继续补充。";
+        setInitAssistantMessages([
+          ...nextMessages,
+          {
+            role: "assistant",
+            content: reply,
+            reasoning: typeof streamed.reasoning === "string" && streamed.reasoning.trim()
+              ? streamed.reasoning
+              : undefined,
+            items: streamed.items,
+          },
+        ]);
+        setInitAssistantLiveItems(null);
+        setInitAssistantBrief(typeof streamed.finalEvent?.brief === "string" ? streamed.finalEvent.brief : "");
+      } catch (runError: unknown) {
+        if (abortController.signal.aborted || (runError instanceof Error && runError.name === "AbortError")) return;
+        setInitAssistantLiveItems(null);
         setError(runError instanceof Error ? runError.message : String(runError));
-      })
-      .finally(() => {
+      } finally {
+        if (initAssistantAbortRef.current === abortController) {
+          initAssistantAbortRef.current = null;
+        }
         setIsChattingInitAssistant(false);
-      });
+      }
+    })();
   }
 
   function runCommand(): void {
@@ -648,6 +669,7 @@ export function InkosConsole() {
                               </Typography.Text>
                               <ChatPanel
                                 messages={initAssistantMessages}
+                                items={initAssistantLiveItems}
                                 value={initAssistantDraft}
                                 onChange={setInitAssistantDraft}
                                 onSend={sendInitAssistantMessage}

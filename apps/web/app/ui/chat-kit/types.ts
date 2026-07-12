@@ -43,8 +43,8 @@ export type ChatKitItem =
     }
   | { readonly kind: "status"; readonly id: string; readonly text: string };
 
-export type ProfileStreamEvent =
-  | { readonly type: "start"; readonly ok: true; readonly profileId: string; readonly model: string }
+export type ChatKitStreamEvent =
+  | { readonly type: "start"; readonly ok: true; readonly profileId?: string; readonly model?: string; readonly [key: string]: unknown }
   | { readonly type: "message_chunk"; readonly data: { readonly content: string } }
   | { readonly type: "thought_chunk"; readonly data: { readonly content: string } }
   | {
@@ -60,7 +60,9 @@ export type ProfileStreamEvent =
       readonly ok: true;
       readonly content: string;
       readonly reasoning?: string;
-      readonly toolCalls: number;
+      readonly toolCalls?: number;
+      readonly brief?: string;
+      readonly [key: string]: unknown;
     }
   | { readonly type: "error"; readonly ok: false; readonly error: string }
   | { readonly type: "done" }
@@ -68,3 +70,5 @@ export type ProfileStreamEvent =
   | { readonly type: "delta"; readonly delta?: string }
   /** @deprecated 兼容旧 SSE，bridge 可映射为 thought_chunk */
   | { readonly type: "reasoning_delta"; readonly delta?: string };
+
+export type ProfileStreamEvent = ChatKitStreamEvent;

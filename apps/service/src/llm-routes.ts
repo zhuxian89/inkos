@@ -18,6 +18,19 @@ import { resolveBookId } from "./runtime.js";
 import type { RouteRegistrar } from "./service-context.js";
 import { describeError, logError, logInfo } from "./service-logging.js";
 
+function extractTaggedMarkdownDraft(raw: string, tag: string): string {
+  const startTag = `<${tag}>`;
+  const endTag = `</${tag}>`;
+  const startIndex = raw.indexOf(startTag);
+  if (startIndex < 0) return "";
+  const contentStart = startIndex + startTag.length;
+  const endIndex = raw.indexOf(endTag, contentStart);
+  const content = endIndex >= 0
+    ? raw.slice(contentStart, endIndex)
+    : raw.slice(contentStart);
+  return content.replace(/^\r?\n/, "");
+}
+
 export const registerLlmRoutes: RouteRegistrar = (app, context) => {
   app.post("/api/books/:bookId/chapters/:chapter/chat", async (req, res) => {
     const schema = z.object({
@@ -123,6 +136,137 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         error: describeError(error),
       });
       res.status(400).json({ ok: false, error: describeError(error) });
+    }
+  });
+
+  app.post("/api/books/:bookId/chapters/:chapter/chat-stream", async (req, res) => {
+    let streamOpened = false;
+    let streamFinished = false;
+    const abortController = new AbortController();
+    const abortClientStream = (): void => {
+      if (!streamFinished && !abortController.signal.aborted) {
+        abortController.abort();
+      }
+    };
+    req.on("aborted", abortClientStream);
+    res.on("close", abortClientStream);
+
+    const schema = z.object({
+      messages: z.array(z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string().min(1),
+      })).min(1),
+      useStream: z.boolean().optional(),
+      includeReasoning: z.boolean().optional(),
+      profileId: z.string().optional(),
+    });
+    const sendEvent = (payload: Record<string, unknown>): void => {
+      if (!streamOpened || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+
+    try {
+      const bookId = await resolveBookId(context.projectRoot, req.params.bookId);
+      const chapterNumber = parseInt(req.params.chapter, 10);
+      if (!Number.isFinite(chapterNumber) || chapterNumber < 1) {
+        throw new Error(`Invalid chapter number: ${req.params.chapter}`);
+      }
+      const input = schema.parse(req.body ?? {});
+
+      logInfo("chapter.chat_stream.start", {
+        bookId,
+        chapterNumber,
+        messageCount: input.messages.length,
+        profileId: input.profileId ?? null,
+      });
+
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+      streamOpened = true;
+      sendEvent({ type: "start", ok: true, bookId, chapterNumber });
+
+      const result = await context.llmService.runChapterAssistant({
+        bookId,
+        chapterNumber,
+        messages: input.messages,
+        useStream: true,
+        includeReasoning: true,
+        profileId: input.profileId,
+        abortSignal: abortController.signal,
+        onTextDelta: (delta) => {
+          sendEvent({ type: "message_chunk", data: { content: delta } });
+        },
+        onReasoningDelta: (delta) => {
+          sendEvent({ type: "thought_chunk", data: { content: delta } });
+        },
+        onToolStart: (toolCall) => {
+          sendEvent({ type: "tool_call", data: toolCall });
+        },
+        onToolEnd: (toolCall) => {
+          sendEvent({ type: "tool_call_update", data: toolCall });
+        },
+      });
+
+      if (abortController.signal.aborted) {
+        logInfo("chapter.chat_stream.cancelled", { bookId, chapterNumber });
+        return;
+      }
+
+      sendEvent({
+        type: "final",
+        ok: true,
+        content: result.reply,
+        reasoning: result.reasoning,
+        model: result.model,
+        profileId: result.profileId ?? input.profileId ?? null,
+        toolCalls: result.toolTrace.length,
+      });
+      sendEvent({ type: "done" });
+      streamFinished = true;
+
+      logInfo("chapter.chat_stream.done", {
+        bookId,
+        chapterNumber,
+        profileId: result.profileId ?? input.profileId ?? null,
+        model: result.model,
+        toolCalls: result.toolTrace.length,
+        contentLength: result.reply.length,
+      });
+    } catch (error) {
+      if (abortController.signal.aborted || isAbortLikeError(error)) {
+        logInfo("chapter.chat_stream.cancelled", {
+          bookId: req.params.bookId,
+          chapter: req.params.chapter,
+        });
+        return;
+      }
+      const message = describeError(error);
+      streamFinished = true;
+      if (streamOpened) {
+        sendEvent({ type: "error", ok: false, error: message });
+        logError("chapter.chat_stream.error", {
+          bookId: req.params.bookId,
+          chapter: req.params.chapter,
+          error: message,
+        });
+      } else {
+        logError("chapter.chat_stream.error", {
+          bookId: req.params.bookId,
+          chapter: req.params.chapter,
+          error: message,
+        });
+        res.status(400).json({ ok: false, error: message });
+        return;
+      }
+    } finally {
+      req.off("aborted", abortClientStream);
+      res.off("close", abortClientStream);
+      if (streamOpened && !res.writableEnded && !res.destroyed) {
+        res.end();
+      }
     }
   });
 
@@ -783,6 +927,138 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
     } catch (error) {
       logError("init_assistant.chat.error", { error: describeError(error) });
       res.status(400).json({ ok: false, error: describeError(error) });
+    }
+  });
+
+  app.post("/api/init-assistant/chat-stream", async (req, res) => {
+    let streamOpened = false;
+    let streamFinished = false;
+    let rawAssistantText = "";
+    let sentReplyLength = 0;
+    const abortController = new AbortController();
+    const abortClientStream = (): void => {
+      if (!streamFinished && !abortController.signal.aborted) {
+        abortController.abort();
+      }
+    };
+    req.on("aborted", abortClientStream);
+    res.on("close", abortClientStream);
+
+    const schema = z.object({
+      bookId: z.string().optional(),
+      title: z.string().min(1).default("未命名作品"),
+      genre: z.enum(["xuanhuan", "xianxia", "chuanyue", "urban", "horror", "other"]).default("other"),
+      platform: z.enum(["tomato", "feilu", "qidian", "other"]).default("tomato"),
+      targetChapters: z.number().int().min(1).default(200),
+      chapterWords: z.number().int().min(1000).default(3000),
+      context: z.string().optional(),
+      currentBrief: z.string().optional(),
+      useStream: z.boolean().optional(),
+      includeReasoning: z.boolean().optional(),
+      profileId: z.string().optional(),
+      messages: z.array(z.object({
+        role: z.enum(["user", "assistant"]),
+        content: z.string().min(1),
+      })).min(1),
+    });
+    const sendEvent = (payload: Record<string, unknown>): void => {
+      if (!streamOpened || res.writableEnded) return;
+      res.write(`data: ${JSON.stringify(payload)}\n\n`);
+    };
+    const sendVisibleReplyDelta = (delta: string): void => {
+      rawAssistantText += delta;
+      const visibleReply = extractTaggedMarkdownDraft(rawAssistantText, "reply_md");
+      if (visibleReply.length <= sentReplyLength) return;
+      const chunk = visibleReply.slice(sentReplyLength);
+      sentReplyLength = visibleReply.length;
+      sendEvent({ type: "message_chunk", data: { content: chunk } });
+    };
+
+    try {
+      const input = schema.parse(req.body ?? {});
+      logInfo("init_assistant.chat_stream.start", {
+        bookId: input.bookId ?? null,
+        title: input.title,
+        genre: input.genre,
+        platform: input.platform,
+        messageCount: input.messages.length,
+        profileId: input.profileId ?? null,
+      });
+
+      res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.flushHeaders();
+      streamOpened = true;
+      sendEvent({ type: "start", ok: true, bookId: input.bookId ?? null });
+
+      const result = await context.llmService.runInitAssistant({
+        ...input,
+        useStream: true,
+        includeReasoning: true,
+        abortSignal: abortController.signal,
+        onTextDelta: sendVisibleReplyDelta,
+        onReasoningDelta: (delta) => {
+          sendEvent({ type: "thought_chunk", data: { content: delta } });
+        },
+        onToolStart: (toolCall) => {
+          sendEvent({ type: "tool_call", data: toolCall });
+        },
+        onToolEnd: (toolCall) => {
+          sendEvent({ type: "tool_call_update", data: toolCall });
+        },
+      });
+
+      if (abortController.signal.aborted) {
+        logInfo("init_assistant.chat_stream.cancelled", { bookId: input.bookId ?? null });
+        return;
+      }
+
+      sendEvent({
+        type: "final",
+        ok: true,
+        content: result.reply,
+        brief: result.brief,
+        reasoning: result.reasoning,
+        model: result.model,
+        profileId: result.profileId ?? input.profileId ?? null,
+        toolCalls: result.toolTrace.length,
+      });
+      sendEvent({ type: "done" });
+      streamFinished = true;
+
+      logInfo("init_assistant.chat_stream.done", {
+        bookId: input.bookId ?? null,
+        title: input.title,
+        genre: input.genre,
+        briefLength: result.brief.length,
+        profileId: result.profileId ?? input.profileId ?? null,
+        model: result.model,
+        toolCalls: result.toolTrace.length,
+        contentLength: result.reply.length,
+      });
+    } catch (error) {
+      if (abortController.signal.aborted || isAbortLikeError(error)) {
+        logInfo("init_assistant.chat_stream.cancelled", { bookId: req.body?.bookId ?? null });
+        return;
+      }
+      const message = describeError(error);
+      streamFinished = true;
+      if (streamOpened) {
+        sendEvent({ type: "error", ok: false, error: message });
+        logError("init_assistant.chat_stream.error", { error: message });
+      } else {
+        logError("init_assistant.chat_stream.error", { error: message });
+        res.status(400).json({ ok: false, error: message });
+        return;
+      }
+    } finally {
+      req.off("aborted", abortClientStream);
+      res.off("close", abortClientStream);
+      if (streamOpened && !res.writableEnded && !res.destroyed) {
+        res.end();
+      }
     }
   });
 };

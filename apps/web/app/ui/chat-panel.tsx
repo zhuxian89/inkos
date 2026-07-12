@@ -2,17 +2,19 @@
 
 import type { CSSProperties, ReactNode } from "react";
 import { useMemo } from "react";
-import { ChatKitPanel, messagesToChatKitItems } from "./chat-kit";
+import { ChatKitPanel, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
 
 export interface ChatPanelMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly reasoning?: string;
   readonly id?: string;
+  readonly items?: ReadonlyArray<ChatKitItem>;
 }
 
 export function ChatPanel(props: Readonly<{
   readonly messages: ReadonlyArray<ChatPanelMessage>;
+  readonly items?: ReadonlyArray<ChatKitItem> | null;
   readonly value: string;
   readonly onChange: (value: string) => void;
   readonly onSend: () => void;
@@ -29,7 +31,7 @@ export function ChatPanel(props: Readonly<{
   readonly sendText?: string;
   readonly containerStyle?: CSSProperties;
 }>) {
-  const items = useMemo(() => messagesToChatKitItems(props.messages), [props.messages]);
+  const items = useMemo(() => props.items ?? messagesToChatKitItems(props.messages), [props.items, props.messages]);
 
   return (
     <ChatKitPanel

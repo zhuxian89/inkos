@@ -27,6 +27,7 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { BookChapters } from "./book-chapters";
 import { ChatPanel } from "./chat-panel";
+import { consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
 import { ChatFactLogPanel } from "./chat-fact-log-panel";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
@@ -102,14 +103,7 @@ interface InitAssistantMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly reasoning?: string;
-}
-
-interface InitAssistantResult {
-  readonly ok: boolean;
-  readonly reply?: string;
-  readonly brief?: string;
-  readonly reasoning?: string;
-  readonly error?: string;
+  readonly items?: ReadonlyArray<ChatKitItem>;
 }
 
 interface LlmProfile {
@@ -148,7 +142,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const [assistantMessages, setAssistantMessages] = useState<ReadonlyArray<InitAssistantMessage>>([]);
   const [assistantDraft, setAssistantDraft] = useState("");
   const [chatting, setChatting] = useState(false);
-  const [assistantJobId, setAssistantJobId] = useState<string | null>(null);
+  const [assistantLiveItems, setAssistantLiveItems] = useState<ReadonlyArray<ChatKitItem> | null>(null);
   const [assistantChatError, setAssistantChatError] = useState<string | null>(null);
   const [assistantLogOpen, setAssistantLogOpen] = useState(false);
   const [assistantModalOpen, setAssistantModalOpen] = useState(false);
@@ -160,6 +154,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const draftPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const [writeJobId, setWriteJobId] = useState<string | null>(null);
+  const assistantAbortRef = useRef<AbortController | null>(null);
 
   const POLL_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes max polling
   const [writeForm] = Form.useForm<WriteValues>();
@@ -265,81 +260,6 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     persistAssistantProfileId(selected);
   }
 
-  async function pollJob(jobId: string): Promise<unknown> {
-    const intervalMs = 3000;
-    const maxWaitMs = 30 * 60 * 1000;
-    const startedAt = Date.now();
-    let transientFailures = 0;
-
-    const wait = async (ms: number): Promise<void> => {
-      await new Promise((resolve) => window.setTimeout(resolve, ms));
-    };
-
-    const isTransientPollError = (error: unknown): boolean => {
-      if (!error || typeof error !== "object") return false;
-      const maybe = error as { code?: unknown; message?: unknown; name?: unknown };
-      if (maybe.code === "TRANSIENT_POLL") return true;
-      if (maybe.name === "TypeError" || maybe.name === "SyntaxError" || maybe.name === "NetworkError") return true;
-      if (typeof maybe.message !== "string") return false;
-      const message = maybe.message.toLowerCase();
-      return message.includes("failed to fetch")
-        || message.includes("networkerror")
-        || message.includes("network request failed")
-        || message.includes("load failed")
-        || message.includes("unexpected end of json input");
-    };
-
-    while (true) {
-      try {
-        const response = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
-        if (!response.ok) {
-          const transientStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
-          if (transientStatuses.has(response.status)) {
-            const error = new Error(`任务状态暂时不可用(${response.status})`);
-            (error as Error & { code?: string }).code = "TRANSIENT_POLL";
-            throw error;
-          }
-          const data = await response.json().catch(() => null) as { error?: string } | null;
-          throw new Error(data?.error ?? `任务状态读取失败(${response.status})`);
-        }
-
-        const raw = await response.text();
-        if (!raw.trim()) {
-          const error = new Error("任务状态返回空响应");
-          (error as Error & { code?: string }).code = "TRANSIENT_POLL";
-          throw error;
-        }
-        const job = JSON.parse(raw) as { status?: string; result?: unknown; error?: string };
-        if (job.status === "done") {
-          return job.result;
-        }
-        if (job.status === "cancelled") {
-          const error = new Error(job.error ?? "任务已取消");
-          (error as Error & { code?: string }).code = "JOB_CANCELLED";
-          throw error;
-        }
-        if (job.status === "error") {
-          throw new Error(job.error ?? "任务执行失败");
-        }
-
-        transientFailures = 0;
-      } catch (error) {
-        if (isCancelledError(error)) throw error;
-        if (isTransientPollError(error)) {
-          transientFailures += 1;
-          await wait(Math.min(intervalMs + transientFailures * 300, 6000));
-          continue;
-        }
-        throw error;
-      }
-
-      if (Date.now() - startedAt >= maxWaitMs) {
-        throw new Error("任务轮询超时，请稍后重试或查看任务结果");
-      }
-      await wait(intervalMs);
-    }
-  }
-
   function isCancelledError(error: unknown): boolean {
     if (!error || typeof error !== "object") return false;
     const maybe = error as { code?: unknown; message?: unknown; name?: unknown };
@@ -348,34 +268,32 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     return typeof maybe.message === "string" && maybe.message.includes("取消");
   }
 
+  function assistantModelMessages(messages: ReadonlyArray<InitAssistantMessage>): ReadonlyArray<Pick<InitAssistantMessage, "role" | "content">> {
+    return messages.map((item) => ({
+      role: item.role,
+      content: item.content,
+    }));
+  }
+
+  function abortInitAssistantStream(): void {
+    assistantAbortRef.current?.abort();
+    assistantAbortRef.current = null;
+  }
+
   function stopInitAssistantMessage(): void {
-    if (!assistantJobId || !chatting) return;
-    void fetch(`/api/inkos/jobs/${encodeURIComponent(assistantJobId)}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ reason: "用户停止生成" }),
-    })
-      .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok || !data?.ok) {
-          throw new Error(data?.error ?? "停止失败");
-        }
-        setChatting(false);
-        setAssistantJobId(null);
-        setAssistantChatError(null);
-        void message.success("已停止本次生成");
-      })
-      .catch((error: unknown) => {
-        const errorText = error instanceof Error ? error.message : String(error);
-        setAssistantChatError(errorText);
-        setResult({ ok: false, scope: "init-assistant-chat", error: errorText });
-        void message.error(errorText);
-      });
+    if (!chatting) return;
+    abortInitAssistantStream();
+    setChatting(false);
+    setAssistantLiveItems(null);
+    setAssistantChatError(null);
+    void message.success("已停止本次生成");
   }
 
   function clearAssistantConversation(): void {
+    abortInitAssistantStream();
     setAssistantMessages([]);
     setAssistantDraft("");
+    setAssistantLiveItems(null);
     if (typeof window !== "undefined") {
       window.localStorage.removeItem(assistantChatStorageKey());
     }
@@ -725,75 +643,102 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
     const draft = assistantDraft.trim();
     if (!draft || chatting || !bookConfigData?.book) return;
 
+    const activeBook = bookConfigData.book;
     const nextMessages = [...assistantMessages, { role: "user" as const, content: draft }];
     const currentSettings = settingsForm.getFieldsValue();
     const contextLines = [
       `当前书籍ID：${bookId}`,
-      `当前状态：${currentSettings.status ?? bookConfigData.book.status}`,
-      `目标章节：${currentSettings.targetChapters ?? bookConfigData.book.targetChapters}`,
-      `每章字数：${currentSettings.chapterWordCount ?? bookConfigData.book.chapterWordCount}`,
+      `当前状态：${currentSettings.status ?? activeBook.status}`,
+      `目标章节：${currentSettings.targetChapters ?? activeBook.targetChapters}`,
+      `每章字数：${currentSettings.chapterWordCount ?? activeBook.chapterWordCount}`,
       "任务：这是一本已经创建的书，请基于已有设定继续补全或修正，不要把它当成全新开书。",
     ];
 
     setAssistantMessages(nextMessages);
+    setAssistantLiveItems(messagesToChatKitItems(nextMessages));
     persistAssistantMessages(nextMessages);
     setAssistantDraft("");
     setChatting(true);
     setAssistantChatError(null);
+    abortInitAssistantStream();
+    const abortController = new AbortController();
+    assistantAbortRef.current = abortController;
 
-    void fetch("/api/inkos/init-assistant/chat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        bookId,
-        title: bookConfigData.book.title,
-        genre: currentSettings.genre ?? bookConfigData.book.genre,
-        platform: currentSettings.platform ?? bookConfigData.book.platform,
-        targetChapters: currentSettings.targetChapters ?? bookConfigData.book.targetChapters,
-        chapterWords: currentSettings.chapterWordCount ?? bookConfigData.book.chapterWordCount,
-        context: contextLines.join("\n"),
-        currentBrief: authorBrief || undefined,
-        useStream: assistantUseStream,
-        includeReasoning: assistantIncludeReasoning,
-        profileId: assistantProfileId,
-        async: true,
-        messages: nextMessages,
-      }),
-    })
-      .then(async (response) => {
-        const data = await response.json() as { ok?: boolean; error?: string; jobId?: string };
-        if (!response.ok || !data.ok || !data.jobId) {
-          throw new Error(data.error ?? "智能初始化对话失败");
+    void (async () => {
+      try {
+        const response = await fetch("/api/inkos/init-assistant/chat-stream", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            bookId,
+            title: activeBook.title,
+            genre: currentSettings.genre ?? activeBook.genre,
+            platform: currentSettings.platform ?? activeBook.platform,
+            targetChapters: currentSettings.targetChapters ?? activeBook.targetChapters,
+            chapterWords: currentSettings.chapterWordCount ?? activeBook.chapterWordCount,
+            context: contextLines.join("\n"),
+            currentBrief: authorBrief || undefined,
+            useStream: assistantUseStream,
+            includeReasoning: assistantIncludeReasoning,
+            profileId: assistantProfileId,
+            messages: assistantModelMessages(nextMessages),
+          }),
+          signal: abortController.signal,
+        });
+        if (abortController.signal.aborted) return;
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || "智能初始化对话失败");
         }
-        const jobId = String(data.jobId);
-        setAssistantJobId(jobId);
-        const result = (await pollJob(jobId)) as InitAssistantResult;
+        if (!contentType.includes("text/event-stream")) {
+          throw new Error("期望 SSE 流式响应，但服务端返回了非流式内容");
+        }
+
+        const streamed = await consumeChatKitStream(response, nextMessages, {
+          signal: abortController.signal,
+          onFrame: (items) => {
+            if (!abortController.signal.aborted) {
+              setAssistantLiveItems(items);
+            }
+          },
+        });
+        if (abortController.signal.aborted) return;
+        const finalBrief = typeof streamed.finalEvent?.brief === "string"
+          ? streamed.finalEvent.brief
+          : undefined;
         const updatedMessages = [
           ...nextMessages,
           {
             role: "assistant" as const,
-            content: result.reply?.trim() || "我已经根据当前书籍设定整理了修改方向。",
-            reasoning: typeof result.reasoning === "string" ? result.reasoning : undefined,
+            content: streamed.content.trim() || "我已经根据当前书籍设定整理了修改方向。",
+            reasoning: typeof streamed.reasoning === "string" && streamed.reasoning.trim()
+              ? streamed.reasoning
+              : undefined,
+            items: streamed.items,
           },
         ];
         setAssistantMessages(updatedMessages);
+        setAssistantLiveItems(null);
         persistAssistantMessages(updatedMessages);
-        if (typeof result.brief === "string") {
-          setAuthorBrief(result.brief);
-          persistAssistantBrief(result.brief);
+        if (typeof finalBrief === "string") {
+          setAuthorBrief(finalBrief);
+          persistAssistantBrief(finalBrief);
         }
-      })
-      .catch((error: unknown) => {
+      } catch (error: unknown) {
         if (isCancelledError(error)) return;
         const errorText = error instanceof Error ? error.message : String(error);
         setAssistantChatError(errorText);
+        setAssistantLiveItems(null);
         setResult({ ok: false, scope: "init-assistant-chat", error: errorText });
         void message.error(errorText);
-      })
-      .finally(() => {
+      } finally {
+        if (assistantAbortRef.current === abortController) {
+          assistantAbortRef.current = null;
+        }
         setChatting(false);
-        setAssistantJobId(null);
-      });
+      }
+    })();
   }
 
   const tabs = [
@@ -1130,6 +1075,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
           >
             <ChatPanel
               messages={assistantMessages}
+              items={assistantLiveItems}
               value={assistantDraft}
               onChange={setAssistantDraft}
               onSend={sendInitAssistantMessage}
@@ -1193,7 +1139,7 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
                   <Button size={isMobile ? "small" : "middle"} onClick={clearAssistantConversation} disabled={chatting || isSavingBrief}>
                     清空对话
                   </Button>
-                  <Button size={isMobile ? "small" : "middle"} danger onClick={stopInitAssistantMessage} disabled={!chatting || !assistantJobId}>
+                  <Button size={isMobile ? "small" : "middle"} danger onClick={stopInitAssistantMessage} disabled={!chatting}>
                     停止
                   </Button>
                 </>

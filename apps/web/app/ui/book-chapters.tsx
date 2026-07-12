@@ -4,8 +4,9 @@ import { App, Alert, Button, Card, Descriptions, Dropdown, Grid, Input, Modal, P
 import type { ColumnsType } from "antd/es/table";
 import { MoreOutlined } from "@ant-design/icons";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./chat-panel";
+import { consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
 import { ChatFactLogPanel } from "./chat-fact-log-panel";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
@@ -25,6 +26,7 @@ interface ChapterChatMessage {
   readonly role: "user" | "assistant";
   readonly content: string;
   readonly reasoning?: string;
+  readonly items?: ReadonlyArray<ChatKitItem>;
 }
 
 interface LlmProfile {
@@ -56,7 +58,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [chatMessages, setChatMessages] = useState<ReadonlyArray<ChapterChatMessage>>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [chatting, setChatting] = useState(false);
-  const [chatJobId, setChatJobId] = useState<string | null>(null);
+  const [chatLiveItems, setChatLiveItems] = useState<ReadonlyArray<ChatKitItem> | null>(null);
   const [chatError, setChatError] = useState<string | null>(null);
   const [chatLogOpen, setChatLogOpen] = useState(false);
   const [chatProfiles, setChatProfiles] = useState<ReadonlyArray<LlmProfile>>([]);
@@ -66,6 +68,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   const [replacePreviewLoading, setReplacePreviewLoading] = useState(false);
   const [replaceOriginalContent, setReplaceOriginalContent] = useState("");
   const [replaceCandidateContent, setReplaceCandidateContent] = useState("");
+  const chatAbortRef = useRef<AbortController | null>(null);
 
   function chapterChatStorageKey(chapter: number): string {
     return `${CHAPTER_CHAT_STORAGE_PREFIX}${bookId}.${chapter}`;
@@ -130,81 +133,6 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
     persistChapterChatProfileId(chapter, selected);
   }
 
-  async function pollJob(jobId: string): Promise<unknown> {
-    const intervalMs = 3000;
-    const maxWaitMs = 30 * 60 * 1000;
-    const startedAt = Date.now();
-    let transientFailures = 0;
-
-    const wait = async (ms: number): Promise<void> => {
-      await new Promise((resolve) => window.setTimeout(resolve, ms));
-    };
-
-    const isTransientPollError = (error: unknown): boolean => {
-      if (!error || typeof error !== "object") return false;
-      const maybe = error as { code?: unknown; message?: unknown; name?: unknown };
-      if (maybe.code === "TRANSIENT_POLL") return true;
-      if (maybe.name === "TypeError" || maybe.name === "SyntaxError" || maybe.name === "NetworkError") return true;
-      if (typeof maybe.message !== "string") return false;
-      const message = maybe.message.toLowerCase();
-      return message.includes("failed to fetch")
-        || message.includes("networkerror")
-        || message.includes("network request failed")
-        || message.includes("load failed")
-        || message.includes("unexpected end of json input");
-    };
-
-    while (true) {
-      try {
-        const response = await fetch(`/api/inkos/jobs/${encodeURIComponent(jobId)}`, { cache: "no-store" });
-        if (!response.ok) {
-          const transientStatuses = new Set([408, 425, 429, 500, 502, 503, 504]);
-          if (transientStatuses.has(response.status)) {
-            const error = new Error(`任务状态暂时不可用(${response.status})`);
-            (error as Error & { code?: string }).code = "TRANSIENT_POLL";
-            throw error;
-          }
-          const data = await response.json().catch(() => null) as { error?: string } | null;
-          throw new Error(data?.error ?? `任务状态读取失败(${response.status})`);
-        }
-
-        const raw = await response.text();
-        if (!raw.trim()) {
-          const error = new Error("任务状态返回空响应");
-          (error as Error & { code?: string }).code = "TRANSIENT_POLL";
-          throw error;
-        }
-        const job = JSON.parse(raw) as { status?: string; result?: unknown; error?: string };
-        if (job.status === "done") {
-          return job.result;
-        }
-        if (job.status === "cancelled") {
-          const error = new Error(job.error ?? "任务已取消");
-          (error as Error & { code?: string }).code = "JOB_CANCELLED";
-          throw error;
-        }
-        if (job.status === "error") {
-          throw new Error(job.error ?? "任务执行失败");
-        }
-
-        transientFailures = 0;
-      } catch (error) {
-        if (isCancelledError(error)) throw error;
-        if (isTransientPollError(error)) {
-          transientFailures += 1;
-          await wait(Math.min(intervalMs + transientFailures * 300, 6000));
-          continue;
-        }
-        throw error;
-      }
-
-      if (Date.now() - startedAt >= maxWaitMs) {
-        throw new Error("任务轮询超时，请稍后重试或查看任务结果");
-      }
-      await wait(intervalMs);
-    }
-  }
-
   function isCancelledError(error: unknown): boolean {
     if (!error || typeof error !== "object") return false;
     const maybe = error as { code?: unknown; message?: unknown; name?: unknown };
@@ -213,29 +141,25 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
     return typeof maybe.message === "string" && maybe.message.includes("取消");
   }
 
+  function chapterModelMessages(messages: ReadonlyArray<ChapterChatMessage>): ReadonlyArray<Pick<ChapterChatMessage, "role" | "content">> {
+    return messages.map((item) => ({
+      role: item.role,
+      content: item.content,
+    }));
+  }
+
+  function abortChapterChatStream(): void {
+    chatAbortRef.current?.abort();
+    chatAbortRef.current = null;
+  }
+
   function stopChapterChat(): void {
-    if (!chatJobId || !chatting) return;
-    void fetch(`/api/inkos/jobs/${encodeURIComponent(chatJobId)}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ reason: "用户停止生成" }),
-    })
-      .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok || !data?.ok) {
-          throw new Error(data?.error ?? "停止失败");
-        }
-        setChatting(false);
-        setChatJobId(null);
-        setChatError(null);
-        void message.success("已停止本次章节对话");
-      })
-      .catch((error: unknown) => {
-        const errorText = error instanceof Error ? error.message : String(error);
-        setChatError(errorText);
-        setActionResult({ ok: false, scope: "chapter-chat", error: errorText });
-        void message.error(errorText);
-      });
+    if (!chatting) return;
+    abortChapterChatStream();
+    setChatting(false);
+    setChatLiveItems(null);
+    setChatError(null);
+    void message.success("已停止本次章节对话");
   }
 
   async function loadChapters(): Promise<void> {
@@ -319,8 +243,10 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
   }
 
   function openChapterChat(row: ChapterMeta): void {
+    abortChapterChatStream();
     setChatChapter(row);
     setChatError(null);
+    setChatLiveItems(null);
     setChatMessages(loadStoredChapterChat(row.number));
     void loadPersistedChatSession("chapter-chat", chapterSessionKey(row.number)).then((messages) => {
       if (Array.isArray(messages) && messages.length > 0) {
@@ -336,57 +262,71 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
     const chapterNumber = chatChapter.number;
     const nextMessages = [...chatMessages, { role: "user" as const, content: chatDraft.trim() }];
     setChatMessages(nextMessages);
+    setChatLiveItems(messagesToChatKitItems(nextMessages));
     persistChapterChat(chapterNumber, nextMessages);
     setChatDraft("");
     setChatting(true);
     setChatError(null);
-    void fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chapterNumber}/chat`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        messages: nextMessages,
-        useStream: false,
-        includeReasoning: false,
-        profileId: chatProfileId,
-        async: true,
-      }),
-    })
-      .then(async (response) => {
-        const data = await response.json();
-        if (!response.ok || !data?.ok || !data?.jobId) {
-          throw new Error(data?.error ?? "章节对话失败");
-        }
-        const jobId = String(data.jobId);
-        setChatJobId(jobId);
-        const result = await pollJob(jobId) as {
-          ok?: boolean;
-          reply?: string;
-          reasoning?: string;
-        };
-        const content = typeof result?.reply === "string" && result.reply.trim()
-          ? result.reply.trim()
-          : "已完成本次处理，但没有返回可显示的正文回复。";
-        setChatMessages((prev) => {
-          const updated = [...prev, {
-            role: "assistant" as const,
-            content,
-            reasoning: typeof result?.reasoning === "string" ? result.reasoning : undefined,
-          }];
-          persistChapterChat(chapterNumber, updated);
-          return updated;
+    abortChapterChatStream();
+    const abortController = new AbortController();
+    chatAbortRef.current = abortController;
+
+    void (async () => {
+      try {
+        const response = await fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chapterNumber}/chat-stream`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            messages: chapterModelMessages(nextMessages),
+            profileId: chatProfileId,
+          }),
+          signal: abortController.signal,
         });
-      })
-      .catch((error: unknown) => {
+        if (abortController.signal.aborted) return;
+        const contentType = response.headers.get("content-type") ?? "";
+        if (!response.ok) {
+          const errorText = await response.text();
+          throw new Error(errorText || "章节对话失败");
+        }
+        if (!contentType.includes("text/event-stream")) {
+          throw new Error("期望 SSE 流式响应，但服务端返回了非流式内容");
+        }
+
+        const streamed = await consumeChatKitStream(response, nextMessages, {
+          signal: abortController.signal,
+          onFrame: (items) => {
+            if (!abortController.signal.aborted) {
+              setChatLiveItems(items);
+            }
+          },
+        });
+        if (abortController.signal.aborted) return;
+        const content = streamed.content.trim() || "已完成本次处理，但没有返回可显示的正文回复。";
+        const updated = [...nextMessages, {
+          role: "assistant" as const,
+          content,
+          reasoning: typeof streamed.reasoning === "string" && streamed.reasoning.trim()
+            ? streamed.reasoning
+            : undefined,
+          items: streamed.items,
+        }];
+        setChatMessages(updated);
+        setChatLiveItems(null);
+        persistChapterChat(chapterNumber, updated);
+      } catch (error: unknown) {
         if (isCancelledError(error)) return;
         const errorText = error instanceof Error ? error.message : String(error);
         setChatError(errorText);
+        setChatLiveItems(null);
         setActionResult({ ok: false, scope: "chapter-chat", error: errorText });
         void message.error(errorText);
-      })
-      .finally(() => {
+      } finally {
+        if (chatAbortRef.current === abortController) {
+          chatAbortRef.current = null;
+        }
         setChatting(false);
-        setChatJobId(null);
-      });
+      }
+    })();
   }
 
   function latestAssistantReply(): string {
@@ -628,6 +568,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           >
             <ChatPanel
               messages={chatMessages}
+              items={chatLiveItems}
               value={chatDraft}
               onChange={setChatDraft}
               onSend={sendChapterChat}
@@ -662,7 +603,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
                       {chatLogOpen ? "收起日志" : "实时日志"}
                     </Button>
                   ) : null}
-                  <Button danger onClick={stopChapterChat} disabled={!chatting || !chatJobId}>
+                  <Button danger onClick={stopChapterChat} disabled={!chatting}>
                     停止
                   </Button>
                   <Dropdown menu={{ items: chatMenuItems }} trigger={["click"]}>

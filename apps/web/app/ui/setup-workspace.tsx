@@ -24,12 +24,9 @@ import {
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ChatKitPanel,
-  applyProfileStreamEvent,
-  createEmptyProfileStreamState,
+  consumeChatKitStream,
   messagesToChatKitItems,
   type ChatKitItem,
-  type ProfileStreamEvent,
-  type ProfileStreamState,
 } from "./chat-kit";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
@@ -117,18 +114,6 @@ interface StoredProfileChatSession {
   readonly genre?: string;
   readonly platform?: string;
 }
-
-interface ProfileChatStreamEvent {
-  readonly type: string;
-  readonly delta?: string;
-  readonly content?: string;
-  readonly reasoning?: string;
-  readonly error?: string;
-  readonly data?: Record<string, unknown>;
-  readonly ok?: boolean;
-  readonly toolCalls?: number;
-}
-
 
 export function SetupWorkspace() {
   const { message } = App.useApp();
@@ -366,101 +351,6 @@ export function SetupWorkspace() {
     });
   }
 
-  function parseSseEventBlock(block: string): ProfileChatStreamEvent | null {
-    const lines = block.split(/\r?\n/);
-    const dataLines = lines
-      .filter((line) => line.startsWith("data:"))
-      .map((line) => line.slice(5).trimStart());
-    if (dataLines.length === 0) return null;
-    try {
-      return JSON.parse(dataLines.join("\n")) as ProfileChatStreamEvent;
-    } catch {
-      return null;
-    }
-  }
-
-  async function consumeProfileChatStream(
-    response: Response,
-    baseMessages: ReadonlyArray<ProfileChatMessage>,
-    options?: { readonly signal?: AbortSignal; readonly onFrame?: (items: ChatKitItem[]) => void },
-  ): Promise<{ content: string; reasoning?: string; items: ReadonlyArray<ChatKitItem> }> {
-    if (!response.body) {
-      throw new Error("流式响应不可用");
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let turnState: ProfileStreamState = createEmptyProfileStreamState();
-    const historyItems = messagesToChatKitItems(baseMessages);
-
-    const renderFrame = (): void => {
-      options?.onFrame?.([...historyItems, ...turnState.items]);
-    };
-
-    const throwIfAborted = (): void => {
-      if (options?.signal?.aborted) {
-        const error = new Error("对话已取消");
-        error.name = "AbortError";
-        throw error;
-      }
-    };
-
-    renderFrame();
-
-    try {
-      while (true) {
-        throwIfAborted();
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
-
-        let delimiterIndex = buffer.indexOf("\n\n");
-        while (delimiterIndex >= 0) {
-          throwIfAborted();
-          const block = buffer.slice(0, delimiterIndex);
-          buffer = buffer.slice(delimiterIndex + 2);
-          const raw = parseSseEventBlock(block);
-          if (!raw) {
-            delimiterIndex = buffer.indexOf("\n\n");
-            continue;
-          }
-
-          if (raw.type === "error") {
-            throw new Error(raw.error ?? "对话失败");
-          }
-
-          const event = raw as ProfileStreamEvent;
-          if (
-            event.type === "message_chunk"
-            || event.type === "thought_chunk"
-            || event.type === "tool_call"
-            || event.type === "tool_call_update"
-            || event.type === "final"
-          ) {
-            turnState = applyProfileStreamEvent(turnState, event);
-            renderFrame();
-          }
-
-          delimiterIndex = buffer.indexOf("\n\n");
-        }
-
-        if (done) break;
-      }
-    } finally {
-      try {
-        reader.releaseLock();
-      } catch {
-        // ignore
-      }
-    }
-
-    return {
-      content: turnState.content,
-      reasoning: turnState.reasoning || undefined,
-      items: turnState.items,
-    };
-  }
-
   function profileModelMessages(messages: ReadonlyArray<ProfileChatMessage>): ReadonlyArray<Pick<ProfileChatMessage, "role" | "content" | "reasoning">> {
     return messages.map((item) => ({
       role: item.role,
@@ -527,7 +417,7 @@ export function SetupWorkspace() {
           throw new Error("期望 SSE 流式响应，但服务端返回了非流式内容");
         }
 
-        const streamed = await consumeProfileChatStream(response, nextMessages, {
+        const streamed = await consumeChatKitStream(response, nextMessages, {
           signal: abortController.signal,
           onFrame: (items) => {
             if (!abortController.signal.aborted) {
