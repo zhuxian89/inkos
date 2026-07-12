@@ -357,6 +357,7 @@ export function createLlmService(
       `- 单本书章节目录模式：${join(inkosProjectRoot, "books", "<bookId>", "chapters")}`,
       `- 项目配置文件：${join(inkosProjectRoot, "inkos.json")}`,
       "书籍目录下包含书籍配置、story 长期记忆文件、chapters 章节文件等内容。",
+      "如需处理本地文件：先用 search_text_files 或 list_directory 定位，再用 read_text_file 读取真实文件；需要修改时再用 write_text_file 写回。",
       "当问题与小说生产、题材、平台、写作流程、审计流程、项目文件路径有关时，可以结合这些背景信息提高回答相关性。",
       "",
       systemContext,
@@ -377,13 +378,26 @@ export function createLlmService(
     },
     {
       name: "read_text_file",
-      description: "读取文本文件内容。适合 .env、.json、.md、.txt 等文本文件。",
+      description: "读取文本文件内容。适合配置、Markdown、日志、源码等文本文件。",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string", description: "文件路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
         },
         required: ["path"],
+      },
+    },
+    {
+      name: "search_text_files",
+      description: "在本地文本文件中搜索关键词。适合先定位文件，再调用 read_text_file 读取完整内容。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "要搜索的关键词" },
+          path: { type: "string", description: "搜索目录，默认 INKOS_PROJECT_ROOT，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
+          maxResults: { type: "number", description: "最多返回多少条匹配，默认 20，最大 50" },
+        },
+        required: ["query"],
       },
     },
     {
@@ -461,6 +475,174 @@ export function createLlmService(
     },
   ];
 
+  const PROFILE_TEXT_EXTENSIONS = new Set([
+    ".css",
+    ".csv",
+    ".env",
+    ".go",
+    ".html",
+    ".ini",
+    ".java",
+    ".js",
+    ".json",
+    ".jsx",
+    ".log",
+    ".md",
+    ".mjs",
+    ".py",
+    ".rs",
+    ".sh",
+    ".sql",
+    ".toml",
+    ".ts",
+    ".tsx",
+    ".txt",
+    ".vue",
+    ".xml",
+    ".yaml",
+    ".yml",
+  ]);
+
+  const PROFILE_SEARCH_SKIP_DIRS = new Set([
+    ".git",
+    ".next",
+    "dist",
+    "build",
+    "node_modules",
+    "target",
+  ]);
+
+  function profileToolOk(payload: Record<string, unknown>): string {
+    return JSON.stringify({ ok: true, ...payload }, null, 2);
+  }
+
+  function profileToolError(name: string, error: unknown): string {
+    return JSON.stringify({
+      ok: false,
+      recoverable: true,
+      tool: name,
+      error: describeError(error),
+    }, null, 2);
+  }
+
+  function isProfileTextPath(filePath: string): boolean {
+    const extension = extname(filePath).toLowerCase();
+    return PROFILE_TEXT_EXTENSIONS.has(extension) || basename(filePath) === ".env";
+  }
+
+  type ProfileToolStatus = "running" | "in_progress" | "complete" | "success" | "failed" | "error" | "cancelled";
+
+  type ProfileToolContentItem =
+    | { readonly type: "text"; readonly text?: string; readonly path?: string; readonly changeKind?: string }
+    | { readonly type: "diff"; readonly path?: string; readonly oldText?: string; readonly newText?: string; readonly changeKind?: string };
+
+  type ProfileToolCall = {
+    readonly callId: string;
+    readonly title?: string;
+    readonly status: ProfileToolStatus;
+    readonly kind: string;
+    readonly content?: ReadonlyArray<ProfileToolContentItem>;
+    readonly locations?: ReadonlyArray<{ readonly path: string; readonly line?: number }>;
+    readonly meta?: Record<string, unknown>;
+    readonly result?: string;
+    readonly rawType?: string;
+  };
+
+  function profileToolKind(name: string): string {
+    if (name === "read_text_file" || name === "list_directory" || name === "list_books" || name === "list_llm_profiles") return "read";
+    if (name === "search_text_files") return "search";
+    if (name === "write_text_file" || name === "make_directory") return "edit";
+    if (name === "move_path") return "move";
+    if (name === "delete_path") return "delete";
+    return "other";
+  }
+
+  function optionalString(value: unknown): string | undefined {
+    return typeof value === "string" && value.trim() ? value : undefined;
+  }
+
+  function parseProfileToolPayload(raw?: string): Record<string, unknown> | null {
+    if (!raw?.trim().startsWith("{")) return null;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function toolPrimaryPath(name: string, args: Record<string, unknown>, payload: Record<string, unknown> | null): string | undefined {
+    if (name === "move_path") return optionalString(args.from) ?? optionalString(payload?.from);
+    return optionalString(args.path) ?? optionalString(payload?.path);
+  }
+
+  function buildProfileToolCall(input: {
+    readonly id: string;
+    readonly name: string;
+    readonly args: Record<string, unknown>;
+    readonly status: ProfileToolStatus;
+    readonly result?: string;
+    readonly error?: string;
+  }): ProfileToolCall {
+    const payload = parseProfileToolPayload(input.result);
+    const primaryPath = toolPrimaryPath(input.name, input.args, payload);
+    const query = optionalString(input.args.query) ?? optionalString(payload?.query);
+    const title = primaryPath ?? query ?? input.name;
+    const locations: Array<{ path: string; line?: number }> = [];
+    const content: ProfileToolContentItem[] = [];
+
+    if (input.name === "read_text_file") {
+      const text = optionalString(payload?.content);
+      if (text !== undefined) {
+        content.push({ type: "text", text, ...(primaryPath ? { path: primaryPath } : {}) });
+      }
+      if (primaryPath) locations.push({ path: primaryPath });
+    } else if (input.name === "write_text_file") {
+      const text = optionalString(input.args.content);
+      if (text !== undefined) {
+        content.push({ type: "text", text, ...(primaryPath ? { path: primaryPath } : {}), changeKind: "add" });
+      }
+      if (primaryPath) locations.push({ path: primaryPath });
+    } else if (input.name === "search_text_files") {
+      const results = Array.isArray(payload?.results) ? payload.results : [];
+      const lines: string[] = [];
+      for (const item of results) {
+        if (!item || typeof item !== "object") continue;
+        const row = item as Record<string, unknown>;
+        const path = optionalString(row.path);
+        const line = typeof row.line === "number" ? row.line : undefined;
+        const text = optionalString(row.text) ?? "";
+        if (path) locations.push({ path, ...(line ? { line } : {}) });
+        lines.push(`${path ?? "(unknown)"}${line ? `:${line}` : ""} ${text}`.trim());
+      }
+      if (lines.length > 0) {
+        content.push({ type: "text", text: lines.join("\n") });
+      }
+    } else if (input.result && input.status !== "running") {
+      content.push({ type: "text", text: input.result });
+      if (primaryPath) locations.push({ path: primaryPath });
+    }
+
+    return {
+      callId: input.id,
+      title,
+      status: input.status,
+      kind: profileToolKind(input.name),
+      ...(content.length > 0 ? { content } : {}),
+      ...(locations.length > 0 ? { locations } : {}),
+      meta: {
+        rawType: "profileToolCall",
+        tool: input.name,
+        args: input.args,
+        ...(input.error ? { error: input.error } : {}),
+      },
+      ...(input.result ? { result: input.result } : {}),
+      rawType: "profileToolCall",
+    };
+  }
+
   function normalizeProfileToolPath(inputPath: string): string {
     const inkosHome = resolveInkosHomeDir();
     const raw = inputPath.trim()
@@ -491,18 +673,110 @@ export function createLlmService(
             mtime: info.mtime.toISOString(),
           };
         }));
-        return JSON.stringify({ path: dirPath, entries: payload }, null, 2);
+        return profileToolOk({ path: dirPath, entries: payload });
       }
 
       case "read_text_file": {
         const filePath = normalizeProfileToolPath(String(args.path ?? ""));
-        const allowedTextExt = new Set([".env", ".json", ".md", ".txt", ".yaml", ".yml", ".log"]);
-        const extension = extname(filePath).toLowerCase();
-        if (!allowedTextExt.has(extension) && basename(filePath) !== ".env") {
+        if (!isProfileTextPath(filePath)) {
           throw new Error(`Only text-like files are supported: ${filePath}`);
         }
         const content = await readFile(filePath, "utf-8");
-        return JSON.stringify({ path: filePath, content }, null, 2);
+        return profileToolOk({ path: filePath, content });
+      }
+
+      case "search_text_files": {
+        const query = String(args.query ?? "").trim();
+        if (!query) {
+          throw new Error("query is required");
+        }
+        const rootPath = normalizeProfileToolPath(String(args.path ?? "INKOS_PROJECT_ROOT"));
+        const requestedMax = Number(args.maxResults ?? 20);
+        const maxResults = Math.min(Math.max(Number.isFinite(requestedMax) ? Math.trunc(requestedMax) : 20, 1), 50);
+        const results: Array<{ readonly path: string; readonly line: number; readonly text: string }> = [];
+        let scannedFiles = 0;
+        let skippedFiles = 0;
+        let truncated = false;
+
+        async function walk(dirPath: string): Promise<void> {
+          if (results.length >= maxResults || scannedFiles >= 1000) {
+            truncated = true;
+            return;
+          }
+          const entries = await readdir(dirPath, { withFileTypes: true });
+          for (const entry of entries) {
+            if (results.length >= maxResults || scannedFiles >= 1000) {
+              truncated = true;
+              return;
+            }
+            if (entry.name.startsWith(".") && entry.name !== ".env") continue;
+            const fullPath = join(dirPath, entry.name);
+            if (entry.isDirectory()) {
+              if (!PROFILE_SEARCH_SKIP_DIRS.has(entry.name)) {
+                await walk(fullPath);
+              }
+              continue;
+            }
+            if (!entry.isFile() || !isProfileTextPath(fullPath)) {
+              skippedFiles += 1;
+              continue;
+            }
+            const info = await stat(fullPath);
+            if (info.size > 1024 * 1024) {
+              skippedFiles += 1;
+              continue;
+            }
+            scannedFiles += 1;
+            const content = await readFile(fullPath, "utf-8");
+            const lines = content.split(/\r?\n/);
+            for (let index = 0; index < lines.length; index += 1) {
+              const text = lines[index] ?? "";
+              if (!text.includes(query)) continue;
+              results.push({
+                path: fullPath,
+                line: index + 1,
+                text: text.length > 300 ? `${text.slice(0, 300)}…` : text,
+              });
+              if (results.length >= maxResults) {
+                truncated = true;
+                return;
+              }
+            }
+          }
+        }
+
+        const rootInfo = await stat(rootPath);
+        if (rootInfo.isFile()) {
+          if (!isProfileTextPath(rootPath)) {
+            throw new Error(`Only text-like files are supported: ${rootPath}`);
+          }
+          const content = await readFile(rootPath, "utf-8");
+          const lines = content.split(/\r?\n/);
+          scannedFiles = 1;
+          for (let index = 0; index < lines.length && results.length < maxResults; index += 1) {
+            const text = lines[index] ?? "";
+            if (!text.includes(query)) continue;
+            results.push({
+              path: rootPath,
+              line: index + 1,
+              text: text.length > 300 ? `${text.slice(0, 300)}…` : text,
+            });
+          }
+        } else if (rootInfo.isDirectory()) {
+          await walk(rootPath);
+        } else {
+          throw new Error(`Path is neither file nor directory: ${rootPath}`);
+        }
+
+        return profileToolOk({
+          path: rootPath,
+          query,
+          maxResults,
+          results,
+          scannedFiles,
+          skippedFiles,
+          truncated,
+        });
       }
 
       case "write_text_file": {
@@ -510,13 +784,13 @@ export function createLlmService(
         const content = String(args.content ?? "");
         await mkdir(dirname(filePath), { recursive: true });
         await writeFile(filePath, content, "utf-8");
-        return JSON.stringify({ ok: true, path: filePath, size: content.length }, null, 2);
+        return profileToolOk({ path: filePath, size: content.length });
       }
 
       case "make_directory": {
         const dirPath = normalizeProfileToolPath(String(args.path ?? ""));
         await mkdir(dirPath, { recursive: true });
-        return JSON.stringify({ ok: true, path: dirPath }, null, 2);
+        return profileToolOk({ path: dirPath });
       }
 
       case "move_path": {
@@ -524,13 +798,13 @@ export function createLlmService(
         const toPath = normalizeProfileToolPath(String(args.to ?? ""));
         await mkdir(dirname(toPath), { recursive: true });
         await rename(fromPath, toPath);
-        return JSON.stringify({ ok: true, from: fromPath, to: toPath }, null, 2);
+        return profileToolOk({ from: fromPath, to: toPath });
       }
 
       case "delete_path": {
         const path = normalizeProfileToolPath(String(args.path ?? ""));
         await rm(path, { recursive: true, force: true });
-        return JSON.stringify({ ok: true, path }, null, 2);
+        return profileToolOk({ path });
       }
 
       case "list_books": {
@@ -550,14 +824,14 @@ export function createLlmService(
             return { id: bookId, error: "failed to load" };
           }
         }));
-        return JSON.stringify(summaries, null, 2);
+        return profileToolOk({ books: summaries });
       }
 
       case "list_llm_profiles": {
         const db = openProfilesDb();
         try {
           const rows = db.prepare("SELECT * FROM llm_profiles ORDER BY is_active DESC, updated_at DESC").all() as unknown as LlmProfileRow[];
-          return JSON.stringify(rows.map((row) => mapProfileRow(row)), null, 2);
+          return profileToolOk({ profiles: rows.map((row) => mapProfileRow(row)) });
         } finally {
           db.close();
         }
@@ -566,11 +840,11 @@ export function createLlmService(
       case "activate_llm_profile": {
         const profileId = String(args.profileId ?? "");
         const profile = await activateLlmProfile(profileId);
-        return JSON.stringify({ ok: true, profile }, null, 2);
+        return profileToolOk({ profile });
       }
 
       default:
-        return JSON.stringify({ error: `Unknown tool: ${name}` });
+        return profileToolError(name, new Error(`Unknown tool: ${name}`));
     }
   }
 
@@ -584,14 +858,8 @@ export function createLlmService(
       readonly includeReasoning?: boolean;
       readonly onTextDelta?: (delta: string) => void;
       readonly onReasoningDelta?: (delta: string) => void;
-      readonly onToolStart?: (info: { id: string; name: string; arguments: string }) => void;
-      readonly onToolEnd?: (info: {
-        id: string;
-        name: string;
-        ok: boolean;
-        resultPreview: string;
-        error?: string;
-      }) => void;
+      readonly onToolStart?: (toolCall: ProfileToolCall) => void;
+      readonly onToolEnd?: (toolCall: ProfileToolCall) => void;
       readonly abortSignal?: AbortSignal;
     },
   ): Promise<{
@@ -625,14 +893,8 @@ export function createLlmService(
       readonly includeReasoning?: boolean;
       readonly onTextDelta?: (delta: string) => void;
       readonly onReasoningDelta?: (delta: string) => void;
-      readonly onToolStart?: (info: { id: string; name: string; arguments: string }) => void;
-      readonly onToolEnd?: (info: {
-        id: string;
-        name: string;
-        ok: boolean;
-        resultPreview: string;
-        error?: string;
-      }) => void;
+      readonly onToolStart?: (toolCall: ProfileToolCall) => void;
+      readonly onToolEnd?: (toolCall: ProfileToolCall) => void;
       readonly abortSignal?: AbortSignal;
       readonly logToolCall?: (name: string, args: Record<string, unknown>) => void;
       readonly tools?: ReadonlyArray<ToolDefinition>;
@@ -694,27 +956,41 @@ export function createLlmService(
 
       for (const toolCall of result.toolCalls) {
         throwIfAborted();
-        const args = parseToolArguments(toolCall.arguments);
-        options?.logToolCall?.(toolCall.name, args);
-        options?.onToolStart?.({
-          id: toolCall.id,
-          name: toolCall.name,
-          arguments: toolCall.arguments,
-        });
-        const toolResult = await executeTool(toolCall.name, args);
+        let args: Record<string, unknown> = {};
+        let toolResult = "";
+        try {
+          args = parseToolArguments(toolCall.arguments);
+          options?.onToolStart?.(buildProfileToolCall({
+            id: toolCall.id,
+            name: toolCall.name,
+            args,
+            status: "running",
+          }));
+          options?.logToolCall?.(toolCall.name, args);
+          toolResult = await executeTool(toolCall.name, args);
+        } catch (error) {
+          if (options?.abortSignal?.aborted) throw error;
+          if (Object.keys(args).length === 0) {
+            options?.onToolStart?.(buildProfileToolCall({
+              id: toolCall.id,
+              name: toolCall.name,
+              args,
+              status: "running",
+            }));
+          }
+          toolResult = profileToolError(toolCall.name, error);
+        }
         throwIfAborted();
         const ok = parseToolResultOk(toolResult);
         const error = ok ? undefined : parseToolResultError(toolResult);
-        const resultPreview = toolResult.length > 2000
-          ? `${toolResult.slice(0, 2000)}\n…(truncated)`
-          : toolResult;
-        options?.onToolEnd?.({
+        options?.onToolEnd?.(buildProfileToolCall({
           id: toolCall.id,
           name: toolCall.name,
-          ok,
-          resultPreview,
+          args,
+          status: ok ? "complete" : "error",
+          result: toolResult,
           ...(error ? { error } : {}),
-        });
+        }));
         toolTrace.push({ name: toolCall.name, args, ok, ...(error ? { error } : {}) });
         conversation.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
       }

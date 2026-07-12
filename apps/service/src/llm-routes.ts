@@ -401,6 +401,13 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
 
   app.post("/api/llm-profiles/:id/chat-stream", async (req, res) => {
     let streamOpened = false;
+    const abortController = new AbortController();
+    const onClientClose = (): void => {
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+      }
+    };
+    req.on("close", onClientClose);
     const paramsSchema = z.object({
       id: z.string().min(1),
     });
@@ -411,6 +418,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       })).min(1),
       genre: z.string().optional(),
       platform: z.string().optional(),
+      // Accepted for backward compatibility; profile chat-stream always streams with reasoning.
       includeReasoning: z.boolean().optional(),
     });
     const sendEvent = (payload: Record<string, unknown>): void => {
@@ -425,7 +433,6 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
 
       const genre = input.genre;
       const platform = input.platform;
-      const includeReasoning = input.includeReasoning === true;
       const db = context.llmService.openProfilesDb();
       let profile = null;
       try {
@@ -456,7 +463,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         platform,
         provider: profile.provider,
         model: profile.model,
-        includeReasoning,
+        includeReasoning: true,
       });
 
       const client = createLLMClient({
@@ -480,36 +487,36 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
 
       const result = await context.llmService.runProfileChatWithTools(profileId, client, profile.model, normalizedMessages, {
         useStream: true,
-        includeReasoning,
+        includeReasoning: true,
+        abortSignal: abortController.signal,
         onTextDelta: (delta) => {
           sendEvent({ type: "message_chunk", data: { content: delta } });
         },
         onReasoningDelta: (delta) => {
           sendEvent({ type: "thought_chunk", data: { content: delta } });
         },
-        onToolStart: (info) => {
+        onToolStart: (toolCall) => {
           sendEvent({
             type: "tool_call",
-            data: {
-              id: info.id,
-              name: info.name,
-              arguments: info.arguments,
-              status: "running",
-            },
+            data: toolCall,
           });
         },
-        onToolEnd: (info) => {
+        onToolEnd: (toolCall) => {
           sendEvent({
             type: "tool_call_update",
-            data: {
-              id: info.id,
-              status: info.ok ? "complete" : "error",
-              resultPreview: info.resultPreview,
-              ...(info.error ? { error: info.error } : {}),
-            },
+            data: toolCall,
           });
         },
       });
+
+      if (abortController.signal.aborted) {
+        logInfo("llm_profiles.chat_stream.cancelled", {
+          profileId,
+          provider: profile.provider,
+          model: profile.model,
+        });
+        return;
+      }
 
       sendEvent({
         type: "final",
@@ -528,6 +535,10 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         contentLength: result.content.length,
       });
     } catch (error) {
+      if (abortController.signal.aborted || isAbortLikeError(error)) {
+        logInfo("llm_profiles.chat_stream.cancelled", { profileId: req.params.id });
+        return;
+      }
       const message = describeError(error);
       if (streamOpened) {
         sendEvent({ type: "error", ok: false, error: message });
@@ -538,6 +549,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         return;
       }
     } finally {
+      req.off("close", onClientClose);
       if (streamOpened && !res.writableEnded) {
         res.end();
       }

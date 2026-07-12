@@ -3,7 +3,8 @@ doc_type: audit-index
 audit: 2026-07-12-profile-chat-ux
 scope: profile ChatKit + SSE（chat-kit/、setup-workspace、llm-routes chat-stream、llm-service tool 回调）
 created: 2026-07-12
-status: active
+status: superseded
+superseded-by: 2026-07-12-profile-chat-fe-be
 total_findings: 6
 ---
 

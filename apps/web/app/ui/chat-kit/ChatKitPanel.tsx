@@ -91,12 +91,8 @@ export function ChatKitPanel(props: Readonly<{
               return (
                 <div key={item.id} style={{ maxWidth: "92%" }}>
                   <ToolCallCard
-                    name={item.name}
-                    status={item.status}
-                    argsPreview={item.argsPreview}
-                    resultPreview={item.resultPreview}
-                    error={item.error}
-                    defaultExpanded={item.status !== "running"}
+                    toolCall={item.toolCall}
+                    defaultExpanded={item.toolCall.status !== "running" && item.toolCall.status !== "in_progress"}
                   />
                 </div>
               );

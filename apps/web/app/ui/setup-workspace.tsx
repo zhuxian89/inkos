@@ -5,7 +5,6 @@ import {
   Alert,
   Button,
   Card,
-  Checkbox,
   Col,
   Form,
   Grid,
@@ -116,8 +115,6 @@ interface StoredProfileChatSession {
   readonly messages: ReadonlyArray<ProfileChatMessage>;
   readonly genre?: string;
   readonly platform?: string;
-  readonly useStream?: boolean;
-  readonly includeReasoning?: boolean;
 }
 
 interface ProfileChatStreamEvent {
@@ -157,8 +154,6 @@ export function SetupWorkspace() {
   const [profileChatMessages, setProfileChatMessages] = useState<ReadonlyArray<ProfileChatMessage>>([]);
   const [profileChatGenre, setProfileChatGenre] = useState<string>("chuanyue");
   const [profileChatPlatform, setProfileChatPlatform] = useState<string>("tomato");
-  const [profileChatUseStream, setProfileChatUseStream] = useState(true);
-  const [profileChatIncludeReasoning, setProfileChatIncludeReasoning] = useState(true);
   const [chattingProfileId, setChattingProfileId] = useState<string | null>(null);
   const [profileLiveItems, setProfileLiveItems] = useState<ChatKitItem[] | null>(null);
   const profileChatAbortRef = useRef<AbortController | null>(null);
@@ -206,8 +201,6 @@ export function SetupWorkspace() {
         messages: Array.isArray(parsed.messages) ? parsed.messages : [],
         genre: typeof parsed.genre === "string" ? parsed.genre : undefined,
         platform: typeof parsed.platform === "string" ? parsed.platform : undefined,
-        useStream: parsed.useStream !== false,
-        includeReasoning: parsed.includeReasoning !== false,
       };
     } catch {
       return null;
@@ -224,8 +217,6 @@ export function SetupWorkspace() {
       meta: {
         genre: payload.genre,
         platform: payload.platform,
-        useStream: payload.useStream,
-        includeReasoning: payload.includeReasoning,
       },
     });
   }
@@ -367,8 +358,6 @@ export function SetupWorkspace() {
     setProfileChatMessages(stored?.messages ?? []);
     setProfileChatGenre(stored?.genre ?? "chuanyue");
     setProfileChatPlatform(stored?.platform ?? "tomato");
-    setProfileChatUseStream(stored?.useStream !== false);
-    setProfileChatIncludeReasoning(stored?.includeReasoning !== false);
     void loadPersistedChatSession("profile-chat", `profile:${profile.id}`).then((messages) => {
       if (Array.isArray(messages) && messages.length > 0) {
         setProfileChatMessages(messages as ReadonlyArray<ProfileChatMessage>);
@@ -484,8 +473,6 @@ export function SetupWorkspace() {
     const chatOptionsSnapshot = {
       genre: profileChatGenre,
       platform: profileChatPlatform,
-      useStream: profileChatUseStream,
-      includeReasoning: profileChatIncludeReasoning,
     };
 
     const nextMessages: ReadonlyArray<ProfileChatMessage> = [
@@ -507,18 +494,13 @@ export function SetupWorkspace() {
 
     void (async () => {
       try {
-        const endpoint = chatOptionsSnapshot.useStream
-          ? `/api/inkos/llm-profiles/${activeProfileId}/chat-stream`
-          : `/api/inkos/llm-profiles/${activeProfileId}/chat`;
-        const response = await fetch(endpoint, {
+        const response = await fetch(`/api/inkos/llm-profiles/${activeProfileId}/chat-stream`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
             messages: nextMessages,
             genre: chatOptionsSnapshot.genre,
             platform: chatOptionsSnapshot.platform,
-            useStream: chatOptionsSnapshot.useStream,
-            includeReasoning: chatOptionsSnapshot.includeReasoning,
           }),
           signal: abortController.signal,
         });
@@ -531,46 +513,27 @@ export function SetupWorkspace() {
           throw new Error(errorText || "对话失败");
         }
 
-        if (chatOptionsSnapshot.useStream && contentType.includes("text/event-stream")) {
-          const streamed = await consumeProfileChatStream(response, nextMessages, {
-            signal: abortController.signal,
-            onFrame: (items) => {
-              if (!abortController.signal.aborted) {
-                setProfileLiveItems(items);
-              }
-            },
-          });
-          if (abortController.signal.aborted) return;
-          const updated = [
-            ...nextMessages,
-            {
-              role: "assistant" as const,
-              content: streamed.content.trim() || "（模型未返回正文内容）",
-              reasoning: typeof streamed.reasoning === "string" && streamed.reasoning.trim()
-                ? streamed.reasoning
-                : undefined,
-            },
-          ];
-          setProfileChatMessages(updated);
-          setProfileLiveItems(null);
-          persistProfileChat(activeProfileId, {
-            messages: updated,
-            ...chatOptionsSnapshot,
-          });
-          return;
+        if (!contentType.includes("text/event-stream")) {
+          throw new Error("期望 SSE 流式响应，但服务端返回了非流式内容");
         }
 
-        const data = await response.json();
+        const streamed = await consumeProfileChatStream(response, nextMessages, {
+          signal: abortController.signal,
+          onFrame: (items) => {
+            if (!abortController.signal.aborted) {
+              setProfileLiveItems(items);
+            }
+          },
+        });
         if (abortController.signal.aborted) return;
-        if (!data?.ok) {
-          throw new Error(data?.error ?? "对话失败");
-        }
         const updated = [
           ...nextMessages,
           {
             role: "assistant" as const,
-            content: typeof data?.content === "string" ? data.content : "",
-            reasoning: typeof data?.reasoning === "string" ? data.reasoning : undefined,
+            content: streamed.content.trim() || "（模型未返回正文内容）",
+            reasoning: typeof streamed.reasoning === "string" && streamed.reasoning.trim()
+              ? streamed.reasoning
+              : undefined,
           },
         ];
         setProfileChatMessages(updated);
@@ -970,42 +933,6 @@ export function SetupWorkspace() {
                 style={{ minWidth: 180 }}
                 placeholder="测试平台"
               />
-              <Checkbox
-                checked={profileChatUseStream}
-                onChange={(event) => {
-                  const checked = event.target.checked;
-                  setProfileChatUseStream(checked);
-                  if (chatProfile) {
-                    persistProfileChat(chatProfile.id, {
-                      messages: profileChatMessages,
-                      genre: profileChatGenre,
-                      platform: profileChatPlatform,
-                      useStream: checked,
-                      includeReasoning: profileChatIncludeReasoning,
-                    });
-                  }
-                }}
-              >
-                使用流式
-              </Checkbox>
-              <Checkbox
-                checked={profileChatIncludeReasoning}
-                onChange={(event) => {
-                  const checked = event.target.checked;
-                  setProfileChatIncludeReasoning(checked);
-                  if (chatProfile) {
-                    persistProfileChat(chatProfile.id, {
-                      messages: profileChatMessages,
-                      genre: profileChatGenre,
-                      platform: profileChatPlatform,
-                      useStream: profileChatUseStream,
-                      includeReasoning: checked,
-                    });
-                  }
-                }}
-              >
-                展示 reasoning
-              </Checkbox>
             </Space>
           </Card>
 

@@ -1,4 +1,4 @@
-import type { ChatKitItem, ProfileStreamEvent } from "./types";
+import type { ChatKitItem, ChatKitToolCall, ChatKitToolStatus, ProfileStreamEvent } from "./types";
 
 export type ProfileStreamState = {
   readonly items: ChatKitItem[];
@@ -10,6 +10,50 @@ export type ProfileStreamState = {
 
 function nextId(prefix: string): string {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function isToolStatus(value: unknown): value is ChatKitToolStatus {
+  return (
+    value === "running"
+    || value === "in_progress"
+    || value === "complete"
+    || value === "success"
+    || value === "failed"
+    || value === "error"
+    || value === "cancelled"
+  );
+}
+
+function normalizeToolCall(data: unknown): ChatKitToolCall {
+  const raw = data && typeof data === "object" ? data as Record<string, unknown> : {};
+  const legacyName = typeof raw.name === "string" ? raw.name : "tool";
+  const callId = typeof raw.callId === "string"
+    ? raw.callId
+    : typeof raw.id === "string"
+      ? raw.id
+      : nextId("tool");
+  const status = isToolStatus(raw.status) ? raw.status : "running";
+  const kind = typeof raw.kind === "string" ? raw.kind : "other";
+  const meta = raw.meta && typeof raw.meta === "object" && !Array.isArray(raw.meta)
+    ? raw.meta as Record<string, unknown>
+    : {
+        tool: legacyName,
+        ...(typeof raw.arguments === "string" ? { arguments: raw.arguments } : {}),
+      };
+
+  return {
+    callId,
+    title: typeof raw.title === "string" ? raw.title : legacyName,
+    status,
+    kind,
+    ...(Array.isArray(raw.content) ? { content: raw.content as ChatKitToolCall["content"] } : {}),
+    ...(Array.isArray(raw.locations) ? { locations: raw.locations as ChatKitToolCall["locations"] } : {}),
+    meta,
+    ...(typeof raw.result === "string" ? { result: raw.result } : {}),
+    ...(typeof raw.resultPreview === "string" ? { result: raw.resultPreview } : {}),
+    ...(typeof raw.error === "string" ? { result: raw.error } : {}),
+    ...(typeof raw.rawType === "string" ? { rawType: raw.rawType } : {}),
+  };
 }
 
 export function createEmptyProfileStreamState(): ProfileStreamState {
@@ -81,30 +125,39 @@ export function applyProfileStreamEvent(
   }
 
   if (normalized.type === "tool_call") {
+    const toolCall = normalizeToolCall(normalized.data);
     const toolItem: ChatKitItem = {
       kind: "tool",
-      id: normalized.data.id,
-      name: normalized.data.name,
-      status: "running",
-      argsPreview: normalized.data.arguments,
+      id: toolCall.callId,
+      toolCall,
     };
     return {
       ...state,
+      // New LLM turn after tools: do not concatenate into previous buffers.
       assistantTextId: null,
+      thoughtId: null,
+      content: "",
+      reasoning: "",
       items: [...state.items.filter((i) => !(i.kind === "tool" && i.id === toolItem.id)), toolItem],
     };
   }
 
   if (normalized.type === "tool_call_update") {
+    const toolCall = normalizeToolCall(normalized.data);
     return {
       ...state,
       items: state.items.map((item) =>
-        item.kind === "tool" && item.id === normalized.data.id
+        item.kind === "tool" && item.id === toolCall.callId
           ? {
               ...item,
-              status: normalized.data.status,
-              resultPreview: normalized.data.resultPreview,
-              error: normalized.data.error,
+              toolCall: {
+                ...item.toolCall,
+                ...toolCall,
+                meta: {
+                  ...(item.toolCall.meta ?? {}),
+                  ...(toolCall.meta ?? {}),
+                },
+              },
             }
           : item,
       ),
@@ -113,16 +166,14 @@ export function applyProfileStreamEvent(
 
   if (normalized.type === "final") {
     const content = normalized.content || state.content;
-    const reasoning = normalized.reasoning ?? state.reasoning;
-    // Drop intermediate assistant_text; keep tools in order; one thought + one final reply.
     const items: ChatKitItem[] = [];
-    let thoughtPlaced = false;
+    const thoughtContents: string[] = [];
     for (const item of state.items) {
       if (item.kind === "assistant_text" || item.kind === "status") continue;
       if (item.kind === "thought") {
-        if (!thoughtPlaced && reasoning.trim()) {
-          items.push({ kind: "thought", id: item.id, content: reasoning });
-          thoughtPlaced = true;
+        if (item.content.trim()) {
+          items.push(item);
+          thoughtContents.push(item.content.trim());
         }
         continue;
       }
@@ -130,9 +181,12 @@ export function applyProfileStreamEvent(
         items.push(item);
       }
     }
-    if (reasoning.trim() && !thoughtPlaced) {
-      items.unshift({ kind: "thought", id: nextId("thought"), content: reasoning });
+    const finalReasoning = (normalized.reasoning ?? "").trim();
+    if (finalReasoning && !thoughtContents.includes(finalReasoning)) {
+      items.unshift({ kind: "thought", id: nextId("thought"), content: finalReasoning });
+      thoughtContents.unshift(finalReasoning);
     }
+    const reasoning = thoughtContents.join("\n\n") || state.reasoning;
     if (content.trim()) {
       items.push({
         kind: "assistant_text",

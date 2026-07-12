@@ -11,12 +11,12 @@ items:
     notes: 视觉 1:1 基线
 
   - slug: chat-kit-tool-card
-    description: 简化版工具卡（running/complete/error），对齐 mindfs 信息密度
+    description: 移植 mindfs ToolCallCard 的结构、交互和工具证据展示能力
     depends_on: []
-    status: done
+    status: in-progress
     feature: 2026-07-12-chat-kit-tool-card
     minimal_loop: false
-    notes: null
+    notes: 必须承载 kind/title/content/locations/meta/result；不得只显示摘要
 
   - slug: chat-kit-status
     description: 流式「正在生成」状态条
@@ -27,17 +27,17 @@ items:
     notes: null
 
   - slug: profile-sse-events
-    description: profile chat-stream 输出 mindfs 兼容 SSE 事件并补齐 tool 回调
+    description: profile chat-stream 输出 mindfs ToolCall 信息模型并补齐 tool 回调
     depends_on: []
-    status: done
+    status: in-progress
     feature: 2026-07-12-profile-sse-events
     minimal_loop: false
-    notes: 可与 UI 并行
+    notes: 工具事件必须提供完整命令证据，不得只传摘要字段
 
   - slug: profile-chat-wire
-    description: setup-workspace 接入 ChatKit 与新 SSE，完成添加模型对话闭环
+    description: setup-workspace 接入 ChatKit 与 mindfs ToolCall SSE，完成添加模型对话闭环
     depends_on: [chat-kit-thinking, chat-kit-tool-card, chat-kit-status, profile-sse-events]
-    status: done
+    status: in-progress
     feature: 2026-07-12-profile-chat-wire
     minimal_loop: true
-    notes: 不影响章节/书本入口
+    notes: 不影响章节/书本入口；1:1 验收前不得标 done

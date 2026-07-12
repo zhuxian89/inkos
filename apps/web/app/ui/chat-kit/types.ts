@@ -1,4 +1,36 @@
-export type ChatKitToolStatus = "running" | "complete" | "error";
+export type ChatKitToolStatus = "running" | "in_progress" | "complete" | "success" | "failed" | "error" | "cancelled";
+
+export type ChatKitToolLocation = {
+  readonly path: string;
+  readonly line?: number;
+};
+
+export type ChatKitToolContentItem =
+  | {
+      readonly type: "text";
+      readonly text?: string;
+      readonly path?: string;
+      readonly changeKind?: string;
+    }
+  | {
+      readonly type: "diff";
+      readonly path?: string;
+      readonly oldText?: string;
+      readonly newText?: string;
+      readonly changeKind?: string;
+    };
+
+export type ChatKitToolCall = {
+  readonly callId: string;
+  readonly title?: string;
+  readonly status: ChatKitToolStatus;
+  readonly kind: string;
+  readonly content?: ReadonlyArray<ChatKitToolContentItem>;
+  readonly locations?: ReadonlyArray<ChatKitToolLocation>;
+  readonly meta?: Record<string, unknown>;
+  readonly result?: string;
+  readonly rawType?: string;
+};
 
 export type ChatKitItem =
   | { readonly kind: "user"; readonly id: string; readonly content: string }
@@ -7,11 +39,7 @@ export type ChatKitItem =
   | {
       readonly kind: "tool";
       readonly id: string;
-      readonly name: string;
-      readonly status: ChatKitToolStatus;
-      readonly argsPreview?: string;
-      readonly resultPreview?: string;
-      readonly error?: string;
+      readonly toolCall: ChatKitToolCall;
     }
   | { readonly kind: "status"; readonly id: string; readonly text: string };
 
@@ -21,21 +49,11 @@ export type ProfileStreamEvent =
   | { readonly type: "thought_chunk"; readonly data: { readonly content: string } }
   | {
       readonly type: "tool_call";
-      readonly data: {
-        readonly id: string;
-        readonly name: string;
-        readonly arguments?: string;
-        readonly status: "running";
-      };
+      readonly data: ChatKitToolCall;
     }
   | {
       readonly type: "tool_call_update";
-      readonly data: {
-        readonly id: string;
-        readonly status: "complete" | "error";
-        readonly resultPreview?: string;
-        readonly error?: string;
-      };
+      readonly data: ChatKitToolCall;
     }
   | {
       readonly type: "final";
