@@ -3,12 +3,14 @@
 import {
   App,
   Alert,
+  AutoComplete,
   Button,
   Card,
   Col,
   Form,
   Grid,
   Input,
+  InputNumber,
   Modal,
   Popconfirm,
   Radio,
@@ -49,10 +51,14 @@ const PROFILE_CHAT_PLATFORM_OPTIONS = [
 
 interface ProfileFormValues {
   readonly name: string;
-  readonly provider: string;
+  readonly provider: "openai" | "anthropic";
   readonly baseUrl: string;
   readonly apiKey?: string;
   readonly model: string;
+  readonly temperature?: number;
+  readonly maxTokens?: number;
+  readonly thinkingBudget?: number;
+  readonly apiFormat?: "chat" | "responses";
 }
 
 interface SetupSummaryResponse {
@@ -88,9 +94,13 @@ interface CommandCatalogResponse {
 interface LlmProfile {
   readonly id: string;
   readonly name: string;
-  readonly provider: string;
+  readonly provider: "openai" | "anthropic";
   readonly baseUrl: string;
   readonly model: string;
+  readonly temperature?: number;
+  readonly maxTokens?: number;
+  readonly thinkingBudget?: number;
+  readonly apiFormat?: "chat" | "responses";
   readonly isActive: boolean;
   readonly apiKeyConfigured: boolean;
   readonly updatedAt: string;
@@ -135,6 +145,10 @@ export function SetupWorkspace() {
   const [deletingProfileId, setDeletingProfileId] = useState<string | null>(null);
   const [testingProfileId, setTestingProfileId] = useState<string | null>(null);
   const [profileTestResult, setProfileTestResult] = useState<unknown>(null);
+  const [profileDraftTestResult, setProfileDraftTestResult] = useState<unknown>(null);
+  const [profileDraftTesting, setProfileDraftTesting] = useState(false);
+  const [profileModelsLoading, setProfileModelsLoading] = useState(false);
+  const [profileModelOptions, setProfileModelOptions] = useState<ReadonlyArray<string>>([]);
   const [chatProfile, setChatProfile] = useState<LlmProfile | null>(null);
   const [profileChatInput, setProfileChatInput] = useState("");
   const [profileChatMessages, setProfileChatMessages] = useState<ReadonlyArray<ProfileChatMessage>>([]);
@@ -220,27 +234,162 @@ export function SetupWorkspace() {
       .finally(() => setIsTesting(false));
   }
 
+  function knownProfileModels(seed?: string): ReadonlyArray<string> {
+    return Array.from(new Set([
+      seed,
+      ...profiles.map((profile) => profile.model),
+      summary?.globalLlm?.model,
+      summary?.config?.llm?.model,
+    ].filter((item): item is string => Boolean(item?.trim()))));
+  }
+
+  function profileDraftPayload(values: Partial<ProfileFormValues>): Record<string, unknown> {
+    return {
+      profileId: editingProfile?.id,
+      name: values.name,
+      provider: values.provider,
+      baseUrl: values.baseUrl,
+      model: values.model,
+      apiKey: values.apiKey?.trim() || undefined,
+      temperature: values.temperature,
+      maxTokens: values.maxTokens,
+      thinkingBudget: values.thinkingBudget,
+      apiFormat: values.apiFormat,
+    };
+  }
+
+  function profileProviderDefaultBaseUrl(provider: ProfileFormValues["provider"]): string {
+    return provider === "anthropic" ? "https://api.anthropic.com" : "https://api.openai.com/v1";
+  }
+
+  function normalizeProfileProvider(provider?: string): ProfileFormValues["provider"] {
+    return provider === "anthropic" ? "anthropic" : "openai";
+  }
+
+  function handleProfileProviderChange(provider: ProfileFormValues["provider"]): void {
+    const currentBaseUrl = String(profileForm.getFieldValue("baseUrl") ?? "");
+    const defaultUrls = new Set(["", "https://api.openai.com/v1", "https://api.anthropic.com"]);
+    if (defaultUrls.has(currentBaseUrl)) {
+      profileForm.setFieldValue("baseUrl", profileProviderDefaultBaseUrl(provider));
+    }
+    if (provider === "anthropic" && profileForm.getFieldValue("apiFormat") === "responses") {
+      profileForm.setFieldValue("apiFormat", "chat");
+    }
+  }
+
+  async function loadProfileModelsFromDraft(): Promise<void> {
+    if (profileModelsLoading) return;
+    try {
+      const values = await profileForm.validateFields(["provider", "baseUrl", "apiKey"]);
+      setProfileModelsLoading(true);
+      const response = await fetch("/api/inkos/llm-profiles/models", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(profileDraftPayload(values)),
+      });
+      const data = await response.json() as { ok?: boolean; models?: ReadonlyArray<string>; error?: string };
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error ?? "模型列表读取失败");
+      }
+      const models = Array.isArray(data.models) ? data.models : [];
+      setProfileModelOptions(models);
+      const currentModel = String(profileForm.getFieldValue("model") ?? "").trim();
+      if (!currentModel && models[0]) {
+        profileForm.setFieldValue("model", models[0]);
+      }
+      void message.success(models.length > 0 ? `已获取 ${models.length} 个模型` : "接口返回了空模型列表");
+    } catch (error: unknown) {
+      void message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProfileModelsLoading(false);
+    }
+  }
+
+  async function testDraftProfile(): Promise<void> {
+    if (profileDraftTesting) return;
+    try {
+      const values = await profileForm.validateFields();
+      setProfileDraftTesting(true);
+      setProfileDraftTestResult(null);
+      const response = await fetch("/api/inkos/llm-profiles/test-config", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(profileDraftPayload(values)),
+      });
+      const data = await response.json();
+      setProfileDraftTestResult(data);
+      if (!response.ok || !data?.ok) {
+        throw new Error(data?.error ?? "模型文本测试失败");
+      }
+      void message.success("模型文本测试通过");
+    } catch (error: unknown) {
+      void message.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setProfileDraftTesting(false);
+    }
+  }
+
+  function renderProfileCapabilityResult(result: unknown) {
+    const data = result && typeof result === "object" ? result as {
+      ok?: boolean;
+      available?: boolean;
+      checks?: {
+        text?: { ok?: boolean };
+        tools?: { ok?: boolean };
+        thinking?: { ok?: boolean; reasoningReturned?: boolean };
+      };
+    } : {};
+    const checks = data.checks ?? {};
+    const statusTag = (label: string, ok?: boolean) => (
+      <Tag color={ok ? "green" : "red"}>{label}{ok ? "可用" : "失败"}</Tag>
+    );
+    return (
+      <Space direction="vertical" size={8} style={{ width: "100%" }}>
+        <Space wrap>
+          {statusTag("文本", checks.text?.ok)}
+          {statusTag("工具", checks.tools?.ok)}
+          {statusTag("思考", checks.thinking?.ok)}
+          {checks.thinking?.reasoningReturned ? <Tag color="blue">已返回 reasoning</Tag> : null}
+        </Space>
+        <pre style={{ margin: 0, maxHeight: 260, overflow: "auto" }}>{JSON.stringify(result, null, 2)}</pre>
+      </Space>
+    );
+  }
+
   function openCreateProfile(): void {
     const activeProfile = profiles.find((item) => item.id === activeProfileId);
     setEditingProfile(null);
+    setProfileDraftTestResult(null);
+    setProfileModelOptions(knownProfileModels(activeProfile?.model));
+    const provider = normalizeProfileProvider(activeProfile?.provider ?? summary?.globalLlm?.provider ?? summary?.config?.llm?.provider);
     profileForm.setFieldsValue({
       name: "",
-      provider: activeProfile?.provider ?? summary?.globalLlm?.provider ?? summary?.config?.llm?.provider ?? "openai",
-      baseUrl: activeProfile?.baseUrl ?? summary?.globalLlm?.baseUrl ?? summary?.config?.llm?.baseUrl ?? "https://api.openai.com/v1",
+      provider,
+      baseUrl: activeProfile?.baseUrl ?? summary?.globalLlm?.baseUrl ?? summary?.config?.llm?.baseUrl ?? profileProviderDefaultBaseUrl(provider),
       model: activeProfile?.model ?? summary?.globalLlm?.model ?? summary?.config?.llm?.model ?? "gpt-4o",
       apiKey: "",
+      temperature: activeProfile?.temperature ?? 0.7,
+      maxTokens: activeProfile?.maxTokens ?? 16000,
+      thinkingBudget: activeProfile?.thinkingBudget ?? 0,
+      apiFormat: activeProfile?.apiFormat ?? "chat",
     });
     setProfileModalOpen(true);
   }
 
   function openEditProfile(profile: LlmProfile): void {
     setEditingProfile(profile);
+    setProfileDraftTestResult(null);
+    setProfileModelOptions(knownProfileModels(profile.model));
     profileForm.setFieldsValue({
       name: profile.name,
       provider: profile.provider,
       baseUrl: profile.baseUrl,
       model: profile.model,
       apiKey: "",
+      temperature: profile.temperature ?? 0.7,
+      maxTokens: profile.maxTokens ?? 16000,
+      thinkingBudget: profile.thinkingBudget ?? 0,
+      apiFormat: profile.apiFormat ?? "chat",
     });
     setProfileModalOpen(true);
   }
@@ -259,6 +408,10 @@ export function SetupWorkspace() {
         baseUrl: values.baseUrl,
         model: values.model,
         apiKey: values.apiKey?.trim() || undefined,
+        temperature: values.temperature,
+        maxTokens: values.maxTokens,
+        thinkingBudget: values.thinkingBudget,
+        apiFormat: values.apiFormat,
         activate: false,
       }),
     })
@@ -733,7 +886,7 @@ export function SetupWorkspace() {
             type={(profileTestResult as { ok?: boolean }).ok ? "success" : "error"}
             showIcon
             message={(profileTestResult as { ok?: boolean }).ok ? "测试成功" : "测试失败"}
-            description={<pre style={{ margin: 0 }}>{JSON.stringify(profileTestResult, null, 2)}</pre>}
+            description={renderProfileCapabilityResult(profileTestResult)}
           />
         )}
       </Card>
@@ -745,7 +898,7 @@ export function SetupWorkspace() {
         footer={null}
         maskClosable={false}
         keyboard
-        destroyOnClose
+        destroyOnHidden
       >
         <Form<ProfileFormValues> layout="vertical" form={profileForm} onFinish={saveProfile}>
           <Form.Item label="配置名称" name="name" rules={[{ required: true, message: "请输入配置名称" }]}>
@@ -759,6 +912,7 @@ export function SetupWorkspace() {
               ]}
               optionType="button"
               buttonStyle="solid"
+              onChange={(event) => handleProfileProviderChange(event.target.value)}
             />
           </Form.Item>
           <Form.Item label="Base URL（接口地址）" name="baseUrl" rules={[{ required: true }]}>
@@ -767,12 +921,65 @@ export function SetupWorkspace() {
           <Form.Item label="API Key（密钥）" name="apiKey">
             <Input.Password placeholder={editingProfile ? "留空表示保持不变" : "首次创建建议填写"} />
           </Form.Item>
-          <Form.Item label="模型" name="model" rules={[{ required: true }]}>
-            <Input />
+          <Form.Item label="模型" required>
+            <Space.Compact style={{ width: "100%" }}>
+              <Form.Item name="model" noStyle rules={[{ required: true, message: "请选择或输入模型" }]}>
+                <AutoComplete
+                  options={profileModelOptions.map((model) => ({ value: model, label: model }))}
+                  filterOption={(input, option) => String(option?.label ?? "").toLowerCase().includes(input.toLowerCase())}
+                  placeholder="先获取模型列表，也可以直接输入模型名"
+                />
+              </Form.Item>
+              <Button onClick={() => void loadProfileModelsFromDraft()} loading={profileModelsLoading}>
+                获取模型
+              </Button>
+            </Space.Compact>
           </Form.Item>
-          <Space>
+          <Row gutter={12}>
+            <Col xs={24} sm={12}>
+              <Form.Item label="API 格式" name="apiFormat">
+                <Select
+                  options={[
+                    { label: "chat", value: "chat" },
+                    { label: "responses", value: "responses" },
+                  ]}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Temperature" name="temperature">
+                <InputNumber min={0} max={2} step={0.1} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Max Tokens" name="maxTokens">
+                <InputNumber min={1} step={1024} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="Thinking Budget" name="thinkingBudget" extra="0 表示不主动开启；测试思考能力时会临时用至少 1024。">
+                <InputNumber min={0} step={1024} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
+          </Row>
+          {profileDraftTestResult ? (
+            <Alert
+              type={(profileDraftTestResult as { ok?: boolean }).ok ? "success" : "warning"}
+              showIcon
+              message={(profileDraftTestResult as { ok?: boolean }).ok ? "当前配置文本可用" : "当前配置测试未完全通过"}
+              description={renderProfileCapabilityResult(profileDraftTestResult)}
+              style={{ marginBottom: 16 }}
+            />
+          ) : null}
+          <Space wrap>
+            <Button onClick={() => void loadProfileModelsFromDraft()} loading={profileModelsLoading}>
+              获取模型列表
+            </Button>
+            <Button onClick={() => void testDraftProfile()} loading={profileDraftTesting}>
+              测试当前配置
+            </Button>
             <Button type="primary" htmlType="submit" loading={profileSaving}>
-              {editingProfile ? "保存" : "创建并激活"}
+              {editingProfile ? "保存" : "创建"}
             </Button>
             <Button onClick={() => setProfileModalOpen(false)}>取消</Button>
           </Space>

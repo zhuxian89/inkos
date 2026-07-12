@@ -289,6 +289,108 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
     }
   });
 
+  async function resolveProfileDraftApiKey(input: {
+    readonly profileId?: string;
+    readonly apiKey?: string;
+  }): Promise<string> {
+    if (input.apiKey?.trim()) return input.apiKey.trim();
+    if (input.profileId?.trim()) {
+      const db = context.llmService.openProfilesDb();
+      try {
+        const existing = context.llmService.getProfileById(db, input.profileId.trim());
+        if (existing?.api_key) return existing.api_key;
+      } finally {
+        db.close();
+      }
+    }
+    const globalEnv = await context.llmService.readGlobalLlmEnv();
+    if (globalEnv.apiKey?.trim()) return globalEnv.apiKey.trim();
+    throw new Error("API Key is required for this operation.");
+  }
+
+  app.post("/api/llm-profiles/models", async (req, res) => {
+    const schema = z.object({
+      profileId: z.string().optional(),
+      provider: z.enum(["openai", "anthropic"]),
+      baseUrl: z.string().url(),
+      apiKey: z.string().trim().min(1).optional(),
+    });
+
+    try {
+      const input = schema.parse(req.body ?? {});
+      const apiKey = await resolveProfileDraftApiKey(input);
+      logInfo("llm_profiles.models.start", {
+        provider: input.provider,
+        baseUrl: input.baseUrl,
+        profileId: input.profileId ?? null,
+        apiKeyConfigured: Boolean(apiKey),
+      });
+      const result = await context.llmService.listLlmModels({
+        provider: input.provider,
+        baseUrl: input.baseUrl,
+        apiKey,
+      });
+      logInfo("llm_profiles.models.done", {
+        provider: result.provider,
+        baseUrl: result.baseUrl,
+        count: result.count,
+      });
+      res.json({ ok: true, ...result });
+    } catch (error) {
+      logError("llm_profiles.models.error", { error: describeError(error) });
+      res.status(400).json({ ok: false, error: describeError(error) });
+    }
+  });
+
+  app.post("/api/llm-profiles/test-config", async (req, res) => {
+    const schema = z.object({
+      profileId: z.string().optional(),
+      name: z.string().trim().min(1).optional(),
+      provider: z.enum(["openai", "anthropic"]),
+      baseUrl: z.string().url(),
+      apiKey: z.string().trim().min(1).optional(),
+      model: z.string().trim().min(1),
+      temperature: z.number().min(0).max(2).optional(),
+      maxTokens: z.number().int().min(1).optional(),
+      thinkingBudget: z.number().int().min(0).optional(),
+      apiFormat: z.enum(["chat", "responses"]).optional(),
+    });
+
+    try {
+      const input = schema.parse(req.body ?? {});
+      const apiKey = await resolveProfileDraftApiKey(input);
+      logInfo("llm_profiles.test_config.start", {
+        provider: input.provider,
+        baseUrl: input.baseUrl,
+        model: input.model,
+        profileId: input.profileId ?? null,
+      });
+      const result = await context.llmService.testLlmProfileConfig({
+        name: input.name ?? "draft-profile",
+        provider: input.provider,
+        baseUrl: input.baseUrl,
+        apiKey,
+        model: input.model,
+        temperature: input.temperature,
+        maxTokens: input.maxTokens,
+        thinkingBudget: input.thinkingBudget,
+        apiFormat: input.apiFormat,
+      });
+      logInfo("llm_profiles.test_config.done", {
+        provider: result.provider,
+        model: result.model,
+        available: result.available,
+        textOk: result.checks.text.ok,
+        toolsOk: result.checks.tools.ok,
+        thinkingOk: result.checks.thinking.ok,
+      });
+      res.json({ ok: result.available, ...result });
+    } catch (error) {
+      logError("llm_profiles.test_config.error", { error: describeError(error) });
+      res.status(400).json({ ok: false, error: describeError(error) });
+    }
+  });
+
   app.post("/api/llm-profiles", async (req, res) => {
     const schema = z.object({
       name: z.string().trim().min(1),
@@ -453,8 +555,9 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         profileId,
         provider: result.provider,
         model: result.model,
+        available: result.available,
       });
-      res.json({ ok: true, ...result });
+      res.json({ ok: result.available, ...result });
     } catch (error) {
       logError("llm_profiles.test.error", { profileId: req.params.id, error: describeError(error) });
       res.status(400).json({ ok: false, error: describeError(error) });

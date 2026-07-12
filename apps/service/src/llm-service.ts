@@ -89,6 +89,41 @@ export interface LlmProfilePayload {
   readonly apiFormat?: "chat" | "responses";
 }
 
+export interface LlmProfileConnectionInput {
+  readonly provider: "openai" | "anthropic";
+  readonly baseUrl: string;
+  readonly apiKey: string;
+}
+
+export interface LlmProfileCapabilityTestResult {
+  readonly provider: "openai" | "anthropic";
+  readonly baseUrl: string;
+  readonly model: string;
+  readonly available: boolean;
+  readonly checks: {
+    readonly text: {
+      readonly ok: boolean;
+      readonly responsePreview?: string;
+      readonly error?: string;
+    };
+    readonly tools: {
+      readonly ok: boolean;
+      readonly toolCalls?: ReadonlyArray<{ readonly name: string; readonly arguments: string }>;
+      readonly responsePreview?: string;
+      readonly error?: string;
+    };
+    readonly thinking: {
+      readonly ok: boolean;
+      readonly accepted?: boolean;
+      readonly reasoningReturned?: boolean;
+      readonly reasoningPreview?: string;
+      readonly responsePreview?: string;
+      readonly note?: string;
+      readonly error?: string;
+    };
+  };
+}
+
 export function createLlmService(
   projectRoot: string,
   bookService: ReturnType<typeof createBookService>,
@@ -198,6 +233,204 @@ export function createLlmService(
     };
   }
 
+  function redactUrl(value: string): string {
+    try {
+      const url = new URL(value);
+      return `${url.protocol}//${url.host}${url.pathname}`;
+    } catch {
+      return value;
+    }
+  }
+
+  function modelsEndpoint(input: LlmProfileConnectionInput): string {
+    const trimmed = input.baseUrl.replace(/\/+$/, "");
+    if (input.provider === "anthropic") {
+      return `${trimmed.replace(/\/v1$/, "")}/v1/models`;
+    }
+    return `${trimmed}/models`;
+  }
+
+  function modelIdFromUnknown(value: unknown): string | null {
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (!value || typeof value !== "object") return null;
+    const record = value as Record<string, unknown>;
+    const id = record.id ?? record.name ?? record.model;
+    return typeof id === "string" && id.trim() ? id.trim() : null;
+  }
+
+  async function listLlmModels(input: LlmProfileConnectionInput): Promise<{
+    readonly provider: "openai" | "anthropic";
+    readonly baseUrl: string;
+    readonly models: ReadonlyArray<string>;
+    readonly count: number;
+  }> {
+    const response = await fetch(modelsEndpoint(input), {
+      method: "GET",
+      headers: input.provider === "anthropic"
+        ? {
+            "x-api-key": input.apiKey,
+            "anthropic-version": "2023-06-01",
+          }
+        : {
+            Authorization: `Bearer ${input.apiKey}`,
+          },
+    });
+    const rawText = await response.text();
+    const parsed = safeParseJson(rawText);
+    if (!response.ok) {
+      const errorMessage = parsed && typeof parsed === "object" && "error" in parsed
+        ? JSON.stringify((parsed as { error?: unknown }).error)
+        : rawText.slice(0, 500);
+      throw new Error(`模型列表读取失败(${response.status}): ${errorMessage}`);
+    }
+
+    const record = parsed && typeof parsed === "object" ? parsed as Record<string, unknown> : {};
+    const rawModels = Array.isArray(record.data)
+      ? record.data
+      : Array.isArray(record.models)
+        ? record.models
+        : [];
+    const models = [...new Set(rawModels.map(modelIdFromUnknown).filter((item): item is string => Boolean(item)))];
+
+    return {
+      provider: input.provider,
+      baseUrl: redactUrl(input.baseUrl),
+      models,
+      count: models.length,
+    };
+  }
+
+  function createClientFromProfilePayload(
+    payload: LlmProfilePayload,
+    overrides?: Partial<Pick<LlmProfilePayload, "maxTokens" | "thinkingBudget">>,
+  ): ReturnType<typeof createLLMClient> {
+    return createLLMClient({
+      provider: payload.provider,
+      baseUrl: payload.baseUrl,
+      apiKey: payload.apiKey,
+      model: payload.model,
+      temperature: payload.temperature ?? 0.7,
+      maxTokens: overrides?.maxTokens ?? payload.maxTokens ?? 16000,
+      thinkingBudget: overrides?.thinkingBudget ?? payload.thinkingBudget ?? 0,
+      apiFormat: payload.apiFormat ?? "chat",
+    });
+  }
+
+  const PROFILE_HEALTH_TOOL: ToolDefinition = {
+    name: "inkos_health_check",
+    description: "Report model tool-call capability for InkOS.",
+    parameters: {
+      type: "object",
+      properties: {
+        status: { type: "string", description: "Use the exact value ok." },
+      },
+      required: ["status"],
+    },
+  };
+
+  async function testLlmProfileConfig(payload: LlmProfilePayload): Promise<LlmProfileCapabilityTestResult> {
+    const textCheck: LlmProfileCapabilityTestResult["checks"]["text"] = await (async () => {
+      try {
+        const client = createClientFromProfilePayload(payload, { maxTokens: 128, thinkingBudget: 0 });
+        const response = await chatCompletion(client, payload.model, [
+          { role: "system", content: "You are a health check assistant. Reply in plain text with a very short confirmation." },
+          { role: "user", content: "Reply with exactly: LLM test passed" },
+        ], {
+          temperature: 0,
+          maxTokens: 128,
+        });
+        return { ok: true, responsePreview: response.content.trim().slice(0, 200) };
+      } catch (error) {
+        return { ok: false, error: describeError(error) };
+      }
+    })();
+
+    const toolCheck: LlmProfileCapabilityTestResult["checks"]["tools"] = await (async () => {
+      try {
+        const client = createClientFromProfilePayload(payload, { maxTokens: 512, thinkingBudget: 0 });
+        const response = await chatWithTools(client, payload.model, [
+          {
+            role: "system",
+            content: "You are testing tool-call capability. You must call inkos_health_check with status=ok. Do not answer in natural language.",
+          },
+          { role: "user", content: "Call the health check tool now." },
+        ], [PROFILE_HEALTH_TOOL], {
+          temperature: 0,
+          maxTokens: 512,
+          useStream: true,
+          includeReasoning: false,
+        });
+        const toolCalls = response.toolCalls.map((item) => ({
+          name: item.name,
+          arguments: item.arguments,
+        }));
+        return {
+          ok: toolCalls.some((item) => item.name === PROFILE_HEALTH_TOOL.name),
+          toolCalls,
+          responsePreview: response.content.trim().slice(0, 200),
+        };
+      } catch (error) {
+        return { ok: false, error: describeError(error) };
+      }
+    })();
+
+    const thinkingCheck: LlmProfileCapabilityTestResult["checks"]["thinking"] = await (async () => {
+      const thinkingBudget = Math.max(payload.thinkingBudget ?? 0, 1024);
+      try {
+        const client = createClientFromProfilePayload(payload, {
+          maxTokens: Math.max(payload.maxTokens ?? 0, thinkingBudget + 256),
+          thinkingBudget,
+        });
+        const response = await chatWithTools(client, payload.model, [
+          {
+            role: "system",
+            content: "You are testing hidden thinking support. Reply only with THINK TEST PASSED.",
+          },
+          { role: "user", content: "Answer now." },
+        ], [PROFILE_HEALTH_TOOL], {
+          temperature: 0,
+          maxTokens: Math.max(1536, thinkingBudget + 256),
+          useStream: true,
+          includeReasoning: true,
+        });
+        const reasoning = response.reasoning?.trim() ?? "";
+        const anthropicThinkingAccepted = payload.provider === "anthropic" && thinkingBudget > 0;
+        return {
+          ok: Boolean(reasoning) || anthropicThinkingAccepted,
+          accepted: true,
+          reasoningReturned: Boolean(reasoning),
+          ...(reasoning ? { reasoningPreview: reasoning.slice(0, 300) } : {}),
+          responsePreview: response.content.trim().slice(0, 200),
+          ...(!reasoning && anthropicThinkingAccepted
+            ? { note: "Anthropic thinking 参数已被服务端接受；当前适配层不回传 raw thinking 文本。" }
+            : {}),
+          ...(!reasoning && !anthropicThinkingAccepted
+            ? { note: "请求成功，但没有返回 reasoning/thinking 字段。" }
+            : {}),
+        };
+      } catch (error) {
+        return {
+          ok: false,
+          accepted: false,
+          reasoningReturned: false,
+          error: describeError(error),
+        };
+      }
+    })();
+
+    return {
+      provider: payload.provider,
+      baseUrl: redactUrl(payload.baseUrl),
+      model: payload.model,
+      available: textCheck.ok,
+      checks: {
+        text: textCheck,
+        tools: toolCheck,
+        thinking: thinkingCheck,
+      },
+    };
+  }
+
   async function writeGlobalLlmEnv(payload: LlmProfilePayload): Promise<void> {
     await mkdir(inkosHomeDir(), { recursive: true });
     await writeFile(
@@ -238,9 +471,11 @@ export function createLlmService(
 
   async function testLlmProfile(profileId: string): Promise<{
     readonly profileId: string;
+    readonly provider: "openai" | "anthropic";
+    readonly baseUrl: string;
     readonly model: string;
-    readonly provider: string;
-    readonly responsePreview: string;
+    readonly available: boolean;
+    readonly checks: LlmProfileCapabilityTestResult["checks"];
   }> {
     const db = openProfilesDb();
     let profile: LlmProfileRow | null = null;
@@ -255,36 +490,15 @@ export function createLlmService(
     }
 
     const payload = profileRowToPayload(profile);
-    const client = createLLMClient({
-      provider: payload.provider,
-      baseUrl: payload.baseUrl,
-      apiKey: payload.apiKey,
-      model: payload.model,
-      temperature: payload.temperature ?? 0.7,
-      maxTokens: payload.maxTokens ?? 16000,
-      thinkingBudget: payload.thinkingBudget ?? 0,
-      apiFormat: payload.apiFormat ?? "chat",
-    });
-
-    const response = await chatCompletion(client, payload.model, [
-      {
-        role: "system",
-        content: "You are a health check assistant. Reply in plain text with a very short confirmation.",
-      },
-      {
-        role: "user",
-        content: "Reply with: LLM test passed",
-      },
-    ], {
-      temperature: 0,
-      maxTokens: 16000,
-    });
+    const result = await testLlmProfileConfig(payload);
 
     return {
       profileId,
-      provider: payload.provider,
-      model: payload.model,
-      responsePreview: response.content.trim().slice(0, 200),
+      provider: result.provider,
+      baseUrl: result.baseUrl,
+      model: result.model,
+      available: result.available,
+      checks: result.checks,
     };
   }
 
@@ -1896,6 +2110,7 @@ export function createLlmService(
     activateLlmProfile,
     buildProfileChatSystemPrompt,
     getProfileById,
+    listLlmModels,
     mapProfileRow,
     openProfilesDb,
     readGlobalLlmEnv,
@@ -1904,6 +2119,7 @@ export function createLlmService(
     runInitAssistant,
     runProfileChatWithTools,
     testLlmProfile,
+    testLlmProfileConfig,
     updateProjectModelOverrides,
     upsertActiveLlmProfileFromInit,
     writeGlobalLlmEnv,
