@@ -359,6 +359,7 @@ export function createLlmService(
       "书籍目录下包含书籍配置、story 长期记忆文件、chapters 章节文件等内容。",
       "如需处理本地文件：先用 search_text_files 或 list_directory 定位，再用 read_text_file 读取真实文件；需要修改时再用 write_text_file 写回。",
       "当问题与小说生产、题材、平台、写作流程、审计流程、项目文件路径有关时，可以结合这些背景信息提高回答相关性。",
+      "最终回复必须使用规范 GitHub-Flavored Markdown；如果展示书籍列表、章节列表、对比数据等表格信息，必须输出带管道和分隔行的标准 Markdown 表格，例如 `| # | 书名 | 状态 | 章节数 |` 和 `|---|---|---|---|`，禁止用空格或制表符伪装表格。",
       "",
       systemContext,
     ].join("\n");

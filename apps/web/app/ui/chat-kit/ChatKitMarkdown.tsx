@@ -29,6 +29,44 @@ const components: Components = {
       {children}
     </pre>
   ),
+  table: ({ children }) => (
+    <div style={{ margin: "0 0 10px", overflowX: "auto", maxWidth: "100%" }}>
+      <table
+        style={{
+          width: "100%",
+          borderCollapse: "collapse",
+          fontSize: 13,
+        }}
+      >
+        {children}
+      </table>
+    </div>
+  ),
+  th: ({ children }) => (
+    <th
+      style={{
+        border: "1px solid #f0f0f0",
+        background: "#fafafa",
+        padding: "7px 9px",
+        textAlign: "left",
+        fontWeight: 600,
+      }}
+    >
+      {children}
+    </th>
+  ),
+  td: ({ children }) => (
+    <td
+      style={{
+        border: "1px solid #f0f0f0",
+        padding: "7px 9px",
+        verticalAlign: "top",
+        lineHeight: 1.6,
+      }}
+    >
+      {children}
+    </td>
+  ),
   a: ({ children, href }) => (
     <a href={href} target="_blank" rel="noreferrer" style={{ color: "#1677ff" }}>
       {children}
