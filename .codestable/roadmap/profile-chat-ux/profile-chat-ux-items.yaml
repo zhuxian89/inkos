@@ -1,0 +1,43 @@
+roadmap: profile-chat-ux
+created: 2026-07-12
+
+items:
+  - slug: chat-kit-thinking
+    description: 移植 mindfs ThinkingBlock 与 assistant 文本样式作为 ChatKit 基线
+    depends_on: []
+    status: done
+    feature: 2026-07-12-chat-kit-thinking
+    minimal_loop: false
+    notes: 视觉 1:1 基线
+
+  - slug: chat-kit-tool-card
+    description: 简化版工具卡（running/complete/error），对齐 mindfs 信息密度
+    depends_on: []
+    status: done
+    feature: 2026-07-12-chat-kit-tool-card
+    minimal_loop: false
+    notes: null
+
+  - slug: chat-kit-status
+    description: 流式「正在生成」状态条
+    depends_on: []
+    status: done
+    feature: 2026-07-12-chat-kit-status
+    minimal_loop: false
+    notes: null
+
+  - slug: profile-sse-events
+    description: profile chat-stream 输出 mindfs 兼容 SSE 事件并补齐 tool 回调
+    depends_on: []
+    status: done
+    feature: 2026-07-12-profile-sse-events
+    minimal_loop: false
+    notes: 可与 UI 并行
+
+  - slug: profile-chat-wire
+    description: setup-workspace 接入 ChatKit 与新 SSE，完成添加模型对话闭环
+    depends_on: [chat-kit-thinking, chat-kit-tool-card, chat-kit-status, profile-sse-events]
+    status: done
+    feature: 2026-07-12-profile-chat-wire
+    minimal_loop: true
+    notes: 不影响章节/书本入口

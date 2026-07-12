@@ -22,8 +22,16 @@ import {
   Tooltip,
   Typography,
 } from "antd";
-import { useEffect, useState } from "react";
-import { ChatPanel } from "./chat-panel";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  ChatKitPanel,
+  applyProfileStreamEvent,
+  createEmptyProfileStreamState,
+  messagesToChatKitItems,
+  type ChatKitItem,
+  type ProfileStreamEvent,
+  type ProfileStreamState,
+} from "./chat-kit";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
 
@@ -113,12 +121,16 @@ interface StoredProfileChatSession {
 }
 
 interface ProfileChatStreamEvent {
-  readonly type: "start" | "delta" | "reasoning_delta" | "final" | "error" | "done";
+  readonly type: string;
   readonly delta?: string;
   readonly content?: string;
   readonly reasoning?: string;
   readonly error?: string;
+  readonly data?: Record<string, unknown>;
+  readonly ok?: boolean;
+  readonly toolCalls?: number;
 }
+
 
 export function SetupWorkspace() {
   const { message } = App.useApp();
@@ -146,11 +158,18 @@ export function SetupWorkspace() {
   const [profileChatGenre, setProfileChatGenre] = useState<string>("chuanyue");
   const [profileChatPlatform, setProfileChatPlatform] = useState<string>("tomato");
   const [profileChatUseStream, setProfileChatUseStream] = useState(true);
-  const [profileChatIncludeReasoning, setProfileChatIncludeReasoning] = useState(false);
+  const [profileChatIncludeReasoning, setProfileChatIncludeReasoning] = useState(true);
   const [chattingProfileId, setChattingProfileId] = useState<string | null>(null);
+  const [profileLiveItems, setProfileLiveItems] = useState<ChatKitItem[] | null>(null);
+  const profileChatAbortRef = useRef<AbortController | null>(null);
   const [profileForm] = Form.useForm<ProfileFormValues>();
   const [isTesting, setIsTesting] = useState(false);
   const [daemonAction, setDaemonAction] = useState<"up" | "down" | null>(null);
+
+  const profileChatKitItems = useMemo(() => {
+    if (profileLiveItems) return profileLiveItems;
+    return messagesToChatKitItems(profileChatMessages);
+  }, [profileLiveItems, profileChatMessages]);
 
   async function loadSettingsContext(): Promise<void> {
     const [summaryData, catalogData, profileData] = await Promise.all([
@@ -344,11 +363,12 @@ export function SetupWorkspace() {
     const stored = loadStoredProfileChat(profile.id);
     setChatProfile(profile);
     setProfileChatInput("");
+    setProfileLiveItems(null);
     setProfileChatMessages(stored?.messages ?? []);
     setProfileChatGenre(stored?.genre ?? "chuanyue");
     setProfileChatPlatform(stored?.platform ?? "tomato");
     setProfileChatUseStream(stored?.useStream !== false);
-    setProfileChatIncludeReasoning(stored?.includeReasoning === true);
+    setProfileChatIncludeReasoning(stored?.includeReasoning !== false);
     void loadPersistedChatSession("profile-chat", `profile:${profile.id}`).then((messages) => {
       if (Array.isArray(messages) && messages.length > 0) {
         setProfileChatMessages(messages as ReadonlyArray<ProfileChatMessage>);
@@ -372,6 +392,7 @@ export function SetupWorkspace() {
   async function consumeProfileChatStream(
     response: Response,
     baseMessages: ReadonlyArray<ProfileChatMessage>,
+    options?: { readonly signal?: AbortSignal; readonly onFrame?: (items: ChatKitItem[]) => void },
   ): Promise<{ content: string; reasoning?: string }> {
     if (!response.body) {
       throw new Error("流式响应不可用");
@@ -380,64 +401,78 @@ export function SetupWorkspace() {
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
-    let assistantContent = "";
-    let assistantReasoning = "";
+    let turnState: ProfileStreamState = createEmptyProfileStreamState();
+    const historyItems = messagesToChatKitItems(baseMessages);
 
     const renderFrame = (): void => {
-      setProfileChatMessages([
-        ...baseMessages,
-        {
-          role: "assistant",
-          content: assistantContent,
-          reasoning: assistantReasoning || undefined,
-        },
-      ]);
+      options?.onFrame?.([...historyItems, ...turnState.items]);
+    };
+
+    const throwIfAborted = (): void => {
+      if (options?.signal?.aborted) {
+        const error = new Error("对话已取消");
+        error.name = "AbortError";
+        throw error;
+      }
     };
 
     renderFrame();
 
-    while (true) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
+    try {
+      while (true) {
+        throwIfAborted();
+        const { done, value } = await reader.read();
+        buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
 
-      let delimiterIndex = buffer.indexOf("\n\n");
-      while (delimiterIndex >= 0) {
-        const block = buffer.slice(0, delimiterIndex);
-        buffer = buffer.slice(delimiterIndex + 2);
-        const event = parseSseEventBlock(block);
-        if (!event) {
+        let delimiterIndex = buffer.indexOf("\n\n");
+        while (delimiterIndex >= 0) {
+          throwIfAborted();
+          const block = buffer.slice(0, delimiterIndex);
+          buffer = buffer.slice(delimiterIndex + 2);
+          const raw = parseSseEventBlock(block);
+          if (!raw) {
+            delimiterIndex = buffer.indexOf("\n\n");
+            continue;
+          }
+
+          if (raw.type === "error") {
+            throw new Error(raw.error ?? "对话失败");
+          }
+
+          const event = raw as ProfileStreamEvent;
+          if (
+            event.type === "message_chunk"
+            || event.type === "thought_chunk"
+            || event.type === "tool_call"
+            || event.type === "tool_call_update"
+            || event.type === "final"
+          ) {
+            turnState = applyProfileStreamEvent(turnState, event);
+            renderFrame();
+          }
+
           delimiterIndex = buffer.indexOf("\n\n");
-          continue;
         }
 
-        if (event.type === "delta" && typeof event.delta === "string") {
-          assistantContent += event.delta;
-          renderFrame();
-        } else if (event.type === "reasoning_delta" && typeof event.delta === "string") {
-          assistantReasoning += event.delta;
-          renderFrame();
-        } else if (event.type === "final") {
-          if (typeof event.content === "string") {
-            assistantContent = event.content;
-          }
-          if (typeof event.reasoning === "string") {
-            assistantReasoning = event.reasoning;
-          }
-          renderFrame();
-        } else if (event.type === "error") {
-          throw new Error(event.error ?? "对话失败");
-        }
-
-        delimiterIndex = buffer.indexOf("\n\n");
+        if (done) break;
       }
-
-      if (done) break;
+    } finally {
+      try {
+        reader.releaseLock();
+      } catch {
+        // ignore
+      }
     }
 
     return {
-      content: assistantContent,
-      reasoning: assistantReasoning || undefined,
+      content: turnState.content,
+      reasoning: turnState.reasoning || undefined,
     };
+  }
+
+  function abortProfileChatStream(): void {
+    profileChatAbortRef.current?.abort();
+    profileChatAbortRef.current = null;
   }
 
   function sendProfileChat(): void {
@@ -458,12 +493,17 @@ export function SetupWorkspace() {
       { role: "user", content: input },
     ];
     setProfileChatMessages(nextMessages);
+    setProfileLiveItems(messagesToChatKitItems(nextMessages));
     persistProfileChat(activeProfileId, {
       messages: nextMessages,
       ...chatOptionsSnapshot,
     });
     setProfileChatInput("");
     setChattingProfileId(activeProfileId);
+
+    abortProfileChatStream();
+    const abortController = new AbortController();
+    profileChatAbortRef.current = abortController;
 
     void (async () => {
       try {
@@ -480,7 +520,10 @@ export function SetupWorkspace() {
             useStream: chatOptionsSnapshot.useStream,
             includeReasoning: chatOptionsSnapshot.includeReasoning,
           }),
+          signal: abortController.signal,
         });
+
+        if (abortController.signal.aborted) return;
 
         const contentType = response.headers.get("content-type") ?? "";
         if (!response.ok) {
@@ -489,7 +532,15 @@ export function SetupWorkspace() {
         }
 
         if (chatOptionsSnapshot.useStream && contentType.includes("text/event-stream")) {
-          const streamed = await consumeProfileChatStream(response, nextMessages);
+          const streamed = await consumeProfileChatStream(response, nextMessages, {
+            signal: abortController.signal,
+            onFrame: (items) => {
+              if (!abortController.signal.aborted) {
+                setProfileLiveItems(items);
+              }
+            },
+          });
+          if (abortController.signal.aborted) return;
           const updated = [
             ...nextMessages,
             {
@@ -501,6 +552,7 @@ export function SetupWorkspace() {
             },
           ];
           setProfileChatMessages(updated);
+          setProfileLiveItems(null);
           persistProfileChat(activeProfileId, {
             messages: updated,
             ...chatOptionsSnapshot,
@@ -509,6 +561,7 @@ export function SetupWorkspace() {
         }
 
         const data = await response.json();
+        if (abortController.signal.aborted) return;
         if (!data?.ok) {
           throw new Error(data?.error ?? "对话失败");
         }
@@ -521,11 +574,15 @@ export function SetupWorkspace() {
           },
         ];
         setProfileChatMessages(updated);
+        setProfileLiveItems(null);
         persistProfileChat(activeProfileId, {
           messages: updated,
           ...chatOptionsSnapshot,
         });
       } catch (error: unknown) {
+        if (abortController.signal.aborted || (error instanceof Error && error.name === "AbortError")) {
+          return;
+        }
         const errorMessage = error instanceof Error ? error.message : String(error);
         const updated = [
           ...nextMessages,
@@ -535,13 +592,22 @@ export function SetupWorkspace() {
           },
         ];
         setProfileChatMessages(updated);
+        setProfileLiveItems(null);
         persistProfileChat(activeProfileId, {
           messages: updated,
           ...chatOptionsSnapshot,
         });
         void message.error(errorMessage);
       } finally {
-        setChattingProfileId(null);
+        if (profileChatAbortRef.current === abortController) {
+          profileChatAbortRef.current = null;
+        }
+        if (!abortController.signal.aborted) {
+          setProfileLiveItems(null);
+          setChattingProfileId(null);
+        } else {
+          setChattingProfileId(null);
+        }
       }
     })();
   }
@@ -852,10 +918,11 @@ export function SetupWorkspace() {
       <Modal
         open={Boolean(chatProfile)}
         onCancel={() => {
-          if (chattingProfileId) return;
+          abortProfileChatStream();
+          setChattingProfileId(null);
+          setProfileLiveItems(null);
           setChatProfile(null);
           setProfileChatInput("");
-          setProfileChatMessages([]);
         }}
         title={chatProfile ? `模型对话测试 · ${chatProfile.name}` : "模型对话测试"}
         footer={null}
@@ -942,36 +1009,36 @@ export function SetupWorkspace() {
             </Space>
           </Card>
 
-          <ChatPanel
-            messages={profileChatMessages}
+          <ChatKitPanel
+            items={profileChatKitItems}
             value={profileChatInput}
             onChange={setProfileChatInput}
             onSend={sendProfileChat}
             sending={chattingProfileId === chatProfile?.id}
             placeholder="输入一段话，直接测试这个模型在 InkOS 项目中的真实回复。"
             emptyText={"这里可以直接测试这个模型在 InkOS 里的表现。\n比如让它生成爽文开篇、讨论穿越设定、给审计建议，或者模拟章节修订意见。"}
-            minHeight={260}
             maxHeight="100%"
-            inputMinRows={3}
-            inputMaxRows={5}
-            footerLeft={<Typography.Text type="secondary">当前对话会保存在这个配置下。</Typography.Text>}
-            footerRight={(
-              <Button
-                onClick={() => {
-                  setProfileChatMessages([]);
-                  setProfileChatInput("");
-                  if (chatProfile) {
-                    persistProfileChat(chatProfile.id, {
-                      messages: [],
-                      genre: profileChatGenre,
-                      platform: profileChatPlatform,
-                    });
-                  }
-                }}
-                disabled={chattingProfileId === chatProfile?.id}
-              >
-                清空对话
-              </Button>
+            footerLeft={(
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, width: "100%" }}>
+                <Typography.Text type="secondary">当前对话会保存在这个配置下。</Typography.Text>
+                <Button
+                  onClick={() => {
+                    setProfileChatMessages([]);
+                    setProfileLiveItems(null);
+                    setProfileChatInput("");
+                    if (chatProfile) {
+                      persistProfileChat(chatProfile.id, {
+                        messages: [],
+                        genre: profileChatGenre,
+                        platform: profileChatPlatform,
+                      });
+                    }
+                  }}
+                  disabled={chattingProfileId === chatProfile?.id}
+                >
+                  清空对话
+                </Button>
+              </div>
             )}
             containerStyle={{ flex: 1, minHeight: 0 }}
           />

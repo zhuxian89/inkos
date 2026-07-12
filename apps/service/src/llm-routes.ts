@@ -482,10 +482,32 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         useStream: true,
         includeReasoning,
         onTextDelta: (delta) => {
-          sendEvent({ type: "delta", delta });
+          sendEvent({ type: "message_chunk", data: { content: delta } });
         },
         onReasoningDelta: (delta) => {
-          sendEvent({ type: "reasoning_delta", delta });
+          sendEvent({ type: "thought_chunk", data: { content: delta } });
+        },
+        onToolStart: (info) => {
+          sendEvent({
+            type: "tool_call",
+            data: {
+              id: info.id,
+              name: info.name,
+              arguments: info.arguments,
+              status: "running",
+            },
+          });
+        },
+        onToolEnd: (info) => {
+          sendEvent({
+            type: "tool_call_update",
+            data: {
+              id: info.id,
+              status: info.ok ? "complete" : "error",
+              resultPreview: info.resultPreview,
+              ...(info.error ? { error: info.error } : {}),
+            },
+          });
         },
       });
 

@@ -1,0 +1,10 @@
+feature: 2026-07-12-chat-kit-thinking
+created: 2026-07-12
+steps:
+  - action: "落地 ThinkingBlock + types + barrel"
+    exit_signal: "文件存在且可 import"
+    status: done
+checks:
+  - item: "默认折叠 + 文案对齐 mindfs"
+    source: 验收
+    status: passed

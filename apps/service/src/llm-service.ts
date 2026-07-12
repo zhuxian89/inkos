@@ -584,12 +584,20 @@ export function createLlmService(
       readonly includeReasoning?: boolean;
       readonly onTextDelta?: (delta: string) => void;
       readonly onReasoningDelta?: (delta: string) => void;
+      readonly onToolStart?: (info: { id: string; name: string; arguments: string }) => void;
+      readonly onToolEnd?: (info: {
+        id: string;
+        name: string;
+        ok: boolean;
+        resultPreview: string;
+        error?: string;
+      }) => void;
       readonly abortSignal?: AbortSignal;
     },
   ): Promise<{
     readonly content: string;
     readonly reasoning?: string;
-    readonly toolTrace: ReadonlyArray<{ readonly name: string; readonly args: Record<string, unknown> }>;
+    readonly toolTrace: ReadonlyArray<ToolTraceItem>;
   }> {
     return runToolEnabledConversation(client, model, messages, {
       maxTurns: 8,
@@ -597,6 +605,8 @@ export function createLlmService(
       includeReasoning: options?.includeReasoning,
       onTextDelta: options?.onTextDelta,
       onReasoningDelta: options?.onReasoningDelta,
+      onToolStart: options?.onToolStart,
+      onToolEnd: options?.onToolEnd,
       abortSignal: options?.abortSignal,
       contextMode: "profile",
       logToolCall: (name, args) => {
@@ -615,6 +625,14 @@ export function createLlmService(
       readonly includeReasoning?: boolean;
       readonly onTextDelta?: (delta: string) => void;
       readonly onReasoningDelta?: (delta: string) => void;
+      readonly onToolStart?: (info: { id: string; name: string; arguments: string }) => void;
+      readonly onToolEnd?: (info: {
+        id: string;
+        name: string;
+        ok: boolean;
+        resultPreview: string;
+        error?: string;
+      }) => void;
       readonly abortSignal?: AbortSignal;
       readonly logToolCall?: (name: string, args: Record<string, unknown>) => void;
       readonly tools?: ReadonlyArray<ToolDefinition>;
@@ -678,10 +696,25 @@ export function createLlmService(
         throwIfAborted();
         const args = parseToolArguments(toolCall.arguments);
         options?.logToolCall?.(toolCall.name, args);
+        options?.onToolStart?.({
+          id: toolCall.id,
+          name: toolCall.name,
+          arguments: toolCall.arguments,
+        });
         const toolResult = await executeTool(toolCall.name, args);
         throwIfAborted();
         const ok = parseToolResultOk(toolResult);
         const error = ok ? undefined : parseToolResultError(toolResult);
+        const resultPreview = toolResult.length > 2000
+          ? `${toolResult.slice(0, 2000)}\n…(truncated)`
+          : toolResult;
+        options?.onToolEnd?.({
+          id: toolCall.id,
+          name: toolCall.name,
+          ok,
+          resultPreview,
+          ...(error ? { error } : {}),
+        });
         toolTrace.push({ name: toolCall.name, args, ok, ...(error ? { error } : {}) });
         conversation.push({ role: "tool", toolCallId: toolCall.id, content: toolResult });
       }
