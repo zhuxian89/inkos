@@ -8,6 +8,7 @@ import {
   type ChapterMeta,
   type ToolDefinition,
 } from "@actalk/inkos-core";
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve } from "node:path";
@@ -567,7 +568,8 @@ export function createLlmService(
       `- 项目配置文件：${join(inkosProjectRoot, "inkos.json")}`,
       "书籍目录下包含书籍配置、story 长期记忆文件、chapters 章节文件等内容。",
       "如需处理本地文件：先用 search_text_files 或 list_directory 定位，再用 read_text_file 读取真实文件；需要修改时再用 write_text_file 写回。",
-      "如需验证模型读取 HTTP(S) 页面或 API 的能力，可以调用 curl 工具；它支持本地/内网/公网 URL、鉴权请求头、请求体和常见非删除 HTTP 方法，不执行 shell 命令。",
+      "如需验证模型执行本地命令的能力，可以调用 run_shell_command 工具；除删除/清理类命令会被拒绝外，它会按真实 shell 执行。",
+      "如需验证模型读取 HTTP(S) 页面或 API 的能力，可以调用 curl 工具；它支持本地/内网/公网 URL、鉴权请求头、请求体和常见非删除 HTTP 方法。",
       "当问题与小说生产、题材、平台、写作流程、审计流程、项目文件路径有关时，可以结合这些背景信息提高回答相关性。",
       "最终回复必须使用规范 GitHub-Flavored Markdown；如果展示书籍列表、章节列表、对比数据等表格信息，必须输出带管道和分隔行的标准 Markdown 表格，例如 `| # | 书名 | 状态 | 章节数 |` 和 `|---|---|---|---|`，禁止用空格或制表符伪装表格。",
       "",
@@ -675,7 +677,7 @@ export function createLlmService(
     },
     {
       name: "curl",
-      description: "读取 HTTP(S) URL，类似模型测试用 curl。支持本地/内网/公网 URL、鉴权请求头、请求体和常见非删除 HTTP 方法，不执行 shell 命令。",
+      description: "读取 HTTP(S) URL，类似模型测试用 curl。支持本地/内网/公网 URL、鉴权请求头、请求体和常见非删除 HTTP 方法。",
       parameters: {
         type: "object",
         properties: {
@@ -691,6 +693,25 @@ export function createLlmService(
           timeoutMs: { type: "number", description: "超时时间，默认 30000，最大 120000" },
         },
         required: ["url"],
+      },
+    },
+    {
+      name: "run_shell_command",
+      description: "在本机真实 shell 中执行命令，用于模型配置对话测试。除删除/清理类命令会被拒绝外，其它命令按 shell 执行。",
+      parameters: {
+        type: "object",
+        properties: {
+          command: { type: "string", description: "要执行的 shell 命令" },
+          cwd: { type: "string", description: "工作目录，默认 INKOS_PROJECT_ROOT；支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头，也可传绝对路径" },
+          timeoutMs: { type: "number", description: "超时时间，默认 120000，最大 600000" },
+          maxBytes: { type: "number", description: "最多返回多少输出字节，默认 5000000，最大 20000000" },
+          env: {
+            type: "object",
+            description: "可选环境变量覆盖。",
+            additionalProperties: { type: "string" },
+          },
+        },
+        required: ["command"],
       },
     },
   ];
@@ -933,6 +954,154 @@ export function createLlmService(
     });
   }
 
+  function normalizeProfileShellCwd(input: unknown): string {
+    const raw = typeof input === "string" && input.trim()
+      ? input.trim()
+      : projectRoot;
+    const inkosHome = resolveInkosHomeDir();
+    const expanded = raw
+      .replace(/^INKOS_HOME(?=\/|$)/, inkosHome)
+      .replace(/^INKOS_PROJECT_ROOT(?=\/|$)/, projectRoot);
+    return resolve(expanded);
+  }
+
+  function sanitizeShellEnv(input: unknown): Record<string, string> {
+    if (!input || typeof input !== "object" || Array.isArray(input)) return {};
+    const env: Record<string, string> = {};
+    for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+      const name = key.trim();
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || typeof value !== "string") continue;
+      env[name] = value;
+    }
+    return env;
+  }
+
+  function blockedShellDeleteReason(command: string): string | null {
+    const patterns: ReadonlyArray<readonly [RegExp, string]> = [
+      [/(^|[\s;&|()])rm(\s|$)/i, "rm"],
+      [/(^|[\s;&|()])rmdir(\s|$)/i, "rmdir"],
+      [/(^|[\s;&|()])unlink(\s|$)/i, "unlink"],
+      [/(^|[\s;&|()])shred(\s|$)/i, "shred"],
+      [/(^|[\s;&|()])trash(-put)?(\s|$)/i, "trash"],
+      [/(^|[\s;&|()])del(\s|$)/i, "del"],
+      [/(^|[\s;&|()])rd(\s|$)/i, "rd"],
+      [/(^|[\s;&|()])erase(\s|$)/i, "erase"],
+      [/(^|[\s;&|()])find\b[\s\S]*\s-delete(\s|$)/i, "find -delete"],
+      [/(^|[\s;&|()])git\s+clean\b/i, "git clean"],
+      [/(^|[\s;&|()])git\s+reset\s+--hard\b/i, "git reset --hard"],
+      [/\bremove-item\b/i, "Remove-Item"],
+      [/\bos\.(remove|unlink|rmdir)\s*\(/i, "Python delete API"],
+      [/\bshutil\.rmtree\s*\(/i, "Python rmtree"],
+      [/\bfs\.(rm|unlink|rmdir)\s*\(/i, "Node delete API"],
+      [/\b(rmSync|unlinkSync|rmdirSync)\s*\(/i, "Node delete API"],
+    ];
+    for (const [pattern, reason] of patterns) {
+      if (pattern.test(command)) return reason;
+    }
+    return null;
+  }
+
+  function appendShellOutput(input: {
+    readonly current: string;
+    readonly chunk: Buffer;
+    readonly maxBytes: number;
+    readonly usedBytes: number;
+  }): { readonly text: string; readonly usedBytes: number; readonly truncated: boolean } {
+    const remaining = input.maxBytes - input.usedBytes;
+    if (remaining <= 0) return { text: input.current, usedBytes: input.usedBytes, truncated: true };
+    if (input.chunk.byteLength <= remaining) {
+      return {
+        text: input.current + input.chunk.toString("utf-8"),
+        usedBytes: input.usedBytes + input.chunk.byteLength,
+        truncated: false,
+      };
+    }
+    return {
+      text: input.current + input.chunk.subarray(0, remaining).toString("utf-8"),
+      usedBytes: input.maxBytes,
+      truncated: true,
+    };
+  }
+
+  async function executeShellCommand(args: Record<string, unknown>): Promise<string> {
+    const command = String(args.command ?? "").trim();
+    if (!command) {
+      return profileToolError("run_shell_command", new Error("command is required"));
+    }
+    const blockedReason = blockedShellDeleteReason(command);
+    if (blockedReason) {
+      return profileToolError("run_shell_command", new Error(`delete-like shell command is disabled: ${blockedReason}`));
+    }
+
+    const cwd = normalizeProfileShellCwd(args.cwd);
+    const maxBytesRaw = Number(args.maxBytes ?? 5000000);
+    const maxBytes = Math.min(Math.max(Number.isFinite(maxBytesRaw) ? Math.trunc(maxBytesRaw) : 5000000, 1), 20000000);
+    const timeoutRaw = Number(args.timeoutMs ?? 120000);
+    const timeoutMs = Math.min(Math.max(Number.isFinite(timeoutRaw) ? Math.trunc(timeoutRaw) : 120000, 1000), 600000);
+    const env = { ...process.env, ...sanitizeShellEnv(args.env) };
+
+    return await new Promise((resolvePromise) => {
+      let settled = false;
+      let stdout = "";
+      let stderr = "";
+      let usedBytes = 0;
+      let truncated = false;
+      let timedOut = false;
+
+      const settle = (payload: string): void => {
+        if (settled) return;
+        settled = true;
+        resolvePromise(payload);
+      };
+
+      const child = spawn(command, {
+        cwd,
+        env,
+        shell: true,
+        windowsHide: true,
+      });
+
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        setTimeout(() => {
+          if (!settled && child.exitCode === null) child.kill("SIGKILL");
+        }, 2000).unref();
+      }, timeoutMs);
+      timeout.unref();
+
+      child.stdout.on("data", (chunk: Buffer) => {
+        const appended = appendShellOutput({ current: stdout, chunk, maxBytes, usedBytes });
+        stdout = appended.text;
+        usedBytes = appended.usedBytes;
+        truncated = truncated || appended.truncated;
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        const appended = appendShellOutput({ current: stderr, chunk, maxBytes, usedBytes });
+        stderr = appended.text;
+        usedBytes = appended.usedBytes;
+        truncated = truncated || appended.truncated;
+      });
+      child.on("error", (error) => {
+        clearTimeout(timeout);
+        settle(profileToolError("run_shell_command", error));
+      });
+      child.on("close", (exitCode, signal) => {
+        clearTimeout(timeout);
+        settle(profileToolOk({
+          command,
+          cwd,
+          exitCode,
+          signal,
+          timedOut,
+          truncated,
+          stdout,
+          stderr,
+        }));
+      });
+    });
+  }
+
   function isProfileTextPath(filePath: string): boolean {
     const extension = extname(filePath).toLowerCase();
     return PROFILE_TEXT_EXTENSIONS.has(extension) || basename(filePath) === ".env";
@@ -960,6 +1129,7 @@ export function createLlmService(
     if (name === "read_text_file" || name === "list_directory" || name === "list_books" || name === "list_llm_profiles") return "read";
     if (name === "search_text_files") return "search";
     if (name === "curl") return "fetch";
+    if (name === "run_shell_command") return "command";
     if (name === "write_text_file" || name === "make_directory") return "edit";
     if (name === "move_path") return "move";
     if (name === "delete_path") return "delete";
@@ -998,8 +1168,9 @@ export function createLlmService(
     const payload = parseProfileToolPayload(input.result);
     const primaryPath = toolPrimaryPath(input.name, input.args, payload);
     const url = optionalString(input.args.url) ?? optionalString(payload?.url);
+    const command = optionalString(input.args.command) ?? optionalString(payload?.command);
     const query = optionalString(input.args.query) ?? optionalString(payload?.query);
-    const title = primaryPath ?? url ?? query ?? input.name;
+    const title = primaryPath ?? url ?? command ?? query ?? input.name;
     const locations: Array<{ path: string; line?: number }> = [];
     const content: ProfileToolContentItem[] = [];
 
@@ -1033,6 +1204,19 @@ export function createLlmService(
     } else if (input.name === "curl" && input.result && input.status !== "running") {
       const body = optionalString(payload?.body) ?? input.result;
       content.push({ type: "text", text: body });
+    } else if (input.name === "run_shell_command" && input.result && input.status !== "running") {
+      const stdout = optionalString(payload?.stdout);
+      const stderr = optionalString(payload?.stderr);
+      const exitCode = payload?.exitCode;
+      const timedOut = payload?.timedOut === true;
+      const parts = [
+        command ? `$ ${command}` : undefined,
+        typeof exitCode === "number" || exitCode === null ? `exitCode: ${String(exitCode)}` : undefined,
+        timedOut ? "timedOut: true" : undefined,
+        stdout ? `stdout:\n${stdout}` : undefined,
+        stderr ? `stderr:\n${stderr}` : undefined,
+      ].filter((item): item is string => Boolean(item));
+      content.push({ type: "text", text: parts.length > 0 ? parts.join("\n\n") : input.result });
     } else if (input.result && input.status !== "running") {
       content.push({ type: "text", text: input.result });
       if (primaryPath) locations.push({ path: primaryPath });
@@ -1256,6 +1440,10 @@ export function createLlmService(
 
       case "curl": {
         return await executeSafeCurl(args);
+      }
+
+      case "run_shell_command": {
+        return await executeShellCommand(args);
       }
 
       default:
