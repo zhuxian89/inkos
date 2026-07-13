@@ -9,7 +9,7 @@ import { ChatPanel } from "./chat-panel";
 import { consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
 import { ChatFactLogPanel } from "./chat-fact-log-panel";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
-import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
+import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_DESKTOP_BODY_HEIGHT, CHAT_MODAL_DESKTOP_WIDTH, CHAT_MODAL_WIDTH } from "./chat-modal";
 import { IssueTags } from "./issue-tags";
 import { ChapterActions } from "./chapter-actions";
 
@@ -536,9 +536,9 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
         footer={null}
         maskClosable={false}
         keyboard
-        width={isMobile ? "94vw" : (chatLogOpen ? "min(1640px, 98vw)" : CHAT_MODAL_WIDTH)}
-        style={{ top: isMobile ? 8 : 20 }}
-        styles={{ body: { paddingTop: 8, height: isMobile ? "76vh" : CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
+        width={isMobile ? "94vw" : CHAT_MODAL_DESKTOP_WIDTH}
+        style={{ top: isMobile ? 8 : 12 }}
+        styles={{ body: { paddingTop: 8, height: isMobile ? "76vh" : CHAT_MODAL_DESKTOP_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnClose
         title={chatChapter ? `Ch.${chatChapter.number} · ${chatChapter.title}` : "章节对话"}
       >

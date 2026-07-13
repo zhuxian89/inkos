@@ -30,7 +30,7 @@ import {
   type ChatKitItem,
 } from "./chat-kit";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
-import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
+import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_DESKTOP_BODY_HEIGHT, CHAT_MODAL_DESKTOP_WIDTH } from "./chat-modal";
 
 const PROFILE_CHAT_STORAGE_PREFIX = "inkos.profile-chat.";
 const PROFILE_CHAT_GENRE_OPTIONS = [
@@ -979,9 +979,9 @@ export function SetupWorkspace() {
         footer={null}
         maskClosable={false}
         keyboard
-        width={isMobile ? "94vw" : CHAT_MODAL_WIDTH}
-        style={{ top: 20 }}
-        styles={{ body: { paddingTop: 12, height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
+        width={isMobile ? "94vw" : CHAT_MODAL_DESKTOP_WIDTH}
+        style={{ top: isMobile ? 20 : 12 }}
+        styles={{ body: { paddingTop: 12, height: isMobile ? CHAT_MODAL_BODY_HEIGHT : CHAT_MODAL_DESKTOP_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnHidden
       >
         <div style={{ display: "flex", flexDirection: "column", gap: 16, height: "100%" }}>

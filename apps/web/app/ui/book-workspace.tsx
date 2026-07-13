@@ -30,7 +30,7 @@ import { ChatPanel } from "./chat-panel";
 import { consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
 import { ChatFactLogPanel } from "./chat-fact-log-panel";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
-import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
+import { CHAT_MODAL_DESKTOP_BODY_HEIGHT, CHAT_MODAL_DESKTOP_WIDTH } from "./chat-modal";
 import { labelBookStatus, labelGenre, labelPlatform } from "./labels";
 
 interface ChapterStatus {
@@ -1042,9 +1042,9 @@ export function BookWorkspace({ bookId }: Readonly<{ bookId: string }>) {
         footer={null}
         maskClosable={false}
         keyboard
-        width={isMobile ? "94vw" : (assistantLogOpen ? "min(1640px, 98vw)" : CHAT_MODAL_WIDTH)}
-        style={{ top: isMobile ? 8 : 20 }}
-        styles={{ body: { height: isMobile ? "76vh" : CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } }}
+        width={isMobile ? "94vw" : CHAT_MODAL_DESKTOP_WIDTH}
+        style={{ top: isMobile ? 8 : 12 }}
+        styles={{ body: { height: isMobile ? "76vh" : CHAT_MODAL_DESKTOP_BODY_HEIGHT, overflow: "hidden" } }}
         destroyOnHidden={false}
       >
         <div style={{ display: "flex", flexDirection: "column", gap: isMobile ? 6 : 12, width: "100%", height: "100%", minHeight: 0 }}>

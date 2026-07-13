@@ -5,7 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./chat-panel";
 import { consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
-import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_WIDTH } from "./chat-modal";
+import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_DESKTOP_BODY_HEIGHT, CHAT_MODAL_DESKTOP_WIDTH } from "./chat-modal";
 
 interface CreateBookValues {
   readonly title: string;
@@ -374,8 +374,8 @@ export function CreateBookLauncher(props: Readonly<{
         footer={null}
         maskClosable={false}
         keyboard
-        width={selectedCreateMode === "smart" ? (isMobile ? "94vw" : CHAT_MODAL_WIDTH) : 860}
-        styles={selectedCreateMode === "smart" ? { body: { height: CHAT_MODAL_BODY_HEIGHT, overflow: "hidden" } } : undefined}
+        width={selectedCreateMode === "smart" ? (isMobile ? "94vw" : CHAT_MODAL_DESKTOP_WIDTH) : 860}
+        styles={selectedCreateMode === "smart" ? { body: { height: isMobile ? CHAT_MODAL_BODY_HEIGHT : CHAT_MODAL_DESKTOP_BODY_HEIGHT, overflow: "hidden" } } : undefined}
         destroyOnHidden
       >
         <Space direction="vertical" size={16} style={{ width: "100%", height: selectedCreateMode === "smart" ? "100%" : undefined }}>
