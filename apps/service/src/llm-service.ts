@@ -9,9 +9,7 @@ import {
   type ToolDefinition,
 } from "@actalk/inkos-core";
 import { randomUUID } from "node:crypto";
-import { lookup } from "node:dns/promises";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
-import { isIP } from "node:net";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
@@ -569,7 +567,7 @@ export function createLlmService(
       `- 项目配置文件：${join(inkosProjectRoot, "inkos.json")}`,
       "书籍目录下包含书籍配置、story 长期记忆文件、chapters 章节文件等内容。",
       "如需处理本地文件：先用 search_text_files 或 list_directory 定位，再用 read_text_file 读取真实文件；需要修改时再用 write_text_file 写回。",
-      "如需读取公开 HTTP(S) 页面或 API，可以调用 curl 工具；它只支持安全的 GET/HEAD 公网请求，不执行 shell 命令。",
+      "如需验证模型读取 HTTP(S) 页面或 API 的能力，可以调用 curl 工具；它支持本地/内网/公网 URL、鉴权请求头、请求体和常见非删除 HTTP 方法，不执行 shell 命令。",
       "当问题与小说生产、题材、平台、写作流程、审计流程、项目文件路径有关时，可以结合这些背景信息提高回答相关性。",
       "最终回复必须使用规范 GitHub-Flavored Markdown；如果展示书籍列表、章节列表、对比数据等表格信息，必须输出带管道和分隔行的标准 Markdown 表格，例如 `| # | 书名 | 状态 | 章节数 |` 和 `|---|---|---|---|`，禁止用空格或制表符伪装表格。",
       "",
@@ -649,17 +647,6 @@ export function createLlmService(
       },
     },
     {
-      name: "delete_path",
-      description: "删除文件或目录。",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string", description: "要删除的路径，支持 INKOS_HOME 或 INKOS_PROJECT_ROOT 开头" },
-        },
-        required: ["path"],
-      },
-    },
-    {
       name: "list_books",
       description: "列出当前项目下的所有书籍及其状态。",
       parameters: {
@@ -688,19 +675,20 @@ export function createLlmService(
     },
     {
       name: "curl",
-      description: "安全地读取公网 HTTP(S) URL，类似受限 curl。只支持 GET/HEAD，不访问 localhost/内网，不执行 shell 命令。",
+      description: "读取 HTTP(S) URL，类似模型测试用 curl。支持本地/内网/公网 URL、鉴权请求头、请求体和常见非删除 HTTP 方法，不执行 shell 命令。",
       parameters: {
         type: "object",
         properties: {
-          url: { type: "string", description: "要请求的公网 http/https URL" },
-          method: { type: "string", enum: ["GET", "HEAD"], description: "请求方法，默认 GET" },
+          url: { type: "string", description: "要请求的 http/https URL，可为本地、内网或公网地址" },
+          method: { type: "string", enum: ["GET", "HEAD", "POST", "PUT", "PATCH", "OPTIONS"], description: "请求方法，默认 GET；不支持 DELETE" },
           headers: {
             type: "object",
-            description: "可选请求头。Authorization/Cookie 等敏感头会被拒绝。",
+            description: "可选请求头，支持 Authorization、Cookie、x-api-key 等测试场景常用头。",
             additionalProperties: { type: "string" },
           },
-          maxBytes: { type: "number", description: "最多读取多少字节，默认 120000，最大 250000" },
-          timeoutMs: { type: "number", description: "超时时间，默认 10000，最大 20000" },
+          body: { type: "string", description: "POST/PUT/PATCH 请求体" },
+          maxBytes: { type: "number", description: "最多读取多少字节，默认 1000000，最大 5000000" },
+          timeoutMs: { type: "number", description: "超时时间，默认 30000，最大 120000" },
         },
         required: ["url"],
       },
@@ -757,66 +745,10 @@ export function createLlmService(
     }, null, 2);
   }
 
-  function isPrivateIpv4(address: string): boolean {
-    const parts = address.split(".").map((part) => Number(part));
-    if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return true;
-    const [a, b, c] = parts as [number, number, number, number];
-    return a === 0
-      || a === 10
-      || a === 127
-      || (a === 100 && b >= 64 && b <= 127)
-      || (a === 169 && b === 254)
-      || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 0)
-      || (a === 192 && b === 168)
-      || (a === 198 && (b === 18 || b === 19))
-      || (a === 198 && b === 51 && c === 100)
-      || (a === 203 && b === 0 && c === 113)
-      || a >= 224;
-  }
-
-  function isPrivateIpv6(address: string): boolean {
-    const normalized = address.toLowerCase();
-    return normalized === "::1"
-      || normalized === "::"
-      || normalized.startsWith("fc")
-      || normalized.startsWith("fd")
-      || normalized.startsWith("fe80:")
-      || /^fe[89ab][0-9a-f]:/.test(normalized)
-      || normalized.startsWith("::ffff:")
-      || normalized.startsWith("::ffff:127.")
-      || normalized.startsWith("::ffff:10.")
-      || normalized.startsWith("::ffff:192.168.")
-      || normalized.startsWith("::ffff:169.254.")
-      || /^::ffff:172\.(1[6-9]|2\d|3[0-1])\./.test(normalized)
-      || /^::ffff:100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(normalized);
-  }
-
-  async function validatePublicHttpUrl(rawUrl: string): Promise<URL> {
+  function validateCurlUrl(rawUrl: string): URL {
     const url = new URL(rawUrl);
     if (url.protocol !== "http:" && url.protocol !== "https:") {
       throw new Error("curl only supports http/https URLs");
-    }
-    if (url.username || url.password) {
-      throw new Error("curl URL must not contain username or password");
-    }
-    const rawHostname = url.hostname.toLowerCase();
-    const hostname = rawHostname.startsWith("[") && rawHostname.endsWith("]")
-      ? rawHostname.slice(1, -1)
-      : rawHostname;
-    if (
-      hostname === "localhost"
-      || hostname === "0.0.0.0"
-      || hostname.endsWith(".localhost")
-      || hostname.endsWith(".local")
-    ) {
-      throw new Error("curl refuses localhost/private hosts");
-    }
-    const addresses = isIP(hostname) ? [{ address: hostname }] : await lookup(hostname, { all: true });
-    for (const item of addresses) {
-      if ((isIP(item.address) === 4 && isPrivateIpv4(item.address)) || (isIP(item.address) === 6 && isPrivateIpv6(item.address))) {
-        throw new Error(`curl refuses private network address: ${item.address}`);
-      }
     }
     return url;
   }
@@ -824,14 +756,10 @@ export function createLlmService(
   function sanitizeCurlHeaders(input: unknown): Record<string, string> {
     if (!input || typeof input !== "object" || Array.isArray(input)) return {};
     const denied = new Set([
-      "authorization",
       "connection",
       "content-length",
-      "cookie",
       "host",
-      "proxy-authorization",
       "transfer-encoding",
-      "x-api-key",
     ]);
     const result: Record<string, string> = {};
     for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
@@ -843,6 +771,32 @@ export function createLlmService(
       result[key.trim()] = value.slice(0, 500);
     }
     return result;
+  }
+
+  function hasCurlHeader(headers: Record<string, string>, name: string): boolean {
+    const normalizedName = name.toLowerCase();
+    return Object.keys(headers).some((key) => key.toLowerCase() === normalizedName);
+  }
+
+  function prepareCurlRequestUrl(inputUrl: URL, headers: Record<string, string>): URL {
+    const requestUrl = new URL(inputUrl.toString());
+    if ((requestUrl.username || requestUrl.password) && !hasCurlHeader(headers, "authorization")) {
+      const username = decodeURIComponent(requestUrl.username);
+      const password = decodeURIComponent(requestUrl.password);
+      headers.Authorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+    }
+    requestUrl.username = "";
+    requestUrl.password = "";
+    return requestUrl;
+  }
+
+  function redactCurlUrl(inputUrl: URL): string {
+    const url = new URL(inputUrl.toString());
+    if (url.username || url.password) {
+      url.username = "***";
+      url.password = "***";
+    }
+    return url.toString();
   }
 
   async function readLimitedResponseText(response: Response, maxBytes: number): Promise<{
@@ -904,6 +858,7 @@ export function createLlmService(
     readonly url: URL;
     readonly method: string;
     readonly headers: Record<string, string>;
+    readonly body?: string;
     readonly timeoutMs: number;
   }): Promise<{
     readonly response: Response;
@@ -913,9 +868,11 @@ export function createLlmService(
     let currentUrl = input.url;
     const redirects: string[] = [];
     for (let index = 0; index <= 5; index += 1) {
-      const response = await fetch(currentUrl, {
+      const requestUrl = prepareCurlRequestUrl(currentUrl, input.headers);
+      const response = await fetch(requestUrl, {
         method: input.method,
         headers: input.headers,
+        ...(input.body !== undefined && input.method !== "GET" && input.method !== "HEAD" ? { body: input.body } : {}),
         redirect: "manual",
         signal: AbortSignal.timeout(input.timeoutMs),
       });
@@ -927,8 +884,8 @@ export function createLlmService(
             throw new Error("curl redirect limit exceeded");
           }
           await response.body?.cancel();
-          currentUrl = await validatePublicHttpUrl(new URL(location, currentUrl).toString());
-          redirects.push(currentUrl.toString());
+          currentUrl = validateCurlUrl(new URL(location, currentUrl).toString());
+          redirects.push(redactCurlUrl(currentUrl));
           continue;
         }
       }
@@ -938,28 +895,31 @@ export function createLlmService(
   }
 
   async function executeSafeCurl(args: Record<string, unknown>): Promise<string> {
-    const url = await validatePublicHttpUrl(String(args.url ?? ""));
+    const url = validateCurlUrl(String(args.url ?? ""));
     const method = String(args.method ?? "GET").toUpperCase();
-    if (method !== "GET" && method !== "HEAD") {
-      throw new Error("curl only supports GET and HEAD");
+    const allowedMethods = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "OPTIONS"]);
+    if (!allowedMethods.has(method)) {
+      throw new Error("curl supports GET, HEAD, POST, PUT, PATCH and OPTIONS only");
     }
-    const maxBytesRaw = Number(args.maxBytes ?? 120000);
-    const maxBytes = Math.min(Math.max(Number.isFinite(maxBytesRaw) ? Math.trunc(maxBytesRaw) : 120000, 1), 250000);
-    const timeoutRaw = Number(args.timeoutMs ?? 10000);
-    const timeoutMs = Math.min(Math.max(Number.isFinite(timeoutRaw) ? Math.trunc(timeoutRaw) : 10000, 1000), 20000);
+    const maxBytesRaw = Number(args.maxBytes ?? 1000000);
+    const maxBytes = Math.min(Math.max(Number.isFinite(maxBytesRaw) ? Math.trunc(maxBytesRaw) : 1000000, 1), 5000000);
+    const timeoutRaw = Number(args.timeoutMs ?? 30000);
+    const timeoutMs = Math.min(Math.max(Number.isFinite(timeoutRaw) ? Math.trunc(timeoutRaw) : 30000, 1000), 120000);
+    const requestBody = typeof args.body === "string" ? args.body : undefined;
     const { response, finalUrl, redirects } = await fetchSafeCurlResponse({
       url,
       method,
       headers: sanitizeCurlHeaders(args.headers),
+      ...(requestBody !== undefined ? { body: requestBody } : {}),
       timeoutMs,
     });
     const contentType = response.headers.get("content-type") ?? "";
-    const { body, truncated } = method === "HEAD"
+    const { body: responseBody, truncated } = method === "HEAD"
       ? { body: "", truncated: false }
       : await readLimitedResponseText(response, maxBytes);
     return profileToolOk({
-      url: finalUrl.toString(),
-      originalUrl: url.toString(),
+      url: redactCurlUrl(finalUrl),
+      originalUrl: redactCurlUrl(url),
       redirects,
       method,
       status: response.status,
@@ -969,7 +929,7 @@ export function createLlmService(
         contentLength: response.headers.get("content-length"),
       },
       truncated,
-      body,
+      body: responseBody,
     });
   }
 
@@ -1255,9 +1215,7 @@ export function createLlmService(
       }
 
       case "delete_path": {
-        const path = normalizeProfileToolPath(String(args.path ?? ""));
-        await rm(path, { recursive: true, force: true });
-        return profileToolOk({ path });
+        return profileToolError(name, new Error("delete_path is disabled in model profile tests."));
       }
 
       case "list_books": {
