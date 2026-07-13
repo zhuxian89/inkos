@@ -13,7 +13,7 @@ import {
   startJob,
   updateJobStep,
 } from "./jobs.js";
-import type { LlmProfileRow } from "./llm-service.js";
+import { DEFAULT_LLM_USER_AGENT, type LlmProfileRow } from "./llm-service.js";
 import { resolveBookId } from "./runtime.js";
 import type { RouteRegistrar } from "./service-context.js";
 import { describeError, logError, logInfo } from "./service-logging.js";
@@ -308,12 +308,31 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
     throw new Error("API Key is required for this operation.");
   }
 
+  async function resolveProfileDraftUserAgent(input: {
+    readonly profileId?: string;
+    readonly userAgent?: string | null;
+  }): Promise<string> {
+    if (input.userAgent?.trim()) return input.userAgent.trim();
+    if (input.profileId?.trim()) {
+      const db = context.llmService.openProfilesDb();
+      try {
+        const existing = context.llmService.getProfileById(db, input.profileId.trim());
+        if (existing?.user_agent?.trim()) return existing.user_agent.trim();
+      } finally {
+        db.close();
+      }
+    }
+    const globalEnv = await context.llmService.readGlobalLlmEnv();
+    return globalEnv.userAgent?.trim() || DEFAULT_LLM_USER_AGENT;
+  }
+
   app.post("/api/llm-profiles/models", async (req, res) => {
     const schema = z.object({
       profileId: z.string().optional(),
       provider: z.literal("openai").default("openai"),
       baseUrl: z.string().url(),
       apiKey: z.string().trim().min(1).optional(),
+      userAgent: z.string().trim().min(1).max(500).optional(),
     });
 
     try {
@@ -325,10 +344,12 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         profileId: input.profileId ?? null,
         apiKeyConfigured: Boolean(apiKey),
       });
+      const userAgent = await resolveProfileDraftUserAgent(input);
       const result = await context.llmService.listLlmModels({
         provider: input.provider,
         baseUrl: input.baseUrl,
         apiKey,
+        userAgent,
       });
       logInfo("llm_profiles.models.done", {
         provider: result.provider,
@@ -350,6 +371,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       baseUrl: z.string().url(),
       apiKey: z.string().trim().min(1).optional(),
       model: z.string().trim().min(1),
+      userAgent: z.string().trim().min(1).max(500).optional(),
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).optional(),
       thinkingBudget: z.number().int().min(0).optional(),
@@ -360,6 +382,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
     try {
       const input = schema.parse(req.body ?? {});
       const apiKey = await resolveProfileDraftApiKey(input);
+      const userAgent = await resolveProfileDraftUserAgent(input);
       logInfo("llm_profiles.test_config.start", {
         provider: input.provider,
         baseUrl: input.baseUrl,
@@ -372,6 +395,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         baseUrl: input.baseUrl,
         apiKey,
         model: input.model,
+        userAgent,
         temperature: input.temperature,
         maxTokens: input.maxTokens,
         thinkingBudget: input.thinkingBudget,
@@ -400,6 +424,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       baseUrl: z.string().url().default("https://api.openai.com/v1"),
       apiKey: z.string().trim().min(1).optional(),
       model: z.string().trim().min(1).default("gpt-4o"),
+      userAgent: z.string().trim().min(1).max(500).optional(),
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).optional(),
       thinkingBudget: z.number().int().min(0).optional(),
@@ -412,6 +437,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       const input = schema.parse(req.body ?? {});
       const existingGlobal = await context.llmService.readGlobalLlmEnv();
       const finalApiKey = input.apiKey ?? existingGlobal.apiKey;
+      const userAgent = input.userAgent?.trim() || existingGlobal.userAgent?.trim() || DEFAULT_LLM_USER_AGENT;
       if (!finalApiKey) {
         throw new Error("API Key is required for creating a profile.");
       }
@@ -423,8 +449,8 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         db
           .prepare(
             `INSERT INTO llm_profiles
-              (id, name, provider, base_url, api_key, model, temperature, max_tokens, thinking_budget, reasoning_effort, api_format, is_active, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+              (id, name, provider, base_url, api_key, model, user_agent, temperature, max_tokens, thinking_budget, reasoning_effort, api_format, is_active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
           )
           .run(
             id,
@@ -433,6 +459,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
             input.baseUrl,
             finalApiKey,
             input.model,
+            userAgent,
             input.temperature ?? 0.7,
             input.maxTokens ?? 16000,
             input.thinkingBudget ?? 0,
@@ -479,6 +506,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       baseUrl: z.string().url().optional(),
       apiKey: z.string().trim().min(1).optional(),
       model: z.string().trim().min(1).optional(),
+      userAgent: z.string().trim().min(1).max(500).optional(),
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).optional(),
       thinkingBudget: z.number().int().min(0).optional(),
@@ -501,7 +529,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
           .prepare(
             `UPDATE llm_profiles
                SET name = ?, provider = ?, base_url = ?, api_key = ?, model = ?,
-                   temperature = ?, max_tokens = ?, thinking_budget = ?, reasoning_effort = ?, api_format = ?, updated_at = ?
+                   user_agent = ?, temperature = ?, max_tokens = ?, thinking_budget = ?, reasoning_effort = ?, api_format = ?, updated_at = ?
              WHERE id = ?`,
           )
           .run(
@@ -510,6 +538,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
             input.baseUrl ?? existing.base_url,
             input.apiKey ?? existing.api_key,
             input.model ?? existing.model,
+            input.userAgent ?? existing.user_agent ?? DEFAULT_LLM_USER_AGENT,
             input.temperature ?? existing.temperature ?? 0.7,
             input.maxTokens ?? existing.max_tokens ?? 16000,
             input.thinkingBudget ?? existing.thinking_budget ?? 0,
@@ -633,6 +662,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         baseUrl: profile.base_url,
         apiKey: profile.api_key,
         model: profile.model,
+        userAgent: profile.user_agent ?? DEFAULT_LLM_USER_AGENT,
         temperature: profile.temperature ?? 0.7,
         maxTokens: profile.max_tokens ?? 16000,
         thinkingBudget: profile.thinking_budget ?? 0,
@@ -734,6 +764,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         baseUrl: profile.base_url,
         apiKey: profile.api_key,
         model: profile.model,
+        userAgent: profile.user_agent ?? DEFAULT_LLM_USER_AGENT,
         temperature: profile.temperature ?? 0.7,
         maxTokens: profile.max_tokens ?? 16000,
         thinkingBudget: profile.thinking_budget ?? 0,
@@ -855,6 +886,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       baseUrl: z.string().url().default("https://api.openai.com/v1"),
       apiKey: z.string().min(1).optional(),
       model: z.string().min(1).default("gpt-4o"),
+      userAgent: z.string().trim().min(1).max(500).optional(),
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).optional(),
       thinkingBudget: z.number().int().min(0).optional(),
@@ -872,6 +904,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       });
       const existingGlobal = await context.llmService.readGlobalLlmEnv();
       const finalApiKey = input.apiKey ?? existingGlobal.apiKey;
+      const userAgent = input.userAgent?.trim() || existingGlobal.userAgent?.trim() || DEFAULT_LLM_USER_AGENT;
       if (!finalApiKey) {
         throw new Error("API Key is required for first-time setup.");
       }
@@ -908,6 +941,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
           "# INKOS_LLM_BASE_URL=https://api.openai.com/v1",
           "# INKOS_LLM_API_KEY=your-api-key-here",
           "# INKOS_LLM_MODEL=gpt-4o",
+          "# INKOS_LLM_USER_AGENT=curl/8.0",
         ].join("\n"),
         "utf-8",
       );
@@ -917,6 +951,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         baseUrl: input.baseUrl,
         apiKey: finalApiKey,
         model: input.model,
+        userAgent,
         temperature: input.temperature ?? 0.7,
         maxTokens: input.maxTokens ?? 16000,
         thinkingBudget: input.thinkingBudget ?? 0,
@@ -929,6 +964,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         baseUrl: input.baseUrl,
         apiKey: finalApiKey,
         model: input.model,
+        userAgent,
         temperature: input.temperature ?? 0.7,
         maxTokens: input.maxTokens ?? 16000,
         thinkingBudget: input.thinkingBudget ?? 0,

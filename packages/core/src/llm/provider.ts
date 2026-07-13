@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { LLMConfig, ReasoningEffort } from "../models/project.js";
 
-const DEFAULT_LLM_HEADERS = {
-  "User-Agent": "curl/8.0",
-} as const;
+const DEFAULT_LLM_USER_AGENT = "curl/8.0";
 const NON_STREAM_TOOL_CHAT_FALLBACK_TTL_MS = 15 * 24 * 60 * 60 * 1000;
 const nonStreamToolChatFallbackCache = new Map<string, number>();
+
+function buildDefaultLLMHeaders(userAgent?: string): { readonly "User-Agent": string } {
+  return { "User-Agent": userAgent?.trim() || DEFAULT_LLM_USER_AGENT };
+}
 
 function summarizeBaseUrl(value?: string): string | null {
   if (!value) return null;
@@ -69,6 +71,7 @@ export interface LLMClient {
     readonly maxTokens: number;
     readonly thinkingBudget: number;
     readonly reasoningEffort?: ReasoningEffort;
+    readonly userAgent: string;
   };
 }
 
@@ -125,11 +128,13 @@ function extractTextValue(value: unknown): string {
 // === Factory ===
 
 export function createLLMClient(config: LLMConfig): LLMClient {
+  const userAgent = config.userAgent?.trim() || DEFAULT_LLM_USER_AGENT;
   const defaults = {
     temperature: config.temperature ?? 0.7,
     maxTokens: config.maxTokens ?? 16000,
     thinkingBudget: config.thinkingBudget ?? 0,
     ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
+    userAgent,
   };
 
   const apiFormat = config.apiFormat ?? "chat";
@@ -143,7 +148,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
       _anthropic: new Anthropic({
         apiKey: config.apiKey,
         baseURL,
-        defaultHeaders: DEFAULT_LLM_HEADERS,
+        defaultHeaders: buildDefaultLLMHeaders(userAgent),
       }),
       defaults,
     };
@@ -155,7 +160,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     _openai: new OpenAI({
       apiKey: config.apiKey,
       baseURL: config.baseUrl,
-      defaultHeaders: DEFAULT_LLM_HEADERS,
+      defaultHeaders: buildDefaultLLMHeaders(userAgent),
     }),
     defaults,
   };
@@ -319,6 +324,7 @@ export async function chatCompletion(
     maxTokens: resolved.maxTokens,
     temperature: resolved.temperature,
     reasoningEffort: resolved.reasoningEffort ?? null,
+    userAgent: client.defaults.userAgent,
     webSearch: options?.webSearch === true,
     abortSignal: options?.abortSignal ? "provided" : "none",
     baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
@@ -343,6 +349,7 @@ export async function chatCompletion(
       maxTokens: resolved.maxTokens,
       temperature: resolved.temperature,
       reasoningEffort: resolved.reasoningEffort ?? null,
+      userAgent: client.defaults.userAgent,
       webSearch: options?.webSearch === true,
       abortSignal: options?.abortSignal ? "provided" : "none",
       baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
@@ -388,6 +395,7 @@ export async function chatWithTools(
     maxTokens: resolved.maxTokens,
     temperature: resolved.temperature,
     reasoningEffort: resolved.reasoningEffort ?? null,
+    userAgent: client.defaults.userAgent,
     useStream: resolved.useStream,
     includeReasoning: resolved.includeReasoning,
     abortSignal: options?.abortSignal ? "provided" : "none",
@@ -414,6 +422,7 @@ export async function chatWithTools(
       maxTokens: resolved.maxTokens,
       temperature: resolved.temperature,
       reasoningEffort: resolved.reasoningEffort ?? null,
+      userAgent: client.defaults.userAgent,
       useStream: resolved.useStream,
       includeReasoning: resolved.includeReasoning,
       baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),

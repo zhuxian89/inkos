@@ -45,6 +45,7 @@ configCommand
   .requiredOption("--base-url <url>", "API base URL")
   .requiredOption("--api-key <key>", "API key")
   .requiredOption("--model <model>", "Model name")
+  .option("--user-agent <value>", "HTTP User-Agent for LLM API requests")
   .option("--temperature <n>", "Temperature")
   .option("--max-tokens <n>", "Max output tokens")
   .option("--thinking-budget <n>", "Reasoning/thinking budget")
@@ -66,6 +67,7 @@ configCommand
         `INKOS_LLM_BASE_URL=${opts.baseUrl}`,
         `INKOS_LLM_API_KEY=${opts.apiKey}`,
         `INKOS_LLM_MODEL=${opts.model}`,
+        `INKOS_LLM_USER_AGENT=${opts.userAgent?.trim() || "curl/8.0"}`,
       ];
       if (opts.temperature) lines.push(`INKOS_LLM_TEMPERATURE=${opts.temperature}`);
       if (opts.maxTokens) lines.push(`INKOS_LLM_MAX_TOKENS=${opts.maxTokens}`);

@@ -10,6 +10,7 @@ export interface ProjectSummary {
     readonly provider?: string;
     readonly baseUrl?: string;
     readonly model?: string;
+    readonly userAgent?: string;
     readonly apiKeyConfigured: boolean;
   } | null;
   readonly books: ReadonlyArray<{
@@ -46,6 +47,7 @@ async function loadGlobalLlmConfig(): Promise<ProjectSummary["globalLlm"]> {
       provider: map.INKOS_LLM_PROVIDER,
       baseUrl: map.INKOS_LLM_BASE_URL,
       model: map.INKOS_LLM_MODEL,
+      userAgent: map.INKOS_LLM_USER_AGENT,
       apiKeyConfigured: Boolean(map.INKOS_LLM_API_KEY),
     };
   } catch {

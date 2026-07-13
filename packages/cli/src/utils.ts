@@ -48,6 +48,7 @@ export async function loadConfig(): Promise<ProjectConfig> {
     if (env.INKOS_LLM_PROVIDER) config.llm.provider = env.INKOS_LLM_PROVIDER;
     if (env.INKOS_LLM_BASE_URL) config.llm.baseUrl = env.INKOS_LLM_BASE_URL;
     if (env.INKOS_LLM_MODEL) config.llm.model = env.INKOS_LLM_MODEL;
+    if (env.INKOS_LLM_USER_AGENT) config.llm.userAgent = env.INKOS_LLM_USER_AGENT;
     if (env.INKOS_LLM_TEMPERATURE) config.llm.temperature = parseFloat(env.INKOS_LLM_TEMPERATURE);
     if (env.INKOS_LLM_MAX_TOKENS) config.llm.maxTokens = parseInt(env.INKOS_LLM_MAX_TOKENS, 10);
     if (env.INKOS_LLM_THINKING_BUDGET) config.llm.thinkingBudget = parseInt(env.INKOS_LLM_THINKING_BUDGET, 10);

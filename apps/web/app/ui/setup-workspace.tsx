@@ -33,6 +33,7 @@ import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatS
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_DESKTOP_BODY_HEIGHT, CHAT_MODAL_DESKTOP_WIDTH } from "./chat-modal";
 
 const PROFILE_CHAT_STORAGE_PREFIX = "inkos.profile-chat.";
+const DEFAULT_LLM_USER_AGENT = "curl/8.0";
 const PROFILE_CHAT_GENRE_OPTIONS = [
   { label: "穿越", value: "chuanyue" },
   { label: "玄幻", value: "xuanhuan" },
@@ -60,6 +61,7 @@ interface ProfileFormValues {
   readonly baseUrl: string;
   readonly apiKey?: string;
   readonly model: string;
+  readonly userAgent?: string;
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly thinkingBudget?: number;
@@ -73,11 +75,12 @@ interface SetupSummaryResponse {
   readonly books?: ReadonlyArray<{ readonly id: string }>;
   readonly config?: {
     readonly name?: string;
-    readonly llm?: {
-      readonly provider?: string;
-      readonly baseUrl?: string;
-      readonly model?: string;
-    };
+      readonly llm?: {
+        readonly provider?: string;
+        readonly baseUrl?: string;
+        readonly model?: string;
+        readonly userAgent?: string;
+      };
     readonly modelOverrides?: {
       readonly dialogue?: string;
     };
@@ -86,6 +89,7 @@ interface SetupSummaryResponse {
     readonly provider?: string;
     readonly baseUrl?: string;
     readonly model?: string;
+    readonly userAgent?: string;
     readonly apiKeyConfigured?: boolean;
   } | null;
 }
@@ -103,6 +107,7 @@ interface LlmProfile {
   readonly provider: "openai";
   readonly baseUrl: string;
   readonly model: string;
+  readonly userAgent?: string;
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly thinkingBudget?: number;
@@ -258,6 +263,7 @@ export function SetupWorkspace() {
       baseUrl: values.baseUrl,
       model: values.model,
       apiKey: values.apiKey?.trim() || undefined,
+      userAgent: values.userAgent?.trim() || DEFAULT_LLM_USER_AGENT,
       temperature: values.temperature ?? 0.7,
       maxTokens: values.maxTokens ?? 16000,
       thinkingBudget: values.thinkingBudget ?? 0,
@@ -273,7 +279,7 @@ export function SetupWorkspace() {
   async function loadProfileModelsFromDraft(): Promise<void> {
     if (profileModelsLoading) return;
     try {
-      const values = await profileForm.validateFields(["baseUrl", "apiKey"]);
+      const values = await profileForm.validateFields(["baseUrl", "apiKey", "userAgent"]);
       setProfileModelsLoading(true);
       const response = await fetch("/api/inkos/llm-profiles/models", {
         method: "POST",
@@ -305,6 +311,7 @@ export function SetupWorkspace() {
         "baseUrl",
         "apiKey",
         "model",
+        "userAgent",
         "apiFormat",
         "temperature",
         "maxTokens",
@@ -369,6 +376,7 @@ export function SetupWorkspace() {
       baseUrl: activeProfile?.baseUrl ?? summary?.globalLlm?.baseUrl ?? summary?.config?.llm?.baseUrl ?? profileProviderDefaultBaseUrl(),
       model: activeProfile?.model ?? summary?.globalLlm?.model ?? summary?.config?.llm?.model ?? "gpt-4o",
       apiKey: "",
+      userAgent: activeProfile?.userAgent ?? summary?.globalLlm?.userAgent ?? summary?.config?.llm?.userAgent ?? DEFAULT_LLM_USER_AGENT,
       temperature: activeProfile?.temperature ?? 0.7,
       maxTokens: activeProfile?.maxTokens ?? 16000,
       thinkingBudget: activeProfile?.thinkingBudget ?? 0,
@@ -388,6 +396,7 @@ export function SetupWorkspace() {
       baseUrl: profile.baseUrl,
       model: profile.model,
       apiKey: "",
+      userAgent: profile.userAgent ?? DEFAULT_LLM_USER_AGENT,
       temperature: profile.temperature ?? 0.7,
       maxTokens: profile.maxTokens ?? 16000,
       thinkingBudget: profile.thinkingBudget ?? 0,
@@ -411,10 +420,11 @@ export function SetupWorkspace() {
         baseUrl: values.baseUrl,
         model: values.model,
         apiKey: values.apiKey?.trim() || undefined,
+        userAgent: values.userAgent?.trim() || DEFAULT_LLM_USER_AGENT,
         temperature: values.temperature ?? 0.7,
         maxTokens: values.maxTokens ?? 16000,
         thinkingBudget: values.thinkingBudget ?? 0,
-      reasoningEffort: values.reasoningEffort || null,
+        reasoningEffort: values.reasoningEffort || null,
         apiFormat: values.apiFormat ?? "chat",
         activate: false,
       }),
@@ -913,6 +923,9 @@ export function SetupWorkspace() {
           </Form.Item>
           <Form.Item label="API Key（密钥）" name="apiKey">
             <Input.Password placeholder={editingProfile ? "留空表示保持不变" : "首次创建建议填写"} />
+          </Form.Item>
+          <Form.Item label="User-Agent" name="userAgent" extra="模型列表、测试和后续模型请求都会使用；留空时默认 curl/8.0。">
+            <Input placeholder={DEFAULT_LLM_USER_AGENT} />
           </Form.Item>
           <Form.Item label="模型" required>
             <Space.Compact style={{ width: "100%" }}>

@@ -32,6 +32,8 @@ import type { createBookService } from "./book-service.js";
 import { loadProjectConfig, resolveBookId } from "./runtime.js";
 import { describeError, logInfo, sanitizeForLog } from "./service-logging.js";
 
+export const DEFAULT_LLM_USER_AGENT = "curl/8.0";
+
 function policyIncludes(policy: ContextPolicy, blockId: PrestuffBlockId): boolean {
   const rule = policy.prestuff.find((item) => item.blockId === blockId);
   return Boolean(rule?.defaultInclude && rule.maxChars > 0);
@@ -70,6 +72,7 @@ export interface LlmProfileRow {
   readonly base_url: string;
   readonly api_key: string;
   readonly model: string;
+  readonly user_agent: string | null;
   readonly temperature: number | null;
   readonly max_tokens: number | null;
   readonly thinking_budget: number | null;
@@ -86,6 +89,7 @@ export interface LlmProfilePayload {
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly model: string;
+  readonly userAgent?: string;
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly thinkingBudget?: number;
@@ -97,6 +101,7 @@ export interface LlmProfileConnectionInput {
   readonly provider: "openai";
   readonly baseUrl: string;
   readonly apiKey: string;
+  readonly userAgent?: string;
 }
 
 export interface LlmProfileCapabilityTestResult {
@@ -153,6 +158,7 @@ export function createLlmService(
     readonly baseUrl?: string;
     readonly apiKey?: string;
     readonly model?: string;
+    readonly userAgent?: string;
   }> {
     try {
       const raw = await readFile(globalLlmEnvPath(), "utf-8");
@@ -172,6 +178,7 @@ export function createLlmService(
         baseUrl: map.INKOS_LLM_BASE_URL,
         apiKey: map.INKOS_LLM_API_KEY,
         model: map.INKOS_LLM_MODEL,
+        userAgent: map.INKOS_LLM_USER_AGENT,
       };
     } catch {
       return {};
@@ -188,6 +195,7 @@ export function createLlmService(
         base_url TEXT NOT NULL,
         api_key TEXT NOT NULL,
         model TEXT NOT NULL,
+        user_agent TEXT,
         temperature REAL,
         max_tokens INTEGER,
         thinking_budget INTEGER,
@@ -199,6 +207,9 @@ export function createLlmService(
       );
     `);
     const columns = db.prepare("PRAGMA table_info(llm_profiles)").all() as Array<{ readonly name: string }>;
+    if (!columns.some((column) => column.name === "user_agent")) {
+      db.exec("ALTER TABLE llm_profiles ADD COLUMN user_agent TEXT");
+    }
     if (!columns.some((column) => column.name === "reasoning_effort")) {
       db.exec("ALTER TABLE llm_profiles ADD COLUMN reasoning_effort TEXT");
     }
@@ -212,6 +223,7 @@ export function createLlmService(
       provider: row.provider,
       baseUrl: row.base_url,
       model: row.model,
+      userAgent: row.user_agent ?? DEFAULT_LLM_USER_AGENT,
       temperature: row.temperature ?? undefined,
       maxTokens: row.max_tokens ?? undefined,
       thinkingBudget: row.thinking_budget ?? undefined,
@@ -236,6 +248,7 @@ export function createLlmService(
       baseUrl: profile.base_url,
       apiKey: profile.api_key,
       model: profile.model,
+      userAgent: profile.user_agent ?? DEFAULT_LLM_USER_AGENT,
       temperature: profile.temperature ?? undefined,
       maxTokens: profile.max_tokens ?? undefined,
       thinkingBudget: profile.thinking_budget ?? undefined,
@@ -264,6 +277,10 @@ export function createLlmService(
     return `${trimmed}/models`;
   }
 
+  function normalizeLlmUserAgent(value?: string | null): string {
+    return value?.trim() || DEFAULT_LLM_USER_AGENT;
+  }
+
   function modelIdFromUnknown(value: unknown): string | null {
     if (typeof value === "string" && value.trim()) return value.trim();
     if (!value || typeof value !== "object") return null;
@@ -282,6 +299,7 @@ export function createLlmService(
       method: "GET",
       headers: {
         Authorization: `Bearer ${input.apiKey}`,
+        "User-Agent": normalizeLlmUserAgent(input.userAgent),
       },
     });
     const rawText = await response.text();
@@ -318,6 +336,7 @@ export function createLlmService(
       baseUrl: payload.baseUrl,
       apiKey: payload.apiKey,
       model: payload.model,
+      userAgent: normalizeLlmUserAgent(payload.userAgent),
       temperature: payload.temperature ?? 0.7,
       maxTokens: overrides?.maxTokens ?? payload.maxTokens ?? 16000,
       thinkingBudget: overrides?.thinkingBudget ?? payload.thinkingBudget ?? 0,
@@ -445,6 +464,7 @@ export function createLlmService(
         `INKOS_LLM_BASE_URL=${payload.baseUrl}`,
         `INKOS_LLM_API_KEY=${payload.apiKey}`,
         `INKOS_LLM_MODEL=${payload.model}`,
+        `INKOS_LLM_USER_AGENT=${normalizeLlmUserAgent(payload.userAgent)}`,
         ...(payload.temperature !== undefined ? [`INKOS_LLM_TEMPERATURE=${payload.temperature}`] : []),
         ...(payload.maxTokens !== undefined ? [`INKOS_LLM_MAX_TOKENS=${payload.maxTokens}`] : []),
         ...(payload.thinkingBudget !== undefined ? [`INKOS_LLM_THINKING_BUDGET=${payload.thinkingBudget}`] : []),
@@ -544,6 +564,7 @@ export function createLlmService(
         baseUrl: payload.baseUrl,
         apiKey: payload.apiKey,
         model: payload.model,
+        userAgent: normalizeLlmUserAgent(payload.userAgent),
         temperature: payload.temperature ?? 0.7,
         maxTokens: payload.maxTokens ?? 16000,
         thinkingBudget: payload.thinkingBudget ?? 0,
@@ -928,7 +949,7 @@ export function createLlmService(
     throw new Error("curl redirect limit exceeded");
   }
 
-  async function executeSafeCurl(args: Record<string, unknown>): Promise<string> {
+  async function executeSafeCurl(args: Record<string, unknown>, defaultUserAgent = DEFAULT_LLM_USER_AGENT): Promise<string> {
     const url = validateCurlUrl(String(args.url ?? ""));
     const method = String(args.method ?? "GET").toUpperCase();
     const allowedMethods = new Set(["GET", "HEAD", "POST", "PUT", "PATCH", "OPTIONS"]);
@@ -940,10 +961,14 @@ export function createLlmService(
     const timeoutRaw = Number(args.timeoutMs ?? 30000);
     const timeoutMs = Math.min(Math.max(Number.isFinite(timeoutRaw) ? Math.trunc(timeoutRaw) : 30000, 1000), 120000);
     const requestBody = typeof args.body === "string" ? args.body : undefined;
+    const headers = sanitizeCurlHeaders(args.headers);
+    if (!hasCurlHeader(headers, "user-agent")) {
+      headers["User-Agent"] = normalizeLlmUserAgent(defaultUserAgent);
+    }
     const { response, finalUrl, redirects } = await fetchSafeCurlResponse({
       url,
       method,
-      headers: sanitizeCurlHeaders(args.headers),
+      headers,
       ...(requestBody !== undefined ? { body: requestBody } : {}),
       timeoutMs,
     });
@@ -1267,7 +1292,11 @@ export function createLlmService(
     return resolvedPath;
   }
 
-  async function executeProfileChatTool(name: string, args: Record<string, unknown>): Promise<string> {
+  async function executeProfileChatTool(
+    name: string,
+    args: Record<string, unknown>,
+    options?: { readonly userAgent?: string },
+  ): Promise<string> {
     switch (name) {
       case "list_directory": {
         const dirPath = normalizeProfileToolPath(String(args.path ?? ""));
@@ -1452,7 +1481,7 @@ export function createLlmService(
       }
 
       case "curl": {
-        return await executeSafeCurl(args);
+        return await executeSafeCurl(args, options?.userAgent);
       }
 
       case "run_shell_command": {
@@ -1523,7 +1552,9 @@ export function createLlmService(
     readonly toolTrace: ReadonlyArray<ToolTraceItem>;
   }> {
     const tools = options?.tools ?? PROFILE_CHAT_TOOLS;
-    const executeTool = options?.executeTool ?? executeProfileChatTool;
+    const executeTool = options?.executeTool ?? ((name, args) => executeProfileChatTool(name, args, {
+      userAgent: client.defaults.userAgent,
+    }));
     const contextMode = options?.contextMode ?? "chapter";
     const policy = resolveContextPolicy(contextMode);
     const toolTrace: ToolTraceItem[] = [];
@@ -1885,7 +1916,7 @@ export function createLlmService(
           .prepare(
             `UPDATE llm_profiles
                SET name = ?, provider = ?, base_url = ?, api_key = ?, model = ?,
-                   temperature = ?, max_tokens = ?, thinking_budget = ?, reasoning_effort = ?, api_format = ?, updated_at = ?
+                   user_agent = ?, temperature = ?, max_tokens = ?, thinking_budget = ?, reasoning_effort = ?, api_format = ?, updated_at = ?
              WHERE id = ?`,
           )
           .run(
@@ -1894,6 +1925,7 @@ export function createLlmService(
             payload.baseUrl,
             payload.apiKey,
             payload.model,
+            normalizeLlmUserAgent(payload.userAgent),
             payload.temperature ?? 0.7,
             payload.maxTokens ?? 16000,
             payload.thinkingBudget ?? 0,
@@ -1908,8 +1940,8 @@ export function createLlmService(
       db
         .prepare(
           `INSERT INTO llm_profiles
-            (id, name, provider, base_url, api_key, model, temperature, max_tokens, thinking_budget, reasoning_effort, api_format, is_active, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+            (id, name, provider, base_url, api_key, model, user_agent, temperature, max_tokens, thinking_budget, reasoning_effort, api_format, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         )
         .run(
           randomUUID(),
@@ -1918,6 +1950,7 @@ export function createLlmService(
           payload.baseUrl,
           payload.apiKey,
           payload.model,
+          normalizeLlmUserAgent(payload.userAgent),
           payload.temperature ?? 0.7,
           payload.maxTokens ?? 16000,
           payload.thinkingBudget ?? 0,

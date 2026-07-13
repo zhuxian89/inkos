@@ -9,6 +9,7 @@ interface GlobalLlmEnv {
   readonly baseUrl?: string;
   readonly apiKey?: string;
   readonly model?: string;
+  readonly userAgent?: string;
 }
 
 export function createCliService(input: {
@@ -49,6 +50,7 @@ export function createCliService(input: {
       ...(latestGlobalLlmEnv.baseUrl ? { INKOS_LLM_BASE_URL: latestGlobalLlmEnv.baseUrl } : {}),
       ...(latestGlobalLlmEnv.apiKey ? { INKOS_LLM_API_KEY: latestGlobalLlmEnv.apiKey } : {}),
       ...(latestGlobalLlmEnv.model ? { INKOS_LLM_MODEL: latestGlobalLlmEnv.model } : {}),
+      ...(latestGlobalLlmEnv.userAgent ? { INKOS_LLM_USER_AGENT: latestGlobalLlmEnv.userAgent } : {}),
     };
     const retries = Math.max(1, options?.retries ?? (parseInt(process.env.INKOS_WEB_COMMAND_RETRIES ?? "3", 10) || 3));
     const retryDelayMs = Math.max(0, options?.retryDelayMs ?? (parseInt(process.env.INKOS_WEB_COMMAND_RETRY_DELAY_MS ?? "1500", 10) || 1500));

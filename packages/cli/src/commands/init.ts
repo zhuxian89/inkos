@@ -75,6 +75,7 @@ export const initCommand = new Command("init")
             "INKOS_LLM_BASE_URL=https://api.openai.com/v1",
             "INKOS_LLM_API_KEY=your-api-key-here",
             "INKOS_LLM_MODEL=gpt-4o",
+            "INKOS_LLM_USER_AGENT=curl/8.0",
             "",
             "# Optional parameters (defaults shown):",
             "# INKOS_LLM_TEMPERATURE=0.7",

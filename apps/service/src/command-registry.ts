@@ -74,6 +74,7 @@ export const commandRegistry: ReadonlyArray<CommandDefinition> = [
       { name: "baseUrl", label: "Base URL", type: "text", required: true, defaultValue: "https://api.openai.com/v1" },
       { name: "apiKey", label: "API Key", type: "text", required: true },
       { name: "model", label: "Model", type: "text", required: true, defaultValue: "gpt-4o" },
+      { name: "userAgent", label: "User-Agent", type: "text", defaultValue: "curl/8.0" },
       { name: "temperature", label: "Temperature", type: "number", placeholder: "0.7" },
       { name: "maxTokens", label: "Max Tokens", type: "number", placeholder: "16000" },
       { name: "thinkingBudget", label: "Thinking Budget", type: "number" },
@@ -86,6 +87,7 @@ export const commandRegistry: ReadonlyArray<CommandDefinition> = [
       addIfValue(args, "--base-url", values.baseUrl);
       addIfValue(args, "--api-key", values.apiKey);
       addIfValue(args, "--model", values.model);
+      addIfValue(args, "--user-agent", values.userAgent);
       addIfValue(args, "--temperature", values.temperature);
       addIfValue(args, "--max-tokens", values.maxTokens);
       addIfValue(args, "--thinking-budget", values.thinkingBudget);
