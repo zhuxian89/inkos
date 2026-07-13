@@ -3,7 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import type { LLMConfig } from "../models/project.js";
+import type { LLMConfig, ReasoningEffort } from "../models/project.js";
 
 const DEFAULT_LLM_HEADERS = {
   "User-Agent": "curl/8.0",
@@ -68,6 +68,7 @@ export interface LLMClient {
     readonly temperature: number;
     readonly maxTokens: number;
     readonly thinkingBudget: number;
+    readonly reasoningEffort?: ReasoningEffort;
   };
 }
 
@@ -128,6 +129,7 @@ export function createLLMClient(config: LLMConfig): LLMClient {
     temperature: config.temperature ?? 0.7,
     maxTokens: config.maxTokens ?? 16000,
     thinkingBudget: config.thinkingBudget ?? 0,
+    ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
   };
 
   const apiFormat = config.apiFormat ?? "chat";
@@ -306,6 +308,7 @@ export async function chatCompletion(
   const resolved = {
     temperature: options?.temperature ?? client.defaults.temperature,
     maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+    ...(client.defaults.reasoningEffort ? { reasoningEffort: client.defaults.reasoningEffort } : {}),
   };
   logLLMDiagnostic("llm.request.start", {
     kind: "chat_completion",
@@ -315,6 +318,7 @@ export async function chatCompletion(
     messageCount: messages.length,
     maxTokens: resolved.maxTokens,
     temperature: resolved.temperature,
+    reasoningEffort: resolved.reasoningEffort ?? null,
     webSearch: options?.webSearch === true,
     abortSignal: options?.abortSignal ? "provided" : "none",
     baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
@@ -338,6 +342,7 @@ export async function chatCompletion(
       messageCount: messages.length,
       maxTokens: resolved.maxTokens,
       temperature: resolved.temperature,
+      reasoningEffort: resolved.reasoningEffort ?? null,
       webSearch: options?.webSearch === true,
       abortSignal: options?.abortSignal ? "provided" : "none",
       baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
@@ -371,6 +376,7 @@ export async function chatWithTools(
     includeReasoning: options?.includeReasoning === true,
     onTextDelta: options?.onTextDelta,
     onReasoningDelta: options?.onReasoningDelta,
+    ...(client.defaults.reasoningEffort ? { reasoningEffort: client.defaults.reasoningEffort } : {}),
   };
   logLLMDiagnostic("llm.request.start", {
     kind: "chat_with_tools",
@@ -381,12 +387,13 @@ export async function chatWithTools(
     toolCount: tools.length,
     maxTokens: resolved.maxTokens,
     temperature: resolved.temperature,
+    reasoningEffort: resolved.reasoningEffort ?? null,
     useStream: resolved.useStream,
-      includeReasoning: resolved.includeReasoning,
-      abortSignal: options?.abortSignal ? "provided" : "none",
-      baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
-      hasAnthropicClient: Boolean(client._anthropic),
-      hasOpenAIClient: Boolean(client._openai),
+    includeReasoning: resolved.includeReasoning,
+    abortSignal: options?.abortSignal ? "provided" : "none",
+    baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
+    hasAnthropicClient: Boolean(client._anthropic),
+    hasOpenAIClient: Boolean(client._openai),
   });
   try {
     if (client.provider === "anthropic") {
@@ -406,6 +413,7 @@ export async function chatWithTools(
       toolCount: tools.length,
       maxTokens: resolved.maxTokens,
       temperature: resolved.temperature,
+      reasoningEffort: resolved.reasoningEffort ?? null,
       useStream: resolved.useStream,
       includeReasoning: resolved.includeReasoning,
       baseUrl: summarizeBaseUrl(client._openai?.baseURL ?? client._anthropic?.baseURL),
@@ -421,7 +429,7 @@ async function chatCompletionOpenAIChat(
   client: OpenAI,
   model: string,
   messages: ReadonlyArray<LLMMessage>,
-  options: { readonly temperature: number; readonly maxTokens: number },
+  options: { readonly temperature: number; readonly maxTokens: number; readonly reasoningEffort?: ReasoningEffort },
   webSearch?: boolean,
   abortSignal?: AbortSignal,
 ): Promise<LLMResponse> {
@@ -434,6 +442,7 @@ async function chatCompletionOpenAIChat(
     })),
     temperature: options.temperature,
     max_tokens: options.maxTokens,
+    ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
     ...(webSearch ? { web_search_options: { search_context_size: "medium" as const } } : {}),
   };
 
@@ -520,6 +529,7 @@ async function chatWithToolsOpenAIChat(
   options: {
     readonly temperature: number;
     readonly maxTokens: number;
+    readonly reasoningEffort?: ReasoningEffort;
     readonly useStream: boolean;
     readonly includeReasoning: boolean;
     readonly onTextDelta?: (delta: string) => void;
@@ -555,6 +565,7 @@ async function chatWithToolsOpenAIChat(
       tools: openaiTools,
       temperature: options.temperature,
       max_tokens: options.maxTokens,
+      ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
       stream: false,
     }, { signal: abortSignal });
 
@@ -616,6 +627,7 @@ async function streamChatWithToolsOpenAIChat(
   options: {
     readonly temperature: number;
     readonly maxTokens: number;
+    readonly reasoningEffort?: ReasoningEffort;
     readonly includeReasoning: boolean;
     readonly onTextDelta?: (delta: string) => void;
     readonly onReasoningDelta?: (delta: string) => void;
@@ -628,6 +640,7 @@ async function streamChatWithToolsOpenAIChat(
     tools: [...openaiTools],
     temperature: options.temperature,
     max_tokens: options.maxTokens,
+    ...(options.reasoningEffort ? { reasoning_effort: options.reasoningEffort } : {}),
     stream: true,
   }, { signal: abortSignal });
 
@@ -730,7 +743,7 @@ async function chatCompletionOpenAIResponses(
   client: OpenAI,
   model: string,
   messages: ReadonlyArray<LLMMessage>,
-  options: { readonly temperature: number; readonly maxTokens: number },
+  options: { readonly temperature: number; readonly maxTokens: number; readonly reasoningEffort?: ReasoningEffort },
   webSearch?: boolean,
   abortSignal?: AbortSignal,
 ): Promise<LLMResponse> {
@@ -747,6 +760,7 @@ async function chatCompletionOpenAIResponses(
     input,
     temperature: options.temperature,
     max_output_tokens: options.maxTokens,
+    ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort } } : {}),
     ...(tools ? { tools } : {}),
   };
 
@@ -816,6 +830,7 @@ async function chatWithToolsOpenAIResponses(
   options: {
     readonly temperature: number;
     readonly maxTokens: number;
+    readonly reasoningEffort?: ReasoningEffort;
     readonly useStream: boolean;
     readonly includeReasoning: boolean;
     readonly onTextDelta?: (delta: string) => void;
@@ -838,6 +853,7 @@ async function chatWithToolsOpenAIResponses(
     tools: responsesTools,
     temperature: options.temperature,
     max_output_tokens: options.maxTokens,
+    ...(options.reasoningEffort ? { reasoning: { effort: options.reasoningEffort } } : {}),
     stream: true,
   }, { signal: abortSignal });
 

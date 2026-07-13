@@ -77,6 +77,7 @@ export const commandRegistry: ReadonlyArray<CommandDefinition> = [
       { name: "temperature", label: "Temperature", type: "number", placeholder: "0.7" },
       { name: "maxTokens", label: "Max Tokens", type: "number", placeholder: "16000" },
       { name: "thinkingBudget", label: "Thinking Budget", type: "number" },
+      { name: "reasoningEffort", label: "Reasoning Effort", type: "select", options: [{ label: "low", value: "low" }, { label: "medium", value: "medium" }, { label: "high", value: "high" }] },
       { name: "apiFormat", label: "API Format", type: "select", options: [{ label: "chat", value: "chat" }, { label: "responses", value: "responses" }] },
     ],
     buildArgs(values) {
@@ -88,6 +89,7 @@ export const commandRegistry: ReadonlyArray<CommandDefinition> = [
       addIfValue(args, "--temperature", values.temperature);
       addIfValue(args, "--max-tokens", values.maxTokens);
       addIfValue(args, "--thinking-budget", values.thinkingBudget);
+      addIfValue(args, "--reasoning-effort", values.reasoningEffort);
       addIfValue(args, "--api-format", values.apiFormat);
       return args;
     },

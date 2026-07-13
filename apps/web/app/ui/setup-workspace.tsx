@@ -47,6 +47,12 @@ const PROFILE_CHAT_PLATFORM_OPTIONS = [
   { label: "飞卢", value: "feilu" },
   { label: "其他", value: "other" },
 ];
+const REASONING_EFFORT_OPTIONS = [
+  { label: "默认", value: "" },
+  { label: "低", value: "low" },
+  { label: "中", value: "medium" },
+  { label: "高", value: "high" },
+];
 
 interface ProfileFormValues {
   readonly name: string;
@@ -57,6 +63,7 @@ interface ProfileFormValues {
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly thinkingBudget?: number;
+  readonly reasoningEffort?: "" | "low" | "medium" | "high";
   readonly apiFormat?: "chat" | "responses";
 }
 
@@ -99,6 +106,7 @@ interface LlmProfile {
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly thinkingBudget?: number;
+  readonly reasoningEffort?: "low" | "medium" | "high";
   readonly apiFormat?: "chat" | "responses";
   readonly isActive: boolean;
   readonly apiKeyConfigured: boolean;
@@ -253,6 +261,7 @@ export function SetupWorkspace() {
       temperature: values.temperature ?? 0.7,
       maxTokens: values.maxTokens ?? 16000,
       thinkingBudget: values.thinkingBudget ?? 0,
+      reasoningEffort: values.reasoningEffort || null,
       apiFormat: values.apiFormat ?? "chat",
     };
   }
@@ -300,6 +309,7 @@ export function SetupWorkspace() {
         "temperature",
         "maxTokens",
         "thinkingBudget",
+        "reasoningEffort",
       ]);
       setProfileDraftTesting(true);
       setProfileDraftTestResult(null);
@@ -362,6 +372,7 @@ export function SetupWorkspace() {
       temperature: activeProfile?.temperature ?? 0.7,
       maxTokens: activeProfile?.maxTokens ?? 16000,
       thinkingBudget: activeProfile?.thinkingBudget ?? 0,
+      reasoningEffort: activeProfile?.reasoningEffort ?? "",
       apiFormat: activeProfile?.apiFormat ?? "chat",
     });
     setProfileModalOpen(true);
@@ -380,6 +391,7 @@ export function SetupWorkspace() {
       temperature: profile.temperature ?? 0.7,
       maxTokens: profile.maxTokens ?? 16000,
       thinkingBudget: profile.thinkingBudget ?? 0,
+      reasoningEffort: profile.reasoningEffort ?? "",
       apiFormat: profile.apiFormat ?? "chat",
     });
     setProfileModalOpen(true);
@@ -402,6 +414,7 @@ export function SetupWorkspace() {
         temperature: values.temperature ?? 0.7,
         maxTokens: values.maxTokens ?? 16000,
         thinkingBudget: values.thinkingBudget ?? 0,
+      reasoningEffort: values.reasoningEffort || null,
         apiFormat: values.apiFormat ?? "chat",
         activate: false,
       }),
@@ -924,6 +937,11 @@ export function SetupWorkspace() {
                     { label: "responses", value: "responses" },
                   ]}
                 />
+              </Form.Item>
+            </Col>
+            <Col xs={24} sm={12}>
+              <Form.Item label="思考强度" name="reasoningEffort" extra="不选表示使用服务商默认值；仅对支持 reasoning effort 的模型生效。">
+                <Select options={REASONING_EFFORT_OPTIONS} />
               </Form.Item>
             </Col>
             <Col xs={24} sm={12}>

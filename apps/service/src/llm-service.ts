@@ -6,6 +6,7 @@ import {
   readGenreProfile,
   type AgentMessage,
   type ChapterMeta,
+  type ReasoningEffort,
   type ToolDefinition,
 } from "@actalk/inkos-core";
 import { spawn } from "node:child_process";
@@ -72,6 +73,7 @@ export interface LlmProfileRow {
   readonly temperature: number | null;
   readonly max_tokens: number | null;
   readonly thinking_budget: number | null;
+  readonly reasoning_effort: ReasoningEffort | null;
   readonly api_format: "chat" | "responses" | null;
   readonly is_active: number;
   readonly created_at: number;
@@ -87,6 +89,7 @@ export interface LlmProfilePayload {
   readonly temperature?: number;
   readonly maxTokens?: number;
   readonly thinkingBudget?: number;
+  readonly reasoningEffort?: ReasoningEffort | null;
   readonly apiFormat?: "chat" | "responses";
 }
 
@@ -188,12 +191,17 @@ export function createLlmService(
         temperature REAL,
         max_tokens INTEGER,
         thinking_budget INTEGER,
+        reasoning_effort TEXT,
         api_format TEXT,
         is_active INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       );
     `);
+    const columns = db.prepare("PRAGMA table_info(llm_profiles)").all() as Array<{ readonly name: string }>;
+    if (!columns.some((column) => column.name === "reasoning_effort")) {
+      db.exec("ALTER TABLE llm_profiles ADD COLUMN reasoning_effort TEXT");
+    }
     return db;
   }
 
@@ -207,6 +215,7 @@ export function createLlmService(
       temperature: row.temperature ?? undefined,
       maxTokens: row.max_tokens ?? undefined,
       thinkingBudget: row.thinking_budget ?? undefined,
+      reasoningEffort: row.reasoning_effort ?? undefined,
       apiFormat: row.api_format ?? undefined,
       apiKeyConfigured: Boolean(row.api_key),
       isActive: row.is_active === 1,
@@ -230,6 +239,7 @@ export function createLlmService(
       temperature: profile.temperature ?? undefined,
       maxTokens: profile.max_tokens ?? undefined,
       thinkingBudget: profile.thinking_budget ?? undefined,
+      reasoningEffort: profile.reasoning_effort ?? undefined,
       apiFormat: profile.api_format ?? undefined,
     };
   }
@@ -311,6 +321,7 @@ export function createLlmService(
       temperature: payload.temperature ?? 0.7,
       maxTokens: overrides?.maxTokens ?? payload.maxTokens ?? 16000,
       thinkingBudget: overrides?.thinkingBudget ?? payload.thinkingBudget ?? 0,
+      ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
       apiFormat: payload.apiFormat ?? "chat",
     });
   }
@@ -437,6 +448,7 @@ export function createLlmService(
         ...(payload.temperature !== undefined ? [`INKOS_LLM_TEMPERATURE=${payload.temperature}`] : []),
         ...(payload.maxTokens !== undefined ? [`INKOS_LLM_MAX_TOKENS=${payload.maxTokens}`] : []),
         ...(payload.thinkingBudget !== undefined ? [`INKOS_LLM_THINKING_BUDGET=${payload.thinkingBudget}`] : []),
+        ...(payload.reasoningEffort ? [`INKOS_LLM_REASONING_EFFORT=${payload.reasoningEffort}`] : []),
         ...(payload.apiFormat ? [`INKOS_LLM_API_FORMAT=${payload.apiFormat}`] : []),
       ].join("\n") + "\n",
       "utf-8",
@@ -535,6 +547,7 @@ export function createLlmService(
         temperature: payload.temperature ?? 0.7,
         maxTokens: payload.maxTokens ?? 16000,
         thinkingBudget: payload.thinkingBudget ?? 0,
+        ...(payload.reasoningEffort ? { reasoningEffort: payload.reasoningEffort } : {}),
         apiFormat: payload.apiFormat ?? "chat",
       }),
       model: payload.model,
@@ -1872,7 +1885,7 @@ export function createLlmService(
           .prepare(
             `UPDATE llm_profiles
                SET name = ?, provider = ?, base_url = ?, api_key = ?, model = ?,
-                   temperature = ?, max_tokens = ?, thinking_budget = ?, api_format = ?, updated_at = ?
+                   temperature = ?, max_tokens = ?, thinking_budget = ?, reasoning_effort = ?, api_format = ?, updated_at = ?
              WHERE id = ?`,
           )
           .run(
@@ -1884,6 +1897,7 @@ export function createLlmService(
             payload.temperature ?? 0.7,
             payload.maxTokens ?? 16000,
             payload.thinkingBudget ?? 0,
+            payload.reasoningEffort ?? null,
             payload.apiFormat ?? "chat",
             now,
             active.id,
@@ -1894,8 +1908,8 @@ export function createLlmService(
       db
         .prepare(
           `INSERT INTO llm_profiles
-            (id, name, provider, base_url, api_key, model, temperature, max_tokens, thinking_budget, api_format, is_active, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+            (id, name, provider, base_url, api_key, model, temperature, max_tokens, thinking_budget, reasoning_effort, api_format, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
         )
         .run(
           randomUUID(),
@@ -1907,6 +1921,7 @@ export function createLlmService(
           payload.temperature ?? 0.7,
           payload.maxTokens ?? 16000,
           payload.thinkingBudget ?? 0,
+          payload.reasoningEffort ?? null,
           payload.apiFormat ?? "chat",
           now,
           now,

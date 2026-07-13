@@ -45,6 +45,7 @@ export async function loadProjectConfig(projectRoot: string): Promise<ProjectCon
   if (env.INKOS_LLM_TEMPERATURE) config.llm.temperature = parseFloat(env.INKOS_LLM_TEMPERATURE);
   if (env.INKOS_LLM_MAX_TOKENS) config.llm.maxTokens = parseInt(env.INKOS_LLM_MAX_TOKENS, 10);
   if (env.INKOS_LLM_THINKING_BUDGET) config.llm.thinkingBudget = parseInt(env.INKOS_LLM_THINKING_BUDGET, 10);
+  if (env.INKOS_LLM_REASONING_EFFORT) config.llm.reasoningEffort = env.INKOS_LLM_REASONING_EFFORT;
   if (env.INKOS_LLM_API_FORMAT) config.llm.apiFormat = env.INKOS_LLM_API_FORMAT;
 
   const apiKey = env.INKOS_LLM_API_KEY;

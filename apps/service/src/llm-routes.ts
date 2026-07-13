@@ -353,6 +353,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).optional(),
       thinkingBudget: z.number().int().min(0).optional(),
+      reasoningEffort: z.enum(["low", "medium", "high"]).nullable().optional(),
       apiFormat: z.enum(["chat", "responses"]).optional(),
     });
 
@@ -374,6 +375,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         temperature: input.temperature,
         maxTokens: input.maxTokens,
         thinkingBudget: input.thinkingBudget,
+        reasoningEffort: input.reasoningEffort,
         apiFormat: input.apiFormat,
       });
       logInfo("llm_profiles.test_config.done", {
@@ -401,6 +403,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).optional(),
       thinkingBudget: z.number().int().min(0).optional(),
+      reasoningEffort: z.enum(["low", "medium", "high"]).nullable().optional(),
       apiFormat: z.enum(["chat", "responses"]).optional(),
       activate: z.boolean().default(false),
     });
@@ -420,8 +423,8 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         db
           .prepare(
             `INSERT INTO llm_profiles
-              (id, name, provider, base_url, api_key, model, temperature, max_tokens, thinking_budget, api_format, is_active, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
+              (id, name, provider, base_url, api_key, model, temperature, max_tokens, thinking_budget, reasoning_effort, api_format, is_active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
           )
           .run(
             id,
@@ -433,6 +436,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
             input.temperature ?? 0.7,
             input.maxTokens ?? 16000,
             input.thinkingBudget ?? 0,
+            input.reasoningEffort ?? null,
             input.apiFormat ?? "chat",
             now,
             now,
@@ -478,6 +482,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).optional(),
       thinkingBudget: z.number().int().min(0).optional(),
+      reasoningEffort: z.enum(["low", "medium", "high"]).nullable().optional(),
       apiFormat: z.enum(["chat", "responses"]).optional(),
       activate: z.boolean().optional(),
     });
@@ -496,7 +501,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
           .prepare(
             `UPDATE llm_profiles
                SET name = ?, provider = ?, base_url = ?, api_key = ?, model = ?,
-                   temperature = ?, max_tokens = ?, thinking_budget = ?, api_format = ?, updated_at = ?
+                   temperature = ?, max_tokens = ?, thinking_budget = ?, reasoning_effort = ?, api_format = ?, updated_at = ?
              WHERE id = ?`,
           )
           .run(
@@ -508,6 +513,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
             input.temperature ?? existing.temperature ?? 0.7,
             input.maxTokens ?? existing.max_tokens ?? 16000,
             input.thinkingBudget ?? existing.thinking_budget ?? 0,
+            input.reasoningEffort !== undefined ? input.reasoningEffort : existing.reasoning_effort ?? null,
             input.apiFormat ?? existing.api_format ?? "chat",
             now,
             profileId,
@@ -630,6 +636,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         temperature: profile.temperature ?? 0.7,
         maxTokens: profile.max_tokens ?? 16000,
         thinkingBudget: profile.thinking_budget ?? 0,
+        ...(profile.reasoning_effort ? { reasoningEffort: profile.reasoning_effort } : {}),
         apiFormat: profile.api_format ?? "chat",
       });
       const result = await context.llmService.runProfileChatWithTools(profileId, client, profile.model, normalizedMessages, {
@@ -730,6 +737,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         temperature: profile.temperature ?? 0.7,
         maxTokens: profile.max_tokens ?? 16000,
         thinkingBudget: profile.thinking_budget ?? 0,
+        ...(profile.reasoning_effort ? { reasoningEffort: profile.reasoning_effort } : {}),
         apiFormat: profile.api_format ?? "chat",
       });
 
@@ -850,6 +858,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
       temperature: z.number().min(0).max(2).optional(),
       maxTokens: z.number().int().min(1).optional(),
       thinkingBudget: z.number().int().min(0).optional(),
+      reasoningEffort: z.enum(["low", "medium", "high"]).nullable().optional(),
       apiFormat: z.enum(["chat", "responses"]).optional(),
     });
 
@@ -911,6 +920,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         temperature: input.temperature ?? 0.7,
         maxTokens: input.maxTokens ?? 16000,
         thinkingBudget: input.thinkingBudget ?? 0,
+        reasoningEffort: input.reasoningEffort,
         apiFormat: input.apiFormat ?? "chat",
       });
       await context.llmService.upsertActiveLlmProfileFromInit({
@@ -922,6 +932,7 @@ export const registerLlmRoutes: RouteRegistrar = (app, context) => {
         temperature: input.temperature ?? 0.7,
         maxTokens: input.maxTokens ?? 16000,
         thinkingBudget: input.thinkingBudget ?? 0,
+        reasoningEffort: input.reasoningEffort,
         apiFormat: input.apiFormat ?? "chat",
       });
 

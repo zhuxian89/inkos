@@ -48,11 +48,15 @@ configCommand
   .option("--temperature <n>", "Temperature")
   .option("--max-tokens <n>", "Max output tokens")
   .option("--thinking-budget <n>", "Reasoning/thinking budget")
+  .option("--reasoning-effort <effort>", "Reasoning effort (low / medium / high)")
   .option("--api-format <format>", "API format (chat / responses)")
   .action(async (opts) => {
     try {
       if (opts.provider !== "openai") {
         throw new Error("Only openai-compatible providers are supported.");
+      }
+      if (opts.reasoningEffort && !["low", "medium", "high"].includes(opts.reasoningEffort)) {
+        throw new Error("Reasoning effort must be one of: low, medium, high.");
       }
       await mkdir(GLOBAL_CONFIG_DIR, { recursive: true });
 
@@ -66,6 +70,7 @@ configCommand
       if (opts.temperature) lines.push(`INKOS_LLM_TEMPERATURE=${opts.temperature}`);
       if (opts.maxTokens) lines.push(`INKOS_LLM_MAX_TOKENS=${opts.maxTokens}`);
       if (opts.thinkingBudget) lines.push(`INKOS_LLM_THINKING_BUDGET=${opts.thinkingBudget}`);
+      if (opts.reasoningEffort) lines.push(`INKOS_LLM_REASONING_EFFORT=${opts.reasoningEffort}`);
       if (opts.apiFormat) lines.push(`INKOS_LLM_API_FORMAT=${opts.apiFormat}`);
 
       await writeFile(GLOBAL_ENV_PATH, lines.join("\n") + "\n", "utf-8");

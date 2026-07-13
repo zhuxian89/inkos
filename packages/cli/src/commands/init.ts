@@ -80,6 +80,7 @@ export const initCommand = new Command("init")
             "# INKOS_LLM_TEMPERATURE=0.7",
             "# INKOS_LLM_MAX_TOKENS=16000",
             "# INKOS_LLM_THINKING_BUDGET=0          # Reasoning/thinking budget",
+            "# INKOS_LLM_REASONING_EFFORT=medium    # low / medium / high; omit to use provider default",
             "# INKOS_LLM_API_FORMAT=chat             # chat (default) or responses (OpenAI Responses API)",
           ].join("\n"),
           "utf-8",

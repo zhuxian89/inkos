@@ -8,10 +8,12 @@ export const LLMConfigSchema = z.object({
   temperature: z.number().min(0).max(2).default(0.7),
   maxTokens: z.number().int().min(1).default(16000),
   thinkingBudget: z.number().int().min(0).default(0),
+  reasoningEffort: z.enum(["low", "medium", "high"]).optional(),
   apiFormat: z.enum(["chat", "responses"]).default("chat"),
 });
 
 export type LLMConfig = z.infer<typeof LLMConfigSchema>;
+export type ReasoningEffort = NonNullable<LLMConfig["reasoningEffort"]>;
 
 export const NotifyChannelSchema = z.discriminatedUnion("type", [
   z.object({
