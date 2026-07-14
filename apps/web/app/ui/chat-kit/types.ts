@@ -64,6 +64,7 @@ export type ChatKitStreamEvent =
       readonly brief?: string;
       readonly [key: string]: unknown;
     }
+  | { readonly type: "recovery"; readonly data: { readonly message: string } }
   | { readonly type: "error"; readonly ok: false; readonly error: string }
   | { readonly type: "done" }
   /** @deprecated 兼容旧 SSE，bridge 可映射为 message_chunk */

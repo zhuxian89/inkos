@@ -108,7 +108,7 @@ export function applyProfileStreamEvent(
       return {
         ...state,
         content,
-        items: state.items.map((item) =>
+        items: state.items.filter((item) => item.kind !== "status").map((item) =>
           item.kind === "assistant_text" && item.id === state.assistantTextId
             ? { ...item, content, streaming: true }
             : item,
@@ -120,7 +120,17 @@ export function applyProfileStreamEvent(
       ...state,
       content,
       assistantTextId,
-      items: [...state.items, { kind: "assistant_text", id: assistantTextId, content, streaming: true }],
+      items: [...state.items.filter((item) => item.kind !== "status"), { kind: "assistant_text", id: assistantTextId, content, streaming: true }],
+    };
+  }
+
+  if (normalized.type === "recovery") {
+    return {
+      ...state,
+      items: [
+        ...state.items.filter((item) => item.kind !== "status"),
+        { kind: "status", id: nextId("recovery"), text: normalized.data.message },
+      ],
     };
   }
 

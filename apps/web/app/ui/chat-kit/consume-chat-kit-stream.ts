@@ -20,6 +20,16 @@ export type ChatKitStreamResult = {
   readonly finalEvent?: Extract<ChatKitStreamEvent, { readonly type: "final" }>;
 };
 
+export class ChatKitStreamError extends Error {
+  constructor(
+    message: string,
+    readonly partial: ChatKitStreamResult,
+  ) {
+    super(message);
+    this.name = "ChatKitStreamError";
+  }
+}
+
 export function parseChatKitSseEventBlock(block: string): ChatKitStreamEvent | null {
   const lines = block.split(/\r?\n/);
   const dataLines = lines
@@ -48,6 +58,13 @@ export async function consumeChatKitStream(
   let turnState = createEmptyProfileStreamState();
   let finalEvent: Extract<ChatKitStreamEvent, { readonly type: "final" }> | undefined;
   const historyItems = messagesToChatKitItems(baseMessages);
+
+  const currentResult = (): ChatKitStreamResult => ({
+    content: turnState.content,
+    reasoning: turnState.reasoning || undefined,
+    items: turnState.items,
+    ...(finalEvent ? { finalEvent } : {}),
+  });
 
   const renderFrame = (): void => {
     options?.onFrame?.([...historyItems, ...turnState.items]);
@@ -103,6 +120,12 @@ export async function consumeChatKitStream(
 
       if (done) break;
     }
+  } catch (error: unknown) {
+    if (error instanceof Error && error.name === "AbortError") throw error;
+    throw new ChatKitStreamError(
+      error instanceof Error ? error.message : String(error),
+      currentResult(),
+    );
   } finally {
     try {
       reader.releaseLock();
@@ -111,10 +134,5 @@ export async function consumeChatKitStream(
     }
   }
 
-  return {
-    content: turnState.content,
-    reasoning: turnState.reasoning || undefined,
-    items: turnState.items,
-    ...(finalEvent ? { finalEvent } : {}),
-  };
+  return currentResult();
 }

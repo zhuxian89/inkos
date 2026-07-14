@@ -4,6 +4,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createBookService } from "./book-service.js";
 import { createChatSessionStore } from "./chat-session-store.js";
+import { attachChapterChatStreamHub } from "./chapter-chat-stream-hub.js";
 import { createCliService } from "./cli-service.js";
 import { registerBookRoutes } from "./books-routes.js";
 import { registerCoreRoutes } from "./core-routes.js";
@@ -67,7 +68,9 @@ registerBookRoutes(app, context);
 registerLlmRoutes(app, context);
 registerOpsRoutes(app, context);
 
-app.listen(port, () => {
+const server = app.listen(port, () => {
   process.stdout.write(`InkOS service listening on http://0.0.0.0:${port}\n`);
   process.stdout.write(`Project root: ${projectRoot}\n`);
 });
+
+attachChapterChatStreamHub(server, context);

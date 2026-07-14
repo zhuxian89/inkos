@@ -6,7 +6,8 @@ import { MoreOutlined } from "@ant-design/icons";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { ChatPanel } from "./chat-panel";
-import { consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
+import { ChatKitStreamError, consumeChatKitStream, messagesToChatKitItems, type ChatKitItem } from "./chat-kit";
+import { ChapterChatSocketUnavailableError, consumeChapterChatWebSocket } from "./chat-kit/chapter-chat-websocket";
 import { ChatFactLogPanel } from "./chat-fact-log-panel";
 import { clearPersistedChatSession, loadPersistedChatSession, savePersistedChatSession } from "./chat-persistence";
 import { CHAT_MODAL_BODY_HEIGHT, CHAT_MODAL_DESKTOP_BODY_HEIGHT, CHAT_MODAL_DESKTOP_WIDTH, CHAT_MODAL_WIDTH } from "./chat-modal";
@@ -273,33 +274,37 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
 
     void (async () => {
       try {
-        const response = await fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chapterNumber}/chat-stream`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            messages: chapterModelMessages(nextMessages),
-            profileId: chatProfileId,
-          }),
+        const streamOptions = {
           signal: abortController.signal,
-        });
-        if (abortController.signal.aborted) return;
-        const contentType = response.headers.get("content-type") ?? "";
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(errorText || "章节对话失败");
-        }
-        if (!contentType.includes("text/event-stream")) {
-          throw new Error("期望 SSE 流式响应，但服务端返回了非流式内容");
-        }
-
-        const streamed = await consumeChatKitStream(response, nextMessages, {
-          signal: abortController.signal,
-          onFrame: (items) => {
+          onFrame: (items: ChatKitItem[]) => {
             if (!abortController.signal.aborted) {
               setChatLiveItems(items);
             }
           },
-        });
+        };
+        let streamed;
+        try {
+          streamed = await consumeChapterChatWebSocket({
+            bookId,
+            chapterNumber,
+            messages: nextMessages,
+            profileId: chatProfileId,
+            ...streamOptions,
+          });
+        } catch (error) {
+          if (!(error instanceof ChapterChatSocketUnavailableError)) throw error;
+          const response = await fetch(`/api/inkos/books/${encodeURIComponent(bookId)}/chapters/${chapterNumber}/chat-stream`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ messages: chapterModelMessages(nextMessages), profileId: chatProfileId }),
+            signal: abortController.signal,
+          });
+          if (!response.ok) throw new Error(await response.text() || "章节对话失败");
+          if (!(response.headers.get("content-type") ?? "").includes("text/event-stream")) {
+            throw new Error("期望 SSE 流式响应，但服务端返回了非流式内容");
+          }
+          streamed = await consumeChatKitStream(response, nextMessages, streamOptions);
+        }
         if (abortController.signal.aborted) return;
         const content = streamed.content.trim() || "已完成本次处理，但没有返回可显示的正文回复。";
         const updated = [...nextMessages, {
@@ -316,6 +321,16 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
       } catch (error: unknown) {
         if (isCancelledError(error)) return;
         const errorText = error instanceof Error ? error.message : String(error);
+        if (error instanceof ChatKitStreamError && error.partial.items.length > 0) {
+          const updated = [...nextMessages, {
+            role: "assistant" as const,
+            content: error.partial.content.trim() || "（生成中断，未返回完整正文。）",
+            reasoning: error.partial.reasoning,
+            items: error.partial.items,
+          }];
+          setChatMessages(updated);
+          persistChapterChat(chapterNumber, updated);
+        }
         setChatError(errorText);
         setChatLiveItems(null);
         setActionResult({ ok: false, scope: "chapter-chat", error: errorText });

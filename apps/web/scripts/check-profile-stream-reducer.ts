@@ -6,6 +6,7 @@ import {
   applyProfileStreamEvent,
   createEmptyProfileStreamState,
 } from "../app/ui/chat-kit/apply-profile-stream-event";
+import { ChatKitStreamError, consumeChatKitStream } from "../app/ui/chat-kit/consume-chat-kit-stream";
 import { messagesToChatKitItems } from "../app/ui/chat-kit/messages-to-items";
 
 function assert(condition: boolean, message: string): void {
@@ -99,4 +100,27 @@ assert(
   "persisted assistant items must not replay streaming state",
 );
 
-console.log("check-profile-stream-reducer: ok");
+async function checkPartialStreamError(): Promise<void> {
+  const encoder = new TextEncoder();
+  const response = new Response(new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode('data: {"type":"message_chunk","data":{"content":"partial"}}\n\n'));
+      controller.enqueue(encoder.encode('data: {"type":"error","ok":false,"error":"upstream failed"}\n\n'));
+      controller.close();
+    },
+  }));
+  try {
+    await consumeChatKitStream(response, []);
+    throw new Error("expected stream error");
+  } catch (error) {
+    if (!(error instanceof ChatKitStreamError)) {
+      throw new Error("stream errors must preserve partial output");
+    }
+    assert(error.partial.content === "partial", "partial content must survive stream errors");
+    assert(error.partial.items.some((item) => item.kind === "assistant_text" && item.content === "partial"), "partial timeline must survive stream errors");
+  }
+}
+
+void checkPartialStreamError().then(() => {
+  console.log("check-profile-stream-reducer: ok");
+});

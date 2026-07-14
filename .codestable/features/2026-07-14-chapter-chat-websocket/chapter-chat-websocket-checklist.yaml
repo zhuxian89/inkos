@@ -1,0 +1,39 @@
+feature: 2026-07-14-chapter-chat-websocket
+created: 2026-07-14
+
+steps:
+  - action: "协议骨架：建立章节 WebSocket 会话与事件 Hub"
+    exit_signal: "任务脱离连接运行且事件带递增序号"
+    status: done
+  - action: "恢复节点：接通断线重放与安全 continue"
+    exit_signal: "afterSeq 只补缺失事件，无工具部分失败可恢复"
+    status: done
+  - action: "前端接入：章节入口使用 WebSocket 并保留 SSE 回退"
+    exit_signal: "握手失败回退，已接受会话不重复发送"
+    status: done
+  - action: "验证覆盖：补齐集成测试和类型检查"
+    exit_signal: "断线重放、continue 恢复测试及 Web/Service 类型检查通过"
+    status: done
+
+checks:
+  - item: "session.stream 使用递增 seq 并支持 afterSeq 重放"
+    source: 名词契约
+    status: pending
+  - item: "连接关闭不终止运行任务"
+    source: 编排骨架
+    status: pending
+  - item: "工具已启动后禁止自动恢复"
+    source: 流程级约束
+    status: pending
+  - item: "章节发送入口优先 WebSocket"
+    source: 挂载点
+    status: pending
+  - item: "profile/init 与旧 SSE API 保持不变"
+    source: 范围守护
+    status: pending
+  - item: "断线重连只补发缺失事件"
+    source: 验收场景
+    status: pending
+  - item: "无工具部分失败时发送 recovery 并 continue"
+    source: 验收场景
+    status: pending
