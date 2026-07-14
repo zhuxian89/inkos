@@ -559,7 +559,7 @@ export function BookChapters({ bookId, embedded = false }: Readonly<{ bookId: st
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: !isMobile && chatLogOpen ? "minmax(0,1fr) 420px" : "1fr",
+              gridTemplateColumns: !isMobile && chatLogOpen ? "minmax(0,1fr) 420px" : "minmax(0,1fr)",
               gap: 12,
               flex: 1,
               minHeight: 0,
